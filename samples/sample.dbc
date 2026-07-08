@@ -1,0 +1,97 @@
+VERSION "1.0"
+
+
+NS_ :
+	NS_DESC_
+	CM_
+	BA_DEF_
+	BA_
+	VAL_
+	CAT_DEF_
+	CAT_
+	FILTER
+	BA_DEF_DEF_
+	EV_DATA_
+	ENVVAR_DATA_
+	SGTYPE_
+	SGTYPE_VAL_
+	BA_DEF_SGTYPE_
+	BA_SGTYPE_
+	SIG_TYPE_REF_
+	VAL_TABLE_
+	SIG_GROUP_
+	SIG_VALTYPE_
+	SIGTYPE_VALTYPE_
+	BO_TX_BU_
+	BA_DEF_REL_
+	BA_REL_
+	BA_DEF_DEF_REL_
+	BU_SG_REL_
+	BU_EV_REL_
+	BU_BO_REL_
+	SG_MUL_VAL_
+
+BS_:
+
+BU_: ECU_A ECU_B TESTER
+
+
+BO_ 256 EngineData: 8 ECU_A
+ SG_ EngineSpeed : 0|16@1+ (0.25,0) [0|16383.75] "rpm"  TESTER
+ SG_ EngineTemp : 16|8@1+ (1,-40) [-40|214] "degC"  TESTER
+ SG_ ThrottlePos : 24|8@1+ (0.4,0) [0|101.2] "%"  TESTER
+
+BO_ 512 VehicleSpeed: 8 ECU_A
+ SG_ Speed : 0|12@1+ (0.1,0) [0|409.4] "km/h"  TESTER
+ SG_ Direction : 12|2@1+ (1,0) [0|2] ""  TESTER
+
+BO_ 768 DriverCommand: 8 ECU_B
+ SG_ TurnSignal : 0|4@1+ (1,0) [0|14] ""  TESTER
+ SG_ HornRequest : 4|1@1+ (1,0) [0|1] ""  TESTER
+ SG_ WiperMode : 8|8@1+ (1,0) [0|254] ""  TESTER
+
+BO_ 1024 BodyStatus: 8 ECU_B
+ SG_ DoorOpen : 0|1@1+ (1,0) [0|1] ""  TESTER
+ SG_ LightLevel : 8|16@1+ (0.01,0) [0|655.34] "lux"  TESTER
+ SG_ BatteryVoltage : 24|8@1+ (0.1,0) [0|25.4] "V"  TESTER
+
+BO_ 1280 FdSensorData: 32 ECU_A
+ SG_ Pressure : 0|16@1+ (0.1,0) [0|6553.5] "kPa"  TESTER
+ SG_ Temperature : 16|16@1+ (0.01,-273.15) [-273.15|655.34] "degC"  TESTER
+ SG_ Humidity : 32|8@1+ (0.5,0) [0|127.5] "%"  TESTER
+ SG_ VibrationX : 40|16@1+ (0.001,-32.768) [-32.768|32.767] "g"  TESTER
+
+
+
+CM_ BO_ 256 "Periodic engine data, 10 ms cycle";
+CM_ BO_ 512 "Periodic vehicle speed, 100 ms cycle";
+CM_ BO_ 768 "Event-driven driver command";
+CM_ BO_ 1024 "Periodic body status, 50 ms cycle";
+CM_ BO_ 1280 "CAN-FD sensor data, 32 bytes, 20 ms cycle";
+
+BA_DEF_ BO_  "GenMsgSendType" ENUM  "Cyclic","Event","CyclicIfActive","NoMsgSendType";
+BA_DEF_ BO_  "GenMsgCycleTime" INT 0 10000;
+BA_DEF_ SG_  "GenSigSendType" ENUM  "Cyclic","OnWrite","OnChange","IfActive","NoSigSendType";
+BA_DEF_ BO_  "VFrameFormat" ENUM  "StandardCAN","ExtendedCAN","reserved","J1939PG","reserved","reserved","reserved","reserved","reserved","reserved","reserved","reserved","reserved","reserved","StandardCAN_FD","ExtendedCAN_FD";
+
+BA_DEF_DEF_  "GenMsgSendType" "NoMsgSendType";
+BA_DEF_DEF_  "GenMsgCycleTime" 100;
+BA_DEF_DEF_  "GenSigSendType" "Cyclic";
+BA_DEF_DEF_  "VFrameFormat" "StandardCAN";
+
+BA_ "GenMsgSendType" BO_ 256 0;
+BA_ "GenMsgCycleTime" BO_ 256 10;
+BA_ "GenMsgSendType" BO_ 512 0;
+BA_ "GenMsgCycleTime" BO_ 512 100;
+BA_ "GenMsgSendType" BO_ 768 1;
+BA_ "GenMsgSendType" BO_ 1024 0;
+BA_ "GenMsgCycleTime" BO_ 1024 50;
+BA_ "GenSigSendType" SG_ 768 TurnSignal 1;
+BA_ "GenSigSendType" SG_ 768 HornRequest 2;
+BA_ "VFrameFormat" BO_ 1280 14;
+BA_ "GenMsgSendType" BO_ 1280 0;
+BA_ "GenMsgCycleTime" BO_ 1280 20;
+
+VAL_ 512 Direction 0 "Forward" 1 "Reverse" 2 "Neutral" ;
+VAL_ 768 TurnSignal 0 "Off" 1 "Left" 2 "Right" 4 "Hazard" ;
+VAL_ 768 WiperMode 0 "Off" 1 "Intermittent" 2 "Low" 3 "High" ;

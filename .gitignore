@@ -1,0 +1,20 @@
+# Python
+backend/.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.tmp/
+*.tsbuildinfo
+
+# Node / frontend build
+frontend/node_modules/
+frontend/dist/
+
+# Runtime data (not source)
+backend/uploads/
+
+# OS
+.DS_Store
+
+# Claude Code local settings
+.claude/settings.local.json

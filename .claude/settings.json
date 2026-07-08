@@ -1,0 +1,24 @@
+{
+  "permissions": {
+    "defaultMode": "acceptEdits",
+    "allow": [
+      "Read",
+      "Glob",
+      "Grep",
+      "Edit",
+      "Write",
+      "WebFetch",
+      "WebSearch",
+      "Bash"
+    ],
+    "ask": [
+      "Bash(sudo:*)",
+      "Bash(git push:*)",
+      "Bash(rm -rf:*)",
+      "Bash(brew install:*)",
+      "Bash(brew uninstall:*)",
+      "Edit(.env*)",
+      "Write(.env*)"
+    ]
+  }
+}

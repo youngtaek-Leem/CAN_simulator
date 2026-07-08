@@ -1,0 +1,67 @@
+{
+  "layout": [
+    {
+      "i": "w1783339350974",
+      "x": 0,
+      "y": 0,
+      "w": 2,
+      "h": 2,
+      "minW": 1,
+      "minH": 1,
+      "moved": false,
+      "static": false
+    },
+    {
+      "i": "w1783339353690",
+      "x": 2,
+      "y": 0,
+      "w": 2,
+      "h": 1,
+      "minW": 1,
+      "minH": 1,
+      "moved": true,
+      "static": false
+    },
+    {
+      "i": "w1783343484730",
+      "x": 0,
+      "y": 7,
+      "w": 6,
+      "h": 5,
+      "minW": 3,
+      "minH": 2,
+      "moved": false,
+      "static": false
+    }
+  ],
+  "widgets": [
+    {
+      "id": "w1783339350974",
+      "type": "button",
+      "title": "버튼",
+      "options": {},
+      "binding": {
+        "message": "BodyStatus",
+        "signal": "DoorOpen"
+      }
+    },
+    {
+      "id": "w1783339353690",
+      "type": "checkbox",
+      "title": "체크박스",
+      "options": {},
+      "binding": {
+        "message": "BodyStatus",
+        "signal": "DoorOpen"
+      }
+    },
+    {
+      "id": "w1783343484730",
+      "type": "canMessageDisplay",
+      "title": "CAN 메시지 표시창",
+      "options": {
+        "viewMode": "trace"
+      }
+    }
+  ]
+}

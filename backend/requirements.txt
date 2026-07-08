@@ -1,0 +1,7 @@
+fastapi>=0.115
+uvicorn[standard]>=0.30
+python-can>=4.4
+cantools>=39.4
+python-multipart>=0.0.9
+pytest>=8.0
+httpx>=0.27
