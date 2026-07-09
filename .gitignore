@@ -8,7 +8,8 @@ __pycache__/
 
 # Node / frontend build
 frontend/node_modules/
-frontend/dist/
+# frontend/dist/ is committed intentionally: run_windows.bat serves it
+# directly, so a fresh `git clone` on a target PC needs no Node.js install.
 
 # Runtime data (not source)
 backend/uploads/
