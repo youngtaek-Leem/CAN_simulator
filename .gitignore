@@ -14,6 +14,11 @@ frontend/node_modules/
 # Runtime data (not source)
 backend/uploads/
 
+# Real vehicle/OEM DBC files (proprietary, not for the public repo) —
+# samples/sample.dbc stays tracked, it's a small synthetic file used by tests.
+samples/AMP_FD_260501.dbc
+samples/AMP_HS_260201.dbc
+
 # OS
 .DS_Store
 

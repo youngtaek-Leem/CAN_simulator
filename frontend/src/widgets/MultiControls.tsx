@@ -8,6 +8,8 @@ import { useState } from 'react';
 import { createPortal } from 'react-dom';
 import { api } from '../api/client';
 import { useApp } from '../store/appContext';
+import { canStore } from '../store/canStore';
+import { MessageFilter, MessageOptions, type MessageFilterMode } from './MessageOptions';
 import type { MultiCell, WidgetConfig } from '../types';
 
 function getGrid(config: WidgetConfig): { rows: number; cols: number; cells: MultiCell[] } {
@@ -61,6 +63,12 @@ export function MultiButtonWidget({ config }: { config: WidgetConfig }) {
                 disabled={!cell.binding?.signal}
                 title={cell.binding?.signal ? `${cell.binding.message}.${cell.binding.signal} = ${cell.value ?? 1}` : '신호 미할당'}
                 onClick={() => send(cell)}
+                onKeyDown={(e) => {
+                  if (e.key === ' ' || e.key === 'Enter') {
+                    e.preventDefault();
+                    send(cell);
+                  }
+                }}
               >
                 {label}
               </button>
@@ -130,6 +138,12 @@ export function MultiCheckboxWidget({ config }: { config: WidgetConfig }) {
                   checked={checkedState[i] ?? false}
                   disabled={!cell.binding?.signal}
                   onChange={(e) => toggle(i, cell, e.target.checked)}
+                  onKeyDown={(e) => {
+                    if (e.key === ' ') {
+                      e.preventDefault();
+                      toggle(i, cell, !(checkedState[i] ?? false));
+                    }
+                  }}
                 />
                 {label}
               </label>
@@ -176,6 +190,7 @@ function CellEditModal({
   const { dbc } = useApp();
   const [draft, setDraft] = useState<MultiCell>({ ...cell });
   const message = dbc.messages?.find((m) => m.name === draft.binding?.message);
+  const [msgFilter, setMsgFilter] = useState<MessageFilterMode>('all');
 
   return createPortal(
     <div className="modal-backdrop" onClick={onClose}>
@@ -193,24 +208,28 @@ function CellEditModal({
           <>
             <label>
               CAN 메시지
-              <select
-                value={draft.binding?.message ?? ''}
-                onChange={(e) =>
-                  setDraft({
-                    ...draft,
-                    binding: e.target.value
-                      ? { message: e.target.value, signal: '' }
-                      : undefined,
-                  })
-                }
-              >
-                <option value="">— 선택 —</option>
-                {dbc.messages!.map((m) => (
-                  <option key={m.name} value={m.name}>
-                    {m.name} (0x{m.frame_id.toString(16).toUpperCase()})
-                  </option>
-                ))}
-              </select>
+              <span className="select-with-filter">
+                <select
+                  value={draft.binding?.message ?? ''}
+                  onChange={(e) =>
+                    setDraft({
+                      ...draft,
+                      binding: e.target.value
+                        ? { message: e.target.value, signal: '' }
+                        : undefined,
+                    })
+                  }
+                >
+                  <option value="">— 선택 —</option>
+                  <MessageOptions
+                    dbc={dbc}
+                    rxNode={canStore.getRxNode()}
+                    filter={msgFilter}
+                    labelFor={(m) => `${m.name} (0x${m.frame_id.toString(16).toUpperCase()})`}
+                  />
+                </select>
+                <MessageFilter value={msgFilter} onChange={setMsgFilter} />
+              </span>
             </label>
             {message && (
               <label>

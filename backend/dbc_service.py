@@ -92,6 +92,7 @@ class DbcService:
                 {
                     "name": m.name,
                     "frame_id": m.frame_id,
+                    "senders": list(m.senders),
                     "is_extended": m.is_extended_frame,
                     "is_fd": m.is_fd,
                     "length": m.length,
@@ -120,7 +121,12 @@ class DbcService:
                     ],
                 }
             )
-        return {"loaded": True, "filename": self.filename, "messages": messages}
+        return {
+            "loaded": True,
+            "filename": self.filename,
+            "nodes": [n.name for n in self.db.nodes],
+            "messages": messages,
+        }
 
     # ---- encode / decode -----------------------------------------------
 

@@ -12,7 +12,7 @@ def setup_stack(channel: str, fd: bool = False):
     cm = CanManager()
     cm.connect("virtual", channel, receive_own_messages=False, fd=fd)
     dbc = DbcService()
-    dbc.load_string((SAMPLES_DIR / "sample.dbc").read_text(), "sample.dbc")
+    dbc.load_string((SAMPLES_DIR / "sample.dbc").read_text(encoding="utf-8"), "sample.dbc")
     sched = TxScheduler(cm, dbc)
     peer = can.Bus(interface="virtual", channel=channel)
     return cm, dbc, sched, peer

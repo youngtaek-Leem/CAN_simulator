@@ -17,6 +17,7 @@ export interface DbcSignal {
 export interface DbcMessage {
   name: string;
   frame_id: number;
+  senders: string[]; // DBC node(s) that transmit this message
   is_extended: boolean;
   is_fd: boolean;
   length: number;
@@ -29,6 +30,7 @@ export interface DbcMessage {
 export interface DbcSummary {
   loaded: boolean;
   filename?: string;
+  nodes?: string[];
   messages?: DbcMessage[];
 }
 
@@ -89,7 +91,8 @@ export type WidgetType =
   | 'replayBox'
   | 'multiButton'
   | 'multiCheckbox'
-  | 'isotpTx';
+  | 'isotpTx'
+  | 'signalGraph';
 
 export interface SignalBinding {
   message: string;

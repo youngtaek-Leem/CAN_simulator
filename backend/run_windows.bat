@@ -1,4 +1,5 @@
 @echo off
+chcp 65001 >nul
 rem CAN Simulator backend launcher (Windows)
 rem First run: creates the venv and installs dependencies automatically.
 cd /d %~dp0

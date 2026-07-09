@@ -402,12 +402,14 @@ def get_layout(name: str):
     path = _layout_path(name)
     if not path.exists():
         raise HTTPException(status_code=404, detail="layout not found")
-    return json.loads(path.read_text())
+    return json.loads(path.read_text(encoding="utf-8"))
 
 
 @app.post("/api/layouts/{name}")
 async def save_layout(name: str, body: dict):
-    _layout_path(name).write_text(json.dumps(body, ensure_ascii=False, indent=2))
+    _layout_path(name).write_text(
+        json.dumps(body, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
     return {"saved": name}
 
 

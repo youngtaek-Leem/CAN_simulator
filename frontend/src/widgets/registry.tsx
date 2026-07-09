@@ -6,6 +6,7 @@ import { MultiButtonWidget, MultiCheckboxWidget } from './MultiControls';
 import { TxBox } from './TxBox';
 import { ReplayBox } from './ReplayBox';
 import { IsoTpBox } from './IsoTpBox';
+import { GraphWidget } from './GraphWidget';
 
 interface WidgetMeta {
   label: string;
@@ -68,5 +69,10 @@ export const WIDGET_REGISTRY: Record<WidgetType, WidgetMeta> = {
     label: 'ISO-TP 메시지 전송',
     component: IsoTpBox,
     defaultSize: { w: 6, h: 4, minW: 1, minH: 2 },
+  },
+  signalGraph: {
+    label: 'CAN 신호 그래프',
+    component: GraphWidget,
+    defaultSize: { w: 7, h: 5, minW: 1, minH: 2 },
   },
 };

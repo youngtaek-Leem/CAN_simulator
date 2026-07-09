@@ -9,13 +9,25 @@ import { useSyncExternalStore } from 'react';
 import type { BackendStatus, FrameEntry, RxFrame } from '../types';
 
 const FPS_KEY = 'can-sim.ui-fps';
+const RX_NODE_KEY = 'can-sim.rx-node';
 const TRACE_WINDOW_S = 60; // keep the last minute of raw frames for pause/scroll
 const TRACE_CAP = 30000; // hard memory cap for the trace buffer
+const HISTORY_CAP = 10000; // points kept per watched signal (graph widgets)
+
+export interface HistoryPoint {
+  ts: number; // raw backend timestamp (seconds)
+  value: number;
+}
 
 class CanStore {
   frames = new Map<number, FrameEntry>();
   signals = new Map<string, number | string>(); // "Message.Signal" -> value
   trace: RxFrame[] = []; // chronological raw frames (last TRACE_WINDOW_S seconds)
+  // Per-signal time series, populated only for signals with an active graph
+  // widget watching them (see watchSignal/unwatchSignal) so history isn't
+  // recorded for every DBC signal, just the ones actually being charted.
+  signalHistory = new Map<string, HistoryPoint[]>();
+  private signalWatchers = new Map<string, number>();
   timeBase: number | null = null; // ts of the first frame after (re)start = 0 ms
   status: BackendStatus | null = null;
   wsConnected = false;
@@ -25,10 +37,12 @@ class CanStore {
   private dirty = false;
   private lastEmit = 0;
   private fps: number;
+  private rxNode: string;
 
   constructor() {
     const saved = Number(localStorage.getItem(FPS_KEY));
     this.fps = saved >= 10 && saved <= 60 ? saved : 30;
+    this.rxNode = localStorage.getItem(RX_NODE_KEY) ?? '';
     requestAnimationFrame(this.tick);
   }
 
@@ -40,6 +54,36 @@ class CanStore {
     this.fps = Math.min(60, Math.max(10, fps));
     localStorage.setItem(FPS_KEY, String(this.fps));
     this.markDirty();
+  }
+
+  /** Real DUT node on the bus (e.g. the hardware ECU under test). Messages
+   * that this node sends are what the simulator receives ("RX"); every
+   * other message is something the simulator must transmit ("TX") to stand
+   * in for the rest of the bus. Empty = no split (flat list). */
+  getRxNode() {
+    return this.rxNode;
+  }
+
+  setRxNode(node: string) {
+    this.rxNode = node;
+    localStorage.setItem(RX_NODE_KEY, node);
+    this.markDirty();
+  }
+
+  /** Start recording a time series for "Message.Signal" (ref-counted). */
+  watchSignal(key: string) {
+    this.signalWatchers.set(key, (this.signalWatchers.get(key) ?? 0) + 1);
+    if (!this.signalHistory.has(key)) this.signalHistory.set(key, []);
+  }
+
+  unwatchSignal(key: string) {
+    const n = (this.signalWatchers.get(key) ?? 1) - 1;
+    if (n <= 0) {
+      this.signalWatchers.delete(key);
+      this.signalHistory.delete(key);
+    } else {
+      this.signalWatchers.set(key, n);
+    }
   }
 
   ingestFrames(rx: RxFrame[]) {
@@ -55,7 +99,13 @@ class CanStore {
       });
       if (f.decoded) {
         for (const [sig, value] of Object.entries(f.decoded.signals)) {
-          this.signals.set(`${f.decoded.name}.${sig}`, value);
+          const key = `${f.decoded.name}.${sig}`;
+          this.signals.set(key, value);
+          if (typeof value === 'number' && this.signalWatchers.has(key)) {
+            const points = this.signalHistory.get(key)!;
+            points.push({ ts: f.ts, value });
+            if (points.length > HISTORY_CAP) points.splice(0, points.length - HISTORY_CAP);
+          }
         }
       }
       this.trace.push(f);
@@ -79,6 +129,7 @@ class CanStore {
   resetTimeBase() {
     this.timeBase = null;
     this.trace = [];
+    for (const key of this.signalHistory.keys()) this.signalHistory.set(key, []);
     this.markDirty();
   }
 

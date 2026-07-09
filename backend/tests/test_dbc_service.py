@@ -5,7 +5,7 @@ from dbc_service import DbcService
 
 def make_service() -> DbcService:
     svc = DbcService()
-    svc.load_string((SAMPLES_DIR / "sample.dbc").read_text(), "sample.dbc")
+    svc.load_string((SAMPLES_DIR / "sample.dbc").read_text(encoding="utf-8"), "sample.dbc")
     return svc
 
 
@@ -21,10 +21,12 @@ def test_summary_structure():
         "BodyStatus",
         "FdSensorData",
     }
+    assert set(summary["nodes"]) == {"ECU_A", "ECU_B", "TESTER"}
     engine = next(m for m in summary["messages"] if m["name"] == "EngineData")
     assert engine["cycle_time_ms"] == 10
     assert engine["send_type"] == "Cyclic"
     assert engine["is_fd"] is False
+    assert engine["senders"] == ["ECU_A"]
     turn = next(
         s
         for m in summary["messages"]

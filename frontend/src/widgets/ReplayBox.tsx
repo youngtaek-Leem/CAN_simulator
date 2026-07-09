@@ -7,8 +7,9 @@ import { useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { api } from '../api/client';
 import { canStore, useCanVersion } from '../store/canStore';
-import { useApp } from '../store/appContext';
-import type { WidgetConfig } from '../types';
+import { groupedMessages, useApp } from '../store/appContext';
+import { MessageFilter, type MessageFilterMode } from './MessageOptions';
+import type { DbcMessage, WidgetConfig } from '../types';
 
 export function ReplayBox(_: { config: WidgetConfig }) {
   useCanVersion();
@@ -140,7 +141,11 @@ function MessagePicker({
 }) {
   const { dbc } = useApp();
   const [draft, setDraft] = useState<Set<number>>(new Set(selectedIds));
-  const messages = dbc.messages ?? [];
+  const [msgFilter, setMsgFilter] = useState<MessageFilterMode>('all');
+  const groups = groupedMessages(dbc, canStore.getRxNode());
+  const allMessages = [...groups.tx, ...groups.rx];
+  const visibleMessages =
+    msgFilter === 'tx' ? groups.tx : msgFilter === 'rx' ? groups.rx : allMessages;
 
   const toggle = (id: number) =>
     setDraft((d) => {
@@ -150,6 +155,18 @@ function MessagePicker({
       return next;
     });
 
+  const renderItem = (m: DbcMessage) => (
+    <label key={m.frame_id} className="picker-item">
+      <input
+        type="checkbox"
+        checked={draft.has(m.frame_id)}
+        onChange={() => toggle(m.frame_id)}
+      />
+      <span className="mono">0x{m.frame_id.toString(16).toUpperCase().padStart(3, '0')}</span>
+      <span>{m.name}</span>
+    </label>
+  );
+
   // portal to <body> so the picker always renders above every widget
   return createPortal(
     <div className="modal-backdrop" onClick={onClose}>
@@ -158,18 +175,20 @@ function MessagePicker({
         <p className="hint">
           Pass 필터: 선택한 메시지만 재생 / Stop 필터: 선택한 메시지 제외
         </p>
+        <div className="replay-row">
+          <MessageFilter value={msgFilter} onChange={setMsgFilter} />
+        </div>
         <div className="picker-list">
-          {messages.map((m) => (
-            <label key={m.frame_id} className="picker-item">
-              <input
-                type="checkbox"
-                checked={draft.has(m.frame_id)}
-                onChange={() => toggle(m.frame_id)}
-              />
-              <span className="mono">0x{m.frame_id.toString(16).toUpperCase().padStart(3, '0')}</span>
-              <span>{m.name}</span>
-            </label>
-          ))}
+          {msgFilter === 'all' && groups.grouped ? (
+            <>
+              <div className="picker-group-label">TX 메시지</div>
+              {groups.tx.map(renderItem)}
+              <div className="picker-group-label">RX 메시지</div>
+              {groups.rx.map(renderItem)}
+            </>
+          ) : (
+            visibleMessages.map(renderItem)
+          )}
         </div>
         <div className="modal-buttons">
           <button className="small-btn" onClick={() => setDraft(new Set())}>
@@ -177,7 +196,7 @@ function MessagePicker({
           </button>
           <button
             className="small-btn"
-            onClick={() => setDraft(new Set(messages.map((m) => m.frame_id)))}
+            onClick={() => setDraft(new Set(visibleMessages.map((m) => m.frame_id)))}
           >
             전체 선택
           </button>

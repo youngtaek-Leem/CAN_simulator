@@ -6,6 +6,8 @@ import { useState, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { api } from '../api/client';
 import { findSignal, useApp } from '../store/appContext';
+import { canStore } from '../store/canStore';
+import { MessageFilter, MessageOptions, type MessageFilterMode } from './MessageOptions';
 import type { WidgetConfig } from '../types';
 
 const BINDABLE = new Set(['textDisplay', 'button', 'checkbox', 'dropdown', 'slider']);
@@ -43,6 +45,7 @@ function ConfigModal({ config, onClose }: { config: WidgetConfig; onClose: () =>
   const bindable = BINDABLE.has(config.type);
   const message = dbc.messages?.find((m) => m.name === draft.binding?.message);
   const bound = findSignal(dbc, draft.binding);
+  const [msgFilter, setMsgFilter] = useState<MessageFilterMode>('all');
 
   const setOption = (key: string, value: unknown) =>
     setDraft((d) => ({ ...d, options: { ...d.options, [key]: value } }));
@@ -73,24 +76,28 @@ function ConfigModal({ config, onClose }: { config: WidgetConfig; onClose: () =>
               <>
                 <label>
                   CAN 메시지
-                  <select
-                    value={draft.binding?.message ?? ''}
-                    onChange={(e) =>
-                      setDraft({
-                        ...draft,
-                        binding: e.target.value
-                          ? { message: e.target.value, signal: '' }
-                          : undefined,
-                      })
-                    }
-                  >
-                    <option value="">— 선택 —</option>
-                    {dbc.messages!.map((m) => (
-                      <option key={m.name} value={m.name}>
-                        {m.name} (0x{m.frame_id.toString(16).toUpperCase()})
-                      </option>
-                    ))}
-                  </select>
+                  <span className="select-with-filter">
+                    <select
+                      value={draft.binding?.message ?? ''}
+                      onChange={(e) =>
+                        setDraft({
+                          ...draft,
+                          binding: e.target.value
+                            ? { message: e.target.value, signal: '' }
+                            : undefined,
+                        })
+                      }
+                    >
+                      <option value="">— 선택 —</option>
+                      <MessageOptions
+                        dbc={dbc}
+                        rxNode={canStore.getRxNode()}
+                        filter={msgFilter}
+                        labelFor={(m) => `${m.name} (0x${m.frame_id.toString(16).toUpperCase()})`}
+                      />
+                    </select>
+                    <MessageFilter value={msgFilter} onChange={setMsgFilter} />
+                  </span>
                 </label>
                 {message && (
                   <label>

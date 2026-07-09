@@ -1,66 +1,121 @@
 {
   "layout": [
     {
-      "i": "w1783339350974",
+      "i": "w1783604744882",
       "x": 0,
       "y": 0,
-      "w": 2,
-      "h": 2,
-      "minW": 1,
-      "minH": 1,
-      "moved": false,
-      "static": false
-    },
-    {
-      "i": "w1783339353690",
-      "x": 2,
-      "y": 0,
-      "w": 2,
-      "h": 1,
-      "minW": 1,
-      "minH": 1,
-      "moved": true,
-      "static": false
-    },
-    {
-      "i": "w1783343484730",
-      "x": 0,
-      "y": 7,
       "w": 6,
       "h": 5,
       "minW": 3,
       "minH": 2,
       "moved": false,
       "static": false
+    },
+    {
+      "i": "w1783604748143",
+      "x": 6,
+      "y": 0,
+      "w": 4,
+      "h": 2,
+      "minW": 2,
+      "minH": 1,
+      "moved": true,
+      "static": false
+    },
+    {
+      "i": "w1783604866883",
+      "x": 7,
+      "y": 5,
+      "w": 2,
+      "h": 2,
+      "minW": 1,
+      "minH": 1,
+      "moved": true,
+      "static": false
+    },
+    {
+      "i": "w1783604893846",
+      "x": 0,
+      "y": 5,
+      "w": 7,
+      "h": 5,
+      "minW": 1,
+      "minH": 2,
+      "moved": true,
+      "static": false
+    },
+    {
+      "i": "w1783605030442",
+      "x": 6,
+      "y": 3,
+      "w": 4,
+      "h": 2,
+      "minW": 2,
+      "minH": 1,
+      "moved": true,
+      "static": false
     }
   ],
   "widgets": [
     {
-      "id": "w1783339350974",
-      "type": "button",
-      "title": "버튼",
-      "options": {},
-      "binding": {
-        "message": "BodyStatus",
-        "signal": "DoorOpen"
-      }
-    },
-    {
-      "id": "w1783339353690",
-      "type": "checkbox",
-      "title": "체크박스",
-      "options": {},
-      "binding": {
-        "message": "BodyStatus",
-        "signal": "DoorOpen"
-      }
-    },
-    {
-      "id": "w1783343484730",
+      "id": "w1783604744882",
       "type": "canMessageDisplay",
       "title": "CAN 메시지 표시창",
       "options": {
         "viewMode": "trace"
+      }
+    },
+    {
+      "id": "w1783604748143",
+      "type": "slider",
+      "title": "슬라이더",
+      "options": {
+        "max": 75
+      },
+      "binding": {
+        "message": "HU_AMP_04_00ms",
+        "signal": "AMP_MainVolumeSet"
+      }
+    },
+    {
+      "id": "w1783604866883",
+      "type": "button",
+      "title": "버튼",
+      "options": {},
+      "binding": {
+        "message": "AMP_HU_01_00ms",
+        "signal": "AMP_NaviVoice_PriorityState"
+      }
+    },
+    {
+      "id": "w1783604893846",
+      "type": "signalGraph",
+      "title": "CAN 신호 그래프",
+      "options": {
+        "series": [
+          {
+            "message": "HU_AMP_04_00ms",
+            "signal": "AMP_MainVolumeSet",
+            "color": "#3b82f6"
+          },
+          {
+            "message": "HU_AMP_04_00ms",
+            "signal": "AMP_VRTTSvolumeStep",
+            "color": "#f87171"
+          }
+        ]
+      }
+    },
+    {
+      "id": "w1783605030442",
+      "type": "slider",
+      "title": "슬라이더",
+      "options": {
+        "max": 75
+      },
+      "binding": {
+        "message": "HU_AMP_04_00ms",
+        "signal": "AMP_VRTTSvolumeStep"
       }
     }
   ]

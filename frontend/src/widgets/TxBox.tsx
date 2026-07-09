@@ -7,6 +7,7 @@ import { useState } from 'react';
 import { api } from '../api/client';
 import { canStore, useCanVersion } from '../store/canStore';
 import { useApp } from '../store/appContext';
+import { MessageFilter, MessageOptions, type MessageFilterMode } from './MessageOptions';
 import type { TxRow, WidgetConfig } from '../types';
 
 const MAX_ROWS = 20;
@@ -17,6 +18,7 @@ export function TxBox({ config }: { config: WidgetConfig }) {
   const rows = (config.options.rows as TxRow[] | undefined) ?? [];
   const [error, setError] = useState<string | null>(null);
   const [applied, setApplied] = useState(false);
+  const [msgFilter, setMsgFilter] = useState<MessageFilterMode>('all');
   const txStatus = canStore.status?.tx;
 
   const setRows = (next: TxRow[]) => {
@@ -86,6 +88,7 @@ export function TxBox({ config }: { config: WidgetConfig }) {
         <button className="small-btn" onClick={addRow} disabled={rows.length >= MAX_ROWS}>
           + 메시지 추가 ({rows.length}/{MAX_ROWS})
         </button>
+        <MessageFilter value={msgFilter} onChange={setMsgFilter} />
         <span className="spacer" />
         <button
           className={`small-btn ${txStatus?.running ? '' : 'primary'}`}
@@ -134,11 +137,12 @@ export function TxBox({ config }: { config: WidgetConfig }) {
                     }
                   >
                     <option value="">raw ID</option>
-                    {dbc.messages!.map((m) => (
-                      <option key={m.name} value={m.name}>
-                        {m.name}
-                      </option>
-                    ))}
+                    <MessageOptions
+                      dbc={dbc}
+                      rxNode={canStore.getRxNode()}
+                      filter={msgFilter}
+                      labelFor={(m) => m.name}
+                    />
                   </select>
                 ) : null}
                 {!r.messageName && (

@@ -357,6 +357,20 @@ function TopBar(props: TopBarProps) {
           />
         </label>
         <span className="hint">{props.dbc.loaded ? props.dbc.filename : 'DBC 없음'}</span>
+        {props.dbc.loaded && props.dbc.nodes && props.dbc.nodes.length > 0 && (
+          <select
+            value={canStore.getRxNode()}
+            onChange={(e) => canStore.setRxNode(e.target.value)}
+            title="실제 DUT(실기) 노드를 선택하세요. 이 노드가 보내는 메시지는 신호 선택 목록에서 RX(시뮬레이터가 수신)로, 나머지는 TX(시뮬레이터가 대신 송신)로 분류됩니다"
+          >
+            <option value="">RX 노드 미설정</option>
+            {props.dbc.nodes.map((n) => (
+              <option key={n} value={n}>
+                RX 노드: {n}
+              </option>
+            ))}
+          </select>
+        )}
       </span>
 
       <span className="group">

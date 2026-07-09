@@ -350,6 +350,22 @@ td.empty {
   color: #fff;
 }
 
+.msg-filter {
+  flex-shrink: 0;
+}
+
+/* CAN 메시지 select + TX/RX/전체 filter buttons, side by side */
+.select-with-filter {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.select-with-filter select {
+  flex: 1;
+  min-width: 0;
+}
+
 /* ---- trace (scroll) view ---- */
 
 .msg-display {
@@ -558,6 +574,88 @@ td.empty {
 
 .multi-cell-edit:hover {
   opacity: 1;
+}
+
+/* ---- signal graph widget ---- */
+
+.graph-widget {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  gap: 4px;
+}
+
+.graph-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.graph-swatch {
+  width: 9px;
+  height: 9px;
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+
+/* vertical stack of independent per-signal mini-charts. Only the bottom-most
+   chart draws X-axis (time) tick labels since every chart shares the same
+   time axis. */
+.graph-charts-col {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  overflow-y: auto;
+}
+
+.graph-chart {
+  flex: 1 1 120px;
+  min-height: 90px;
+  display: flex;
+  flex-direction: column;
+  border: 1px solid #363b47;
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.graph-chart-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 6px;
+  font-size: 11px;
+  background: #23262e;
+  border-bottom: 1px solid #363b47;
+}
+
+.graph-chart-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.graph-chart-header .icon-btn {
+  padding: 0 2px;
+}
+
+.graph-canvas-wrap {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+}
+
+.graph-canvas-wrap canvas {
+  position: absolute;
+  inset: 0;
+  cursor: grab;
+  touch-action: none;
+}
+
+.graph-canvas-wrap canvas:active {
+  cursor: grabbing;
 }
 
 /* ---- Windows-style form controls (button/checkbox/dropdown/slider widgets) ---- */
@@ -896,4 +994,12 @@ td.empty {
 
 .picker-item:hover {
   background: var(--panel-2);
+}
+
+.picker-group-label {
+  padding: 6px 6px 2px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-dim);
+  text-transform: uppercase;
 }
