@@ -35,10 +35,10 @@
     },
     {
       "i": "w1783604893846",
-      "x": 0,
-      "y": 5,
-      "w": 7,
-      "h": 5,
+      "x": 1,
+      "y": 1,
+      "w": 10,
+      "h": 7,
       "minW": 1,
       "minH": 2,
       "moved": true,
@@ -48,6 +48,17 @@
       "i": "w1783605030442",
       "x": 6,
       "y": 3,
+      "w": 4,
+      "h": 2,
+      "minW": 2,
+      "minH": 1,
+      "moved": true,
+      "static": false
+    },
+    {
+      "i": "w1783638442860",
+      "x": 6,
+      "y": 1,
       "w": 4,
       "h": 2,
       "minW": 2,
@@ -73,18 +84,20 @@
         "max": 75
       },
       "binding": {
-        "message": "HU_AMP_04_00ms",
-        "signal": "AMP_MainVolumeSet"
+        "message": "VCU_03_100ms",
+        "signal": "VCU_VgsSftMod"
       }
     },
     {
       "id": "w1783604866883",
       "type": "button",
       "title": "버튼",
-      "options": {},
+      "options": {
+        "value": 2
+      },
       "binding": {
-        "message": "AMP_HU_01_00ms",
-        "signal": "AMP_NaviVoice_PriorityState"
+        "message": "HU_AMP_04_00ms",
+        "signal": "AMP_FadeSet"
       }
     },
     {
@@ -102,6 +115,11 @@
             "message": "HU_AMP_04_00ms",
             "signal": "AMP_VRTTSvolumeStep",
             "color": "#f87171"
+          },
+          {
+            "message": "CLU_AMP_01_200ms",
+            "signal": "Warn_Sound_FCW",
+            "color": "#34d399"
           }
         ]
       }
@@ -116,6 +134,18 @@
       "binding": {
         "message": "HU_AMP_04_00ms",
         "signal": "AMP_VRTTSvolumeStep"
+      }
+    },
+    {
+      "id": "w1783638442860",
+      "type": "slider",
+      "title": "슬라이더",
+      "options": {
+        "max": 7
+      },
+      "binding": {
+        "message": "CLU_AMP_01_200ms",
+        "signal": "Warn_Sound_FCW"
       }
     }
   ]

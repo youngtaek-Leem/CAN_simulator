@@ -36,6 +36,7 @@ def test_summary_structure():
     )
     assert turn["invalid_raw"] == 0xF
     assert turn["choices"][1] == "Left"
+    assert turn["is_signed"] is False
     fd = next(m for m in summary["messages"] if m["name"] == "FdSensorData")
     assert fd["is_fd"] is True
     assert fd["length"] == 32

@@ -4,6 +4,7 @@ export interface DbcSignal {
   name: string;
   start: number;
   length: number;
+  is_signed: boolean;
   scale: number;
   offset: number;
   minimum: number | null;

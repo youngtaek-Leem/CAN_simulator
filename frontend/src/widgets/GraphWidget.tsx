@@ -51,6 +51,11 @@ const PALETTE = [
 const MARGIN = { left: 52, right: 10, top: 8, bottom: 22 };
 const ZOOM_STEP = 1.15;
 const DOT_RADIUS = 2.5;
+const DEFAULT_X_WINDOW_MS = 10_000;
+const MIN_X_WINDOW_MS = 500;
+const MAX_X_WINDOW_MS = 300_000;
+const BUTTON_ZOOM_FACTOR = 1.5;
+const LIVE_TICK_MS = 200; // redraw cadence so the rolling window keeps scrolling with no new data
 
 function getSeries(config: WidgetConfig): GraphSeries[] {
   return (config.options.series as GraphSeries[] | undefined) ?? [];
@@ -76,8 +81,27 @@ function fmt(v: number): string {
   return v.toFixed(2);
 }
 
+/** X-axis rolling window size for display next to the +/- zoom buttons. */
+function fmtWindow(ms: number): string {
+  return ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(1)}s`;
+}
+
 function orFallback(x: number | null, fallback: number): number {
   return x === null ? fallback : x;
+}
+
+/** Points inside [xMin, xMax], plus one point just outside each edge (if any)
+ * so the connecting line draws smoothly up to the clip boundary instead of
+ * visibly starting/ending flat at the first/last in-range sample. */
+function visibleWithPadding(points: HistoryPoint[], xMin: number, xMax: number): HistoryPoint[] {
+  let start = points.findIndex((p) => canStore.relMs(p.ts) >= xMin);
+  if (start === -1) return [];
+  if (start > 0) start -= 1;
+  let end = points.length - 1;
+  while (end >= 0 && canStore.relMs(points[end].ts) > xMax) end -= 1;
+  if (end < points.length - 1) end += 1;
+  if (start > end) return [];
+  return points.slice(start, end + 1);
 }
 
 export function GraphWidget({ config }: { config: WidgetConfig }) {
@@ -85,6 +109,9 @@ export function GraphWidget({ config }: { config: WidgetConfig }) {
   const { editMode, updateWidget } = useApp();
   const series = getSeries(config);
   const [showAdd, setShowAdd] = useState(false);
+  // X-axis rolling window size, shared by every mini-chart in this widget so
+  // the top +/- buttons zoom all of them identically.
+  const [xWindowMs, setXWindowMs] = useState(DEFAULT_X_WINDOW_MS);
 
   const addSeries = (s: GraphSeries) => {
     updateWidget({ ...config, options: { ...config.options, series: [...series, s] } });
@@ -96,12 +123,22 @@ export function GraphWidget({ config }: { config: WidgetConfig }) {
       options: { ...config.options, series: series.filter((s) => seriesKey(s) !== key) },
     });
   };
+  const zoomXWindow = (factor: number) => {
+    setXWindowMs((w) => Math.min(MAX_X_WINDOW_MS, Math.max(MIN_X_WINDOW_MS, w * factor)));
+  };
 
   return (
     <div className="graph-widget">
       <div className="graph-toolbar">
         <span className="hint">{series.length > 0 ? `${series.length}개 신호` : '신호를 추가하세요'}</span>
         <span className="spacer" />
+        <span className="graph-xwindow mono">{fmtWindow(xWindowMs)}</span>
+        <button className="icon-btn" title="X축 축소 (시간 범위 넓게)" onClick={() => zoomXWindow(BUTTON_ZOOM_FACTOR)}>
+          −
+        </button>
+        <button className="icon-btn" title="X축 확대 (시간 범위 좁게)" onClick={() => zoomXWindow(1 / BUTTON_ZOOM_FACTOR)}>
+          +
+        </button>
         {editMode && (
           <button className="small-btn" onClick={() => setShowAdd(true)}>
             + 신호 추가
@@ -115,6 +152,7 @@ export function GraphWidget({ config }: { config: WidgetConfig }) {
             series={s}
             editMode={editMode}
             showXAxis={i === series.length - 1}
+            xWindowMs={xWindowMs}
             onRemove={() => removeSeries(seriesKey(s))}
           />
         ))}
@@ -130,11 +168,13 @@ function SignalChart({
   series,
   editMode,
   showXAxis,
+  xWindowMs,
   onRemove,
 }: {
   series: GraphSeries;
   editMode: boolean;
   showXAxis: boolean;
+  xWindowMs: number;
   onRemove: () => void;
 }) {
   useCanVersion();
@@ -172,6 +212,15 @@ function SignalChart({
     return () => ro.disconnect();
   }, []);
 
+  // keep the rolling window scrolling forward even when this signal (or the
+  // whole bus) goes quiet for a while, instead of freezing on the last sample
+  useEffect(() => {
+    const id = setInterval(() => {
+      if (viewRef.current.xMin === null) redraw();
+    }, LIVE_TICK_MS);
+    return () => clearInterval(id);
+  }, []);
+
   const resetView = () => {
     viewRef.current = { xMin: null, xMax: null, yMin: null, yMax: null };
     redraw();
@@ -202,28 +251,27 @@ function SignalChart({
 
     const points = canStore.signalHistory.get(key) ?? [];
 
-    // Auto-fit range from currently visible data when the user hasn't zoomed.
+    // X: live mode rolls a fixed-size window forward with "now"; once the
+    // user wheel-zooms/drags, xMin/xMax are frozen to a specific range.
     let xMin = viewRef.current.xMin;
     let xMax = viewRef.current.xMax;
+    if (xMin === null || xMax === null) {
+      xMax = canStore.nowMs();
+      xMin = xMax - xWindowMs;
+    }
+
+    // Y auto-fit only looks at samples inside the visible X window, not the
+    // whole history, so old outliers don't flatten what's on screen now.
+    const visible = points.filter((p) => {
+      const x = canStore.relMs(p.ts);
+      return x >= xMin! && x <= xMax!;
+    });
+
     let yMin = viewRef.current.yMin;
     let yMax = viewRef.current.yMax;
-    if (xMin === null || xMax === null) {
-      if (points.length > 0) {
-        const xs = points.map((p) => canStore.relMs(p.ts));
-        xMin = Math.min(...xs);
-        xMax = Math.max(...xs);
-        if (xMin === xMax) {
-          xMin -= 1000;
-          xMax += 1000;
-        }
-      } else {
-        xMin = 0;
-        xMax = 1000;
-      }
-    }
     if (yMin === null || yMax === null) {
-      if (points.length > 0) {
-        const ys = points.map((p) => p.value);
+      if (visible.length > 0) {
+        const ys = visible.map((p) => p.value);
         const lo = Math.min(...ys);
         const hi = Math.max(...ys);
         const pad = (hi - lo) * 0.1 || Math.abs(hi) * 0.1 || 1;
@@ -261,7 +309,8 @@ function SignalChart({
     ctx.strokeStyle = '#4b5160';
     ctx.strokeRect(plotLeft, plotTop, plotW, plotH);
 
-    if (points.length > 0) {
+    const drawPoints = visibleWithPadding(points, xMin, xMax);
+    if (drawPoints.length > 0) {
       ctx.save();
       ctx.beginPath();
       ctx.rect(plotLeft, plotTop, plotW, plotH);
@@ -271,14 +320,14 @@ function SignalChart({
       ctx.fillStyle = series.color;
       ctx.lineWidth = 1.5;
       ctx.beginPath();
-      points.forEach((p: HistoryPoint, i: number) => {
+      drawPoints.forEach((p: HistoryPoint, i: number) => {
         const px = xToPx(canStore.relMs(p.ts));
         const py = yToPx(p.value);
         if (i === 0) ctx.moveTo(px, py);
         else ctx.lineTo(px, py);
       });
       ctx.stroke();
-      for (const p of points) {
+      for (const p of drawPoints) {
         const px = xToPx(canStore.relMs(p.ts));
         const py = yToPx(p.value);
         if (px < plotLeft - 5 || px > plotLeft + plotW + 5) continue;
@@ -313,6 +362,8 @@ function SignalChart({
     const v = viewRef.current;
 
     if (zoomX) {
+      // freeze this chart's own view at the cursor-anchored zoom level; the
+      // shared rolling window (top +/- buttons) is unaffected
       const cursorX = g.xMin + ((px - g.plotLeft) / g.plotW) * (g.xMax - g.xMin);
       const xMin = v.xMin ?? g.xMin;
       const xMax = v.xMax ?? g.xMax;

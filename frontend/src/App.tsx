@@ -54,7 +54,10 @@ export default function App() {
   }, [editMode]);
 
   const refreshDbc = useCallback(() => {
-    api.getDbc().then((d) => setDbc(d as DbcSummary)).catch(() => {});
+    api.getDbc().then((d) => {
+      setDbc(d as DbcSummary);
+      canStore.setDbc(d as DbcSummary);
+    }).catch(() => {});
   }, []);
 
   useEffect(() => {

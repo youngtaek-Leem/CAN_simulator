@@ -5,7 +5,7 @@
 import { useState, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { api } from '../api/client';
-import { findSignal, useApp } from '../store/appContext';
+import { findSignal, signalBitMax, useApp } from '../store/appContext';
 import { canStore } from '../store/canStore';
 import { MessageFilter, MessageOptions, type MessageFilterMode } from './MessageOptions';
 import type { WidgetConfig } from '../types';
@@ -212,7 +212,9 @@ function ConfigModal({ config, onClose }: { config: WidgetConfig; onClose: () =>
               최대
               <input
                 type="number"
-                value={String(draft.options.max ?? bound?.signal.maximum ?? 100)}
+                value={String(
+                  draft.options.max ?? bound?.signal.maximum ?? (bound ? signalBitMax(bound.signal) : 100),
+                )}
                 onChange={(e) => setOption('max', Number(e.target.value))}
               />
             </label>

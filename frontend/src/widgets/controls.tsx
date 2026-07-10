@@ -4,7 +4,7 @@
 
 import { useRef, useState } from 'react';
 import { api } from '../api/client';
-import { findSignal, useApp } from '../store/appContext';
+import { findSignal, signalBitMax, useApp } from '../store/appContext';
 import type { WidgetConfig } from '../types';
 
 function useSendSignal(config: WidgetConfig) {
@@ -118,7 +118,9 @@ export function SliderWidget({ config }: { config: WidgetConfig }) {
   const { send, error } = useSendSignal(config);
   const bound = findSignal(dbc, config.binding);
   const min = Number(config.options.min ?? bound?.signal.minimum ?? 0);
-  const max = Number(config.options.max ?? bound?.signal.maximum ?? 100);
+  const max = Number(
+    config.options.max ?? bound?.signal.maximum ?? (bound ? signalBitMax(bound.signal) : 100),
+  );
   const step = Number(config.options.step ?? 1);
   const [value, setValue] = useState(min);
   const valueRef = useRef(min);

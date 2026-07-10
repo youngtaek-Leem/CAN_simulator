@@ -29,6 +29,12 @@ export function findSignal(
   return message && signal ? { message, signal } : null;
 }
 
+/** Largest physical value representable by the signal's bit width (raw max * scale + offset). */
+export function signalBitMax(signal: DbcSignal): number {
+  const rawMax = signal.is_signed ? 2 ** (signal.length - 1) - 1 : 2 ** signal.length - 1;
+  return rawMax * signal.scale + signal.offset;
+}
+
 /** DBC messages sorted alphabetically by name, for signal-picker dropdowns. */
 export function sortedMessages(dbc: DbcSummary): DbcMessage[] {
   return [...(dbc.messages ?? [])].sort((a, b) => a.name.localeCompare(b.name));

@@ -6,7 +6,7 @@
 // (fps is user-configurable, 10..60).
 
 import { useSyncExternalStore } from 'react';
-import type { BackendStatus, FrameEntry, RxFrame } from '../types';
+import type { BackendStatus, DbcSummary, FrameEntry, RxFrame } from '../types';
 
 const FPS_KEY = 'can-sim.ui-fps';
 const RX_NODE_KEY = 'can-sim.rx-node';
@@ -28,6 +28,9 @@ class CanStore {
   // recorded for every DBC signal, just the ones actually being charted.
   signalHistory = new Map<string, HistoryPoint[]>();
   private signalWatchers = new Map<string, number>();
+  // "Message.Signal" -> {label -> raw value}, so choice/enum signals (decoded
+  // by the backend as a string label) can still be charted numerically.
+  private choiceReverse = new Map<string, Map<string, number>>();
   timeBase: number | null = null; // ts of the first frame after (re)start = 0 ms
   status: BackendStatus | null = null;
   wsConnected = false;
@@ -70,6 +73,21 @@ class CanStore {
     this.markDirty();
   }
 
+  /** Rebuild the choice-label -> raw-value reverse lookup used to chart
+   * enum/VAL_ signals numerically (the backend decodes them to a string
+   * label for display, e.g. "On"/"Off"). Call whenever the loaded DBC changes. */
+  setDbc(dbc: DbcSummary) {
+    this.choiceReverse.clear();
+    for (const m of dbc.messages ?? []) {
+      for (const s of m.signals) {
+        if (!s.choices) continue;
+        const reverse = new Map<string, number>();
+        for (const [raw, label] of Object.entries(s.choices)) reverse.set(label, Number(raw));
+        this.choiceReverse.set(`${m.name}.${s.name}`, reverse);
+      }
+    }
+  }
+
   /** Start recording a time series for "Message.Signal" (ref-counted). */
   watchSignal(key: string) {
     this.signalWatchers.set(key, (this.signalWatchers.get(key) ?? 0) + 1);
@@ -101,10 +119,14 @@ class CanStore {
         for (const [sig, value] of Object.entries(f.decoded.signals)) {
           const key = `${f.decoded.name}.${sig}`;
           this.signals.set(key, value);
-          if (typeof value === 'number' && this.signalWatchers.has(key)) {
-            const points = this.signalHistory.get(key)!;
-            points.push({ ts: f.ts, value });
-            if (points.length > HISTORY_CAP) points.splice(0, points.length - HISTORY_CAP);
+          if (this.signalWatchers.has(key)) {
+            const numeric =
+              typeof value === 'number' ? value : this.choiceReverse.get(key)?.get(value);
+            if (numeric !== undefined) {
+              const points = this.signalHistory.get(key)!;
+              points.push({ ts: f.ts, value: numeric });
+              if (points.length > HISTORY_CAP) points.splice(0, points.length - HISTORY_CAP);
+            }
           }
         }
       }
@@ -124,6 +146,13 @@ class CanStore {
   /** ms since the first frame received after the last (re)start. */
   relMs(ts: number): number {
     return this.timeBase === null ? 0 : (ts - this.timeBase) * 1000;
+  }
+
+  /** Current wall-clock position on the same timeline as relMs(), so a
+   * rolling time window can keep scrolling even between samples (backend
+   * and frontend share the same clock -- this is a local-only tool). */
+  nowMs(): number {
+    return this.timeBase === null ? 0 : Date.now() - this.timeBase * 1000;
   }
 
   resetTimeBase() {

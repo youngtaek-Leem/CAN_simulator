@@ -104,6 +104,7 @@ class DbcService:
                             "name": s.name,
                             "start": s.start,
                             "length": s.length,
+                            "is_signed": s.is_signed,
                             "scale": float(s.scale),
                             "offset": float(s.offset),
                             "minimum": s.minimum,
