@@ -54,7 +54,7 @@ const DOT_RADIUS = 2.5;
 const DEFAULT_X_WINDOW_MS = 10_000;
 const MIN_X_WINDOW_MS = 500;
 const MAX_X_WINDOW_MS = 300_000;
-const BUTTON_ZOOM_FACTOR = 1.5;
+const X_WINDOW_STEP_MS = 5_000; // +/- toolbar buttons change the window by this much per click
 const LIVE_TICK_MS = 200; // redraw cadence so the rolling window keeps scrolling with no new data
 
 function getSeries(config: WidgetConfig): GraphSeries[] {
@@ -123,8 +123,8 @@ export function GraphWidget({ config }: { config: WidgetConfig }) {
       options: { ...config.options, series: series.filter((s) => seriesKey(s) !== key) },
     });
   };
-  const zoomXWindow = (factor: number) => {
-    setXWindowMs((w) => Math.min(MAX_X_WINDOW_MS, Math.max(MIN_X_WINDOW_MS, w * factor)));
+  const zoomXWindow = (deltaMs: number) => {
+    setXWindowMs((w) => Math.min(MAX_X_WINDOW_MS, Math.max(MIN_X_WINDOW_MS, w + deltaMs)));
   };
 
   return (
@@ -133,10 +133,10 @@ export function GraphWidget({ config }: { config: WidgetConfig }) {
         <span className="hint">{series.length > 0 ? `${series.length}개 신호` : '신호를 추가하세요'}</span>
         <span className="spacer" />
         <span className="graph-xwindow mono">{fmtWindow(xWindowMs)}</span>
-        <button className="icon-btn" title="X축 축소 (시간 범위 넓게)" onClick={() => zoomXWindow(BUTTON_ZOOM_FACTOR)}>
+        <button className="icon-btn" title="X축 축소 (시간 범위 5초 넓게)" onClick={() => zoomXWindow(X_WINDOW_STEP_MS)}>
           −
         </button>
-        <button className="icon-btn" title="X축 확대 (시간 범위 좁게)" onClick={() => zoomXWindow(1 / BUTTON_ZOOM_FACTOR)}>
+        <button className="icon-btn" title="X축 확대 (시간 범위 5초 좁게)" onClick={() => zoomXWindow(-X_WINDOW_STEP_MS)}>
           +
         </button>
         {editMode && (
@@ -275,7 +275,7 @@ function SignalChart({
         const lo = Math.min(...ys);
         const hi = Math.max(...ys);
         const pad = (hi - lo) * 0.1 || Math.abs(hi) * 0.1 || 1;
-        yMin = lo - pad;
+        yMin = Math.max(0, lo - pad); // auto-fit never dips below 0
         yMax = hi + pad;
       } else {
         yMin = 0;
@@ -320,11 +320,20 @@ function SignalChart({
       ctx.fillStyle = series.color;
       ctx.lineWidth = 1.5;
       ctx.beginPath();
+      // Step-after (horizontal-then-vertical) line: a CAN signal holds its
+      // value until the next sample, so a straight diagonal between samples
+      // would misleadingly show it "in transit" -- draw a staircase instead.
+      let prevPy = 0;
       drawPoints.forEach((p: HistoryPoint, i: number) => {
         const px = xToPx(canStore.relMs(p.ts));
         const py = yToPx(p.value);
-        if (i === 0) ctx.moveTo(px, py);
-        else ctx.lineTo(px, py);
+        if (i === 0) {
+          ctx.moveTo(px, py);
+        } else {
+          ctx.lineTo(px, prevPy);
+          ctx.lineTo(px, py);
+        }
+        prevPy = py;
       });
       ctx.stroke();
       for (const p of drawPoints) {

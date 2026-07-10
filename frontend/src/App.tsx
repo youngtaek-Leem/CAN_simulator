@@ -20,11 +20,20 @@ import { canStore, useCanVersion } from './store/canStore';
 import { AppContext } from './store/appContext';
 import { WIDGET_REGISTRY } from './widgets/registry';
 import { WidgetFrame } from './widgets/WidgetFrame';
-import type { DbcSummary, WidgetConfig, WidgetType } from './types';
+import type { DbcSummary, MultiCell, WidgetConfig, WidgetType } from './types';
 
 interface SavedLayout {
   layout: LayoutItem[];
   widgets: WidgetConfig[];
+}
+
+/** DBC message names a widget could have armed an auto-periodic sender for
+ * (via POST /api/tx/signal), so we know what to stop_auto() on removal. */
+function sendableMessages(config: WidgetConfig): string[] {
+  if (config.binding?.message) return [config.binding.message];
+  const cells = config.options.cells as MultiCell[] | undefined;
+  if (cells) return cells.map((c) => c.binding?.message).filter((m): m is string => !!m);
+  return [];
 }
 
 // free placement: no compaction, widgets keep their position and may overlap
@@ -88,10 +97,21 @@ export default function App() {
     setWidgets((w) => w.map((x) => (x.id === cfg.id ? cfg : x)));
   }, []);
 
-  const removeWidget = useCallback((id: string) => {
-    setWidgets((w) => w.filter((x) => x.id !== id));
-    setLayout((l) => l.filter((x) => x.i !== id));
-  }, []);
+  const removeWidget = useCallback(
+    (id: string) => {
+      const target = widgets.find((w) => w.id === id);
+      if (target) {
+        const remaining = widgets.filter((w) => w.id !== id);
+        for (const messageName of sendableMessages(target)) {
+          const stillBound = remaining.some((w) => sendableMessages(w).includes(messageName));
+          if (!stillBound) api.txAutoStop(messageName).catch(() => {});
+        }
+      }
+      setWidgets((w) => w.filter((x) => x.id !== id));
+      setLayout((l) => l.filter((x) => x.i !== id));
+    },
+    [widgets],
+  );
 
   const ctx = useMemo(
     () => ({ dbc, editMode, updateWidget, removeWidget, refreshDbc }),

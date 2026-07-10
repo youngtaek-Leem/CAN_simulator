@@ -157,6 +157,10 @@ def get_status():
 
 @app.post("/api/run/start")
 def run_start():
+    # "Start" means a clean restart, not "resume whatever was armed before" --
+    # auto-periodic senders left over from signals touched before the last
+    # Stop must not silently resume without the user touching that widget again.
+    tx_scheduler.stop_auto()
     run_state["running"] = True
     tx_scheduler.set_paused(False)
     return _status()
@@ -166,6 +170,7 @@ def run_start():
 def run_stop():
     run_state["running"] = False
     tx_scheduler.set_paused(True)
+    tx_scheduler.stop_auto()
     replay_service.stop()
     return _status()
 

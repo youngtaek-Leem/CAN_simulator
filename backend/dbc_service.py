@@ -5,18 +5,30 @@ Send-type rule (Requirement.md):
   (the largest value representable in the signal's bit width).
 - Periodic signal: keep sending the valid value at the configured cycle time.
 
-Effective send type of a signal = GenSigSendType attribute if it clearly maps
-to event/periodic, otherwise the message-level GenMsgSendType.
+Effective send type of a signal = the message's leading "[TAG]" comment tag
+(CM_ BO_ "[P] Periodic", "[PE] Periodic and On Event", "[EC] On Event and On
+Change", ...): "P" or "PE" -> periodic, every other tag (or no tag at all,
+e.g. NM_* messages) -> event. This is how the source DBCs document intended
+send behavior; the DBC's own GenMsgSendType/GenSigSendType attributes are not
+reliable enough on their own (e.g. "OnChangeWithRepetition" doesn't map
+cleanly to either bucket, and untagged/unset messages need a clear default).
 """
 
+import re
 import threading
 from typing import Any, Optional
 
 import cantools
 from cantools.database.namedsignalvalue import NamedSignalValue
 
-EVENT_TYPES = {"event", "onwrite", "onchange", "ifactive"}
-PERIODIC_TYPES = {"cyclic", "cyclicifactive", "periodic"}
+PERIODIC_TAGS = {"P", "PE"}
+_TAG_RE = re.compile(r"^\[([A-Za-z]+)\]")
+
+
+def _message_send_type(message) -> str:
+    match = _TAG_RE.match((message.comment or "").strip())
+    tag = match.group(1).upper() if match else None
+    return "periodic" if tag in PERIODIC_TAGS else "event"
 
 
 def _plain(value: Any) -> Any:
@@ -61,22 +73,7 @@ class DbcService:
         override = self._send_type_override.get(f"{message.name}.{signal.name}")
         if override:
             return override
-        sig_type = None
-        if signal.dbc and signal.dbc.attributes:
-            attr = signal.dbc.attributes.get("GenSigSendType")
-            if attr is not None:
-                value = attr.value
-                if isinstance(value, int) and attr.definition.choices:
-                    value = attr.definition.choices[value]
-                sig_type = str(value).lower()
-        if sig_type in EVENT_TYPES:
-            return "event"
-        if sig_type in PERIODIC_TYPES:
-            return "periodic"
-        msg_type = (message.send_type or "").lower()
-        if msg_type in EVENT_TYPES:
-            return "event"
-        return "periodic"
+        return _message_send_type(message)
 
     def set_send_type_override(self, message_name: str, signal_name: str, send_type: str) -> None:
         if send_type not in ("event", "periodic"):

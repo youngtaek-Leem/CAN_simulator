@@ -45,16 +45,30 @@ def test_summary_structure():
 
 def test_send_type_classification():
     svc = make_service()
-    # GenSigSendType OnWrite/OnChange -> event
+    # message comment tagged "[P]" -> every signal on it is periodic
+    assert svc.signal_send_type("EngineData", "EngineSpeed") == "periodic"
+    assert svc.signal_send_type("VehicleSpeed", "Speed") == "periodic"
+    # message comment tagged "[EC]" (anything other than P/PE) -> event
     assert svc.signal_send_type("DriverCommand", "TurnSignal") == "event"
     assert svc.signal_send_type("DriverCommand", "HornRequest") == "event"
-    # no signal attribute -> falls back to message GenMsgSendType (Event)
     assert svc.signal_send_type("DriverCommand", "WiperMode") == "event"
-    # cyclic message -> periodic
-    assert svc.signal_send_type("EngineData", "EngineSpeed") == "periodic"
-    # manual override wins
+    # manual override wins over the comment tag
     svc.set_send_type_override("EngineData", "EngineSpeed", "event")
     assert svc.signal_send_type("EngineData", "EngineSpeed") == "event"
+
+
+def test_send_type_no_comment_tag_defaults_to_event():
+    svc = DbcService()
+    svc.load_string(
+        """
+        BU_: ECU_A
+        BO_ 100 Untagged: 8 ECU_A
+         SG_ Foo : 0|8@1+ (1,0) [0|255] "" ECU_A
+        """,
+        "untagged.dbc",
+    )
+    # no CM_ BO_ comment at all (e.g. NM_* network-management frames) -> event
+    assert svc.signal_send_type("Untagged", "Foo") == "event"
 
 
 def test_encode_decode_roundtrip():

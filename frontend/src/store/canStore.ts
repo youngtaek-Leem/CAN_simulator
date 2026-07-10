@@ -148,10 +148,17 @@ class CanStore {
     return this.timeBase === null ? 0 : (ts - this.timeBase) * 1000;
   }
 
+  // While globally stopped, nowMs() must hold still at the moment Stop was
+  // pressed instead of continuing to track Date.now() -- otherwise graph
+  // widgets keep scrolling their rolling window with no new data arriving.
+  private frozenNowMs: number | null = null;
+
   /** Current wall-clock position on the same timeline as relMs(), so a
    * rolling time window can keep scrolling even between samples (backend
-   * and frontend share the same clock -- this is a local-only tool). */
+   * and frontend share the same clock -- this is a local-only tool). Frozen
+   * while globally stopped (see ingestStatus()). */
   nowMs(): number {
+    if (this.frozenNowMs !== null) return this.frozenNowMs;
     return this.timeBase === null ? 0 : Date.now() - this.timeBase * 1000;
   }
 
@@ -163,9 +170,15 @@ class CanStore {
   }
 
   ingestStatus(status: BackendStatus) {
-    // global Start pressed -> restart the 0 ms time base
-    if (status.run?.running && this.status?.run?.running === false) {
+    const wasRunning = this.status?.run?.running;
+    const isRunning = status.run?.running;
+    if (isRunning && wasRunning === false) {
+      // global Start pressed -> restart the 0 ms time base
       this.resetTimeBase();
+      this.frozenNowMs = null;
+    } else if (!isRunning && wasRunning === true) {
+      // global Stop pressed -> freeze the rolling window where it is
+      this.frozenNowMs = this.nowMs();
     }
     this.status = status;
     this.markDirty();

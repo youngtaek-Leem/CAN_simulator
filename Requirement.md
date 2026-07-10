@@ -38,8 +38,13 @@ CAN 신호 할당을 위해서 CAN 데이터를 쉽게 보기 위하여 DBC 를 
 
 ## 확정 사양 (개발 중 구체화된 사항, 2026-07-04)
 
-1. Event/Periodic 판별 기준: DBC 신호 속성 GenSigSendType(OnWrite/OnChange 등 → Event)을
-   우선 적용하고, 없으면 메시지 속성 GenMsgSendType을 따른다. 위젯 설정 UI에서 수동 변경 가능.
+1. Event/Periodic 판별 기준 (2026-07-11 변경): 메시지 코멘트(`CM_ BO_`)의 맨 앞 "[태그]"를
+   기준으로 판별한다 — `[P]`, `[PE]` 태그는 Periodic, 그 외 태그(`[EC]`, `[EW]`, `[TP]` 등)나
+   태그가 아예 없는 메시지(예: `NM_*` 네트워크 매니지먼트 프레임)는 모두 Event로 분류한다.
+   위젯 설정 UI에서 신호 단위로 수동 변경(override)하면 이 판별보다 우선한다.
+   (최초에는 DBC 속성 GenSigSendType/GenMsgSendType 기반으로 판별했으나, `OnChangeWithRepetition`
+   같은 값이 이벤트/주기 어느 쪽에도 명확히 안 걸리고 속성이 없는 메시지의 최종 fallback이
+   무조건 periodic이 되는 버그가 있어 변경 — 아래 26번 항목 참고.)
 2. invalid 값 정의: 신호에 할당된 비트로 표현할 수 있는 가장 큰 raw 값 (예: 4bit → 0xF, 8bit → 0xFF).
    invalid 값은 신호 상태에 저장하지 않으며, 이후 같은 메시지 송신 시 마지막 유효값으로 복귀한다.
 3. 가상 CAN 버스(virtual) 모드 추가: 하드웨어 없이 개발·테스트 가능 (python-can virtual 인터페이스).
@@ -232,6 +237,78 @@ CAN 신호 할당을 위해서 CAN 데이터를 쉽게 보기 위하여 DBC 를 
     항상 죽은 코드였음)를 `? :` 삼항으로 고쳐 의도대로 동작하게 했다. 빌드 후
     `dist/assets/index-*.js`에 `127.0.0.1:8000` 문자열이 더 이상 존재하지 않음을
     `grep`으로 확인했고, 개발 서버에서도 정상 연결(서버 연결됨)됨을 재확인했다.
+24. 전역 Stop/Start 정지 불완전, 위젯 삭제 후에도 신호 전송 지속, 그래프가 Stop 중에도
+    계속 스크롤되는 문제, 그래프 확대/축소 배율 → 고정 5초 단위 변경 (2026-07-10):
+    - **Stop이 모든 것을 완전히 멈추지 않음**: `run/stop`은 스케줄러를 일시정지(`_paused`)
+      시켜 그 순간부터는 아무것도 새로 전송되지 않았지만, 위젯에서 만든 주기 신호
+      자동 송신 항목(`_auto_entries`, 버튼/슬라이더 등으로 한 번이라도 periodic 신호를
+      보내면 생성되어 그 메시지의 사이클타임마다 계속 재전송됨)은 지워지지 않고 그대로
+      남아 있었다. 그래서 Stop 후 아무 조작 없이 다시 Start만 눌러도 예전에 만졌던
+      위젯의 신호가 사용자도 모르게 즉시 재전송을 재개했다 — "Stop은 완전히 멈춘 상태,
+      Start는 초기화 후 재시작"을 원한다는 사용자 요구와 어긋남. `run/stop`과 `run/start`
+      양쪽에서 `tx_scheduler.stop_auto()`로 auto 항목을 전부 비우도록 수정했다
+      (`backend/main.py`). Stop 직후 `auto_entries`가 즉시 빈 배열이 됨을, Start 후에도
+      계속 빈 상태로 유지되며(이전에 만든 항목이 되살아나지 않음) 위젯을 다시 조작해야만
+      새로 생긴다는 것을 `/api/status`로 직접 확인했다.
+    - **위젯 삭제 후에도 신호가 계속 전송됨**: 위젯을 지워도 프런트는 위젯 목록에서만
+      제거할 뿐 백엔드의 `_auto_entries`는 몰랐으므로, 위젯이 화면에서 사라진 뒤에도
+      해당 메시지가 계속 주기 전송되고 있었다. `App.tsx`의 `removeWidget`이 삭제되는
+      위젯의 바인딩(단일 바인딩 위젯은 `config.binding`, 멀티 버튼/체크박스는 셀별
+      `binding`)에서 사용하던 메시지 이름을 모으고, 삭제 후 남은 위젯 중 같은 메시지를
+      쓰는 것이 하나도 없으면 `POST /api/tx/auto/stop`으로 그 메시지의 자동 송신을
+      끈다(같은 메시지를 다른 위젯이 아직 쓰고 있으면 유지). 사용자가 보고한 정확한
+      재현 순서(위젯 신호 할당 → Start → 신호 전송 확인 → Stop → 위젯 삭제 → Start)를
+      그대로 재현해 `auto_entries`가 끝까지 빈 상태임을 확인했다.
+    - **그래프가 Stop 중에도 계속 스크롤됨**: 롤링 윈도우의 "현재 시각" 기준점
+      (`canStore.nowMs()`)이 `Date.now()`를 그대로 썼기 때문에, 전역 Stop으로 데이터
+      수신이 멎어도 벽시계 시간은 계속 흘러 그래프가 계속 스크롤되는 것처럼 보였다.
+      `ingestStatus()`가 running true→false 전환 시점의 `nowMs()` 값을 얼려두고
+      (`frozenNowMs`), Stop 상태인 동안 `nowMs()`가 그 값을 그대로 반환하도록 수정했다
+      (Start 시 다시 null로 풀리고 `resetTimeBase()`로 새 타임라인이 시작됨). 브라우저에서
+      Stop 직후와 4초 뒤의 그래프 X축 라벨이 완전히 동일함을 스크린샷으로 확인했다
+      (Run 중에는 같은 시간 동안 라벨이 실제로 진행됨을 대조 확인).
+    - **그래프 확대/축소를 5초 단위로 변경**: 위젯 상단의 +/- 버튼이 기존에는 배율(1.5배)
+      방식이었는데, 클릭당 정확히 ±5초씩 창 크기가 바뀌도록 변경했다
+      (`frontend/src/widgets/GraphWidget.tsx`의 `X_WINDOW_STEP_MS = 5000`, 덧셈 방식).
+      10.0s에서 "+" 클릭 시 5.0s, 이어서 "−" 두 번 클릭 시 15.0s가 됨을 확인했다.
+25. 그래프 Y축 자동 확대·축소 시 최소값이 0 미만(음수)으로 내려가지 않게 함 (2026-07-11):
+    자동 맞춤 시 `yMin = lo - pad`(데이터 최솟값에서 10% 여백을 뺀 값)를 그대로 썼는데, 값이
+    0에 가까운 신호(예: 대부분 0~1인 워닝 플래그)는 `lo=0`이어도 패딩 때문에 Y축 최소값이
+    음수로 내려가 보였다. `yMin = Math.max(0, lo - pad)`로 클램프해 자동 맞춤 Y축 최소값이
+    항상 0 이상이 되도록 수정했다(`frontend/src/widgets/GraphWidget.tsx`). 수동 팬/줌(휠·드래그)
+    으로 사용자가 직접 음수 영역까지 내려보는 것은 그대로 허용된다. 값 0~1을 오가는 신호로
+    테스트해 자동 맞춤 Y축 최소값이 정확히 0.00으로 고정됨을(패딩 적용 전이면 -0.1이 됐을
+    상황) 스크린샷으로 확인했다.
+26. Event/Periodic 판별을 메시지 코멘트 "[태그]" 기반으로 전면 변경 (2026-07-11): 사용자가
+    `samples/AMP_FD_260501.dbc`를 직접 확인해 달라고 요청 — 이 DBC(및 같은 팀이 작성한
+    DBC들)는 메시지 코멘트 맨 앞에 `[P]`(Periodic), `[PE]`(Periodic and On Event),
+    `[EC]`(On Event and On Change), `[EW]`(On Event and On Write), `[TP]`(Transport
+    Protocol) 같은 태그를 붙여 송신 방식을 문서화하는 관례가 있음을 확인했다(전체 120개
+    메시지 중 106개에 태그, 나머지 14개는 전부 `NM_*` 네트워크 매니지먼트 프레임으로 코멘트
+    자체가 없음). 이 태그는 DBC의 `GenMsgSendType` 속성과 100% 일치했다(`[P]`/`[PE]` ↔
+    `GenMsgSendType=Cyclic`, 나머지 ↔ 속성 미설정). 사용자가 "`[P]`/`[PE]`만 Periodic, 나머지는
+    전부 Event"로 이 태그를 직접 파싱해 판별하도록 지시해 `dbc_service.py`의
+    `_signal_send_type()`을 전면 교체했다 — 기존 `GenSigSendType`/`GenMsgSendType` 속성 기반
+    로직(및 `EVENT_TYPES`/`PERIODIC_TYPES` 매핑 테이블)을 제거하고, `message.comment`의 앞부분
+    `[TAG]`를 정규식으로 뽑아 `{"P","PE"}`에 속하면 periodic, 아니면(태그가 다르거나 코멘트가
+    아예 없으면) event로 판별하는 `_message_send_type()`으로 교체했다. 신호 단위 수동
+    override(`set_send_type_override`)는 그대로 최우선 순위 유지. **버그 수정 겸함**: 기존
+    로직은 `GenSigSendType`이 `EVENT_TYPES`/`PERIODIC_TYPES` 어느 쪽에도 정확히 안 걸리거나
+    (예: `OnChangeWithRepetition`) `GenMsgSendType`이 미설정인 경우 최종 fallback이 무조건
+    `"periodic"`이어서, `[EC]`/`[EW]`/`[TP]` 태그가 붙은(= 원래 Event여야 하는) 메시지의 신호들이
+    실제로는 Periodic으로 잘못 분류되고 있었다(예: 메시지 1144 `CLU_WelcomeStartReq`,
+    `GenSigSendType=OnChangeWithRepetition`). `samples/sample.dbc`의 `CM_ BO_` 코멘트에도
+    같은 태그 컨벤션을 반영(`[P]`/`[EC]`)해 테스트와 실제 동작을 일치시켰다. 검증: DBC 전체
+    786개 신호에 대해 태그로 계산한 기대값과 `signal_send_type()` 실제 출력을 전수 대조해
+    불일치 0건 확인(periodic 77개 메시지, event 43개 메시지), `CLU_WelcomeStartReq`가
+    이제 정확히 "event"로 나옴을 확인, 백엔드 테스트 45개(신규 1개 포함) 통과.
+27. 그래프 선을 계단형(step)으로 변경 (2026-07-11): 기존에는 연속된 두 샘플 (x1,y1)→(x2,y2)를
+    직선으로 바로 이어서, 값이 바뀌는 구간에서 마치 값이 서서히 변해가는 것처럼(대각선) 보였다.
+    CAN 신호는 다음 샘플이 올 때까지 이전 값을 그대로 유지하는 성격이므로, 수평선(x1,y1)→
+    (x2,y1) 후 수직선(x2,y1)→(x2,y2)로 잇는 step-after 방식으로 변경했다
+    (`frontend/src/widgets/GraphWidget.tsx`의 선 그리기 루프). 브라우저에서 값을 0→3→1→2→0→3로
+    바꿔가며 전송해 모든 구간이 수평/수직선만으로(대각선 없이) 계단형으로 그려짐을
+    스크린샷으로 확인했다.
 
 ## 실기 검증 현황
 

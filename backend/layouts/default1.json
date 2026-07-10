@@ -1,0 +1,199 @@
+{
+  "layout": [
+    {
+      "i": "w1783604744882",
+      "x": 0,
+      "y": 0,
+      "w": 6,
+      "h": 5,
+      "minW": 3,
+      "minH": 2,
+      "moved": false,
+      "static": false
+    },
+    {
+      "i": "w1783604748143",
+      "x": 6,
+      "y": 0,
+      "w": 4,
+      "h": 2,
+      "minW": 2,
+      "minH": 1,
+      "moved": true,
+      "static": false
+    },
+    {
+      "i": "w1783604866883",
+      "x": 7,
+      "y": 5,
+      "w": 2,
+      "h": 2,
+      "minW": 1,
+      "minH": 1,
+      "moved": true,
+      "static": false
+    },
+    {
+      "i": "w1783604893846",
+      "x": 0,
+      "y": 4,
+      "w": 10,
+      "h": 7,
+      "minW": 1,
+      "minH": 2,
+      "moved": true,
+      "static": false
+    },
+    {
+      "i": "w1783605030442",
+      "x": 6,
+      "y": 3,
+      "w": 4,
+      "h": 2,
+      "minW": 2,
+      "minH": 1,
+      "moved": true,
+      "static": false
+    },
+    {
+      "i": "w1783638442860",
+      "x": 6,
+      "y": 1,
+      "w": 4,
+      "h": 2,
+      "minW": 2,
+      "minH": 1,
+      "moved": true,
+      "static": false
+    },
+    {
+      "i": "w1783642098611",
+      "x": 6,
+      "y": 5,
+      "w": 4,
+      "h": 2,
+      "minW": 2,
+      "minH": 1,
+      "moved": true,
+      "static": false
+    },
+    {
+      "i": "w1783642129152",
+      "x": 2,
+      "y": 7,
+      "w": 4,
+      "h": 2,
+      "minW": 2,
+      "minH": 1,
+      "moved": false,
+      "static": false
+    }
+  ],
+  "widgets": [
+    {
+      "id": "w1783604744882",
+      "type": "canMessageDisplay",
+      "title": "CAN 메시지 표시창",
+      "options": {
+        "viewMode": "trace"
+      }
+    },
+    {
+      "id": "w1783604748143",
+      "type": "slider",
+      "title": "슬라이더",
+      "options": {
+        "max": 75
+      },
+      "binding": {
+        "message": "VCU_03_100ms",
+        "signal": "VCU_VgsSftMod"
+      }
+    },
+    {
+      "id": "w1783604866883",
+      "type": "button",
+      "title": "버튼",
+      "options": {
+        "value": 2
+      },
+      "binding": {
+        "message": "HU_AMP_04_00ms",
+        "signal": "AMP_FadeSet"
+      }
+    },
+    {
+      "id": "w1783604893846",
+      "type": "signalGraph",
+      "title": "CAN 신호 그래프",
+      "options": {
+        "series": [
+          {
+            "message": "HU_AMP_04_00ms",
+            "signal": "AMP_MainVolumeSet",
+            "color": "#3b82f6"
+          },
+          {
+            "message": "HU_AMP_04_00ms",
+            "signal": "AMP_VRTTSvolumeStep",
+            "color": "#f87171"
+          },
+          {
+            "message": "CLU_AMP_01_200ms",
+            "signal": "Warn_Sound_FCW",
+            "color": "#34d399"
+          },
+          {
+            "message": "VCU_03_100ms",
+            "signal": "VCU_VgsSftMod",
+            "color": "#fbbf24"
+          }
+        ]
+      }
+    },
+    {
+      "id": "w1783605030442",
+      "type": "slider",
+      "title": "슬라이더",
+      "options": {
+        "max": 75
+      },
+      "binding": {
+        "message": "HU_AMP_04_00ms",
+        "signal": "AMP_VRTTSvolumeStep"
+      }
+    },
+    {
+      "id": "w1783638442860",
+      "type": "slider",
+      "title": "슬라이더",
+      "options": {
+        "max": 7
+      },
+      "binding": {
+        "message": "CLU_AMP_01_200ms",
+        "signal": "Warn_Sound_FCW"
+      }
+    },
+    {
+      "id": "w1783642098611",
+      "type": "slider",
+      "title": "슬라이더",
+      "options": {},
+      "binding": {
+        "message": "ACU_02_00ms",
+        "signal": "ACU_CrshActvSta"
+      }
+    },
+    {
+      "id": "w1783642129152",
+      "type": "slider",
+      "title": "슬라이더",
+      "options": {},
+      "binding": {
+        "message": "CLU_AMP_01_200ms",
+        "signal": "Warn_Sound_PAS"
+      }
+    }
+  ]
+}
