@@ -1,12 +1,20 @@
 // REST client for the local Python backend.
+//
+// Production builds are always served by the same FastAPI process that
+// exposes the API (see backend/main.py's StaticFiles mount), so BASE must
+// stay relative ('') there -- any absolute dev-only override must never leak
+// into the shipped bundle, or the app breaks whenever it's reached via a
+// hostname other than the one the build happened to be made on (e.g. a
+// Windows PC opening http://localhost:8000 instead of http://127.0.0.1:8000).
+// Only the Vite dev server (a separate port from the backend) needs BASE to
+// point elsewhere.
+const BASE = import.meta.env.DEV
+  ? ((import.meta.env.VITE_BACKEND_URL as string | undefined) ?? 'http://127.0.0.1:8000')
+  : '';
 
-const BASE =
-  (import.meta.env.VITE_BACKEND_URL as string | undefined) ??
-  (location.port === '5173' ? 'http://127.0.0.1:8000' : '');
-
-export const WS_URL =
-  BASE.replace(/^http/, 'ws') + '/ws' ||
-  `ws://${location.host}/ws`;
+export const WS_URL = BASE
+  ? BASE.replace(/^http/, 'ws') + '/ws'
+  : `ws://${location.host}/ws`;
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(BASE + path, init);

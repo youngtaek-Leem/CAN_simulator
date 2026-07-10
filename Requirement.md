@@ -211,6 +211,27 @@ CAN 신호 할당을 위해서 CAN 데이터를 쉽게 보기 위하여 DBC 를 
       기록하도록 수정했다. 다른 위젯(텍스트 표시, 신호 상세 등)은 문자열 그대로 표시하는
       기존 동작 그대로 유지되며 영향 없음. `Warn_Sound_FCW`(3bit, VAL_ 0~7)로 값을
       바꿔가며 전송해 그래프에 계단형 변화가 정상적으로 그려짐을 확인했다.
+23. Windows 실행 시 백엔드 API/WebSocket 연결 실패 버그 (2026-07-10 발견/수정): Windows에서
+    `run_windows.bat`로 실행 후 브라우저에서 화면은 정상 표시되지만 "서버 끊김(재시도
+    중)"이 계속 뜨고 DBC 업로드 시 "Failed to fetch"가 발생한다는 사용자 보고로 발견.
+    원인: `frontend/src/api/client.ts`의 백엔드 URL 결정 로직이 개발 서버 포트(5173)
+    여부만으로 분기했는데, 이 세션 중 macOS 개발 환경의 포트 충돌(5173→5174)을 우회하려고
+    만든 `frontend/.env.local`(`VITE_BACKEND_URL=http://127.0.0.1:8000`)이 Vite 빌드
+    시점에 `import.meta.env.VITE_BACKEND_URL`로 그대로 번들에 박혀, 커밋된 프로덕션
+    번들(`frontend/dist`)에 `http://127.0.0.1:8000`이 하드코딩되어 있었다. 이 때문에
+    사용자가 브라우저에서 `http://127.0.0.1:8000`이 아닌 다른 주소(예: `localhost:8000`,
+    LAN IP, 포트 변경 시)로 접속하면 API/WebSocket 요청이 실제 서빙 origin과 다른 곳으로
+    나가 CORS 차단·연결 실패가 발생했다. 수정: `import.meta.env.DEV`(Vite가 제공하는
+    "개발 서버로 실행 중인지" 플래그)로 분기해, 프로덕션 빌드에서는 `VITE_BACKEND_URL`
+    같은 개발자 로컬 환경변수가 무엇이든 상관없이 항상 상대 경로(`BASE = ''`)를 쓰도록
+    강제했다 — 프로덕션은 항상 `backend/main.py`의 `StaticFiles` 마운트로 프런트와
+    API가 같은 FastAPI 프로세스·같은 origin에서 서빙되므로, 상대 경로가 접속 호스트명에
+    관계없이 항상 올바르게 동작한다. 개발 서버(`vite dev`)에서만 `VITE_BACKEND_URL`
+    오버라이드(없으면 `http://127.0.0.1:8000` 기본값)를 사용해 별도 포트의 벡엔드를
+    가리킨다. WebSocket URL 조립도 `||` 단락 평가 버그(빈 문자열 fallback이 사실상
+    항상 죽은 코드였음)를 `? :` 삼항으로 고쳐 의도대로 동작하게 했다. 빌드 후
+    `dist/assets/index-*.js`에 `127.0.0.1:8000` 문자열이 더 이상 존재하지 않음을
+    `grep`으로 확인했고, 개발 서버에서도 정상 연결(서버 연결됨)됨을 재확인했다.
 
 ## 실기 검증 현황
 
