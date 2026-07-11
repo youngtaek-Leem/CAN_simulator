@@ -151,6 +151,18 @@ class CanManager:
             self.bus.send(msg)
             self.counters["tx"] += 1
 
+    def add_listener(self, listener: can.Listener) -> None:
+        """Attach an extra listener (e.g. a test-runner CANResp watcher) that
+        gets every RX message alongside the main buffer, without draining or
+        otherwise disturbing it."""
+        if self.notifier is None:
+            raise RuntimeError("CAN bus is not connected")
+        self.notifier.add_listener(listener)
+
+    def remove_listener(self, listener: can.Listener) -> None:
+        if self.notifier is not None:
+            self.notifier.remove_listener(listener)
+
     def drain_rx(self, max_messages: int = 2000) -> list[can.Message]:
         out = []
         for _ in range(max_messages):

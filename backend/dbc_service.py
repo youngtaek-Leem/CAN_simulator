@@ -193,3 +193,19 @@ class DbcService:
                 for k, v in decoded.items()
             },
         }
+
+    def decode_raw(self, frame_id: int, data: bytes) -> Optional[dict[str, int]]:
+        """Decode without scaling or VAL_ label lookup -- the raw bit pattern
+        per signal. Used where a test step's expected value is itself a raw
+        hex constant (e.g. test_runner_service's CANResp), so the comparison
+        never depends on a signal's scale/offset/choices."""
+        if self.db is None:
+            return None
+        try:
+            message = self.db.get_message_by_frame_id(frame_id)
+        except KeyError:
+            return None
+        try:
+            return message.decode(data, decode_choices=False, scaling=False)
+        except Exception:
+            return None

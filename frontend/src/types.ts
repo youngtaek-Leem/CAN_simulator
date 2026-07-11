@@ -79,6 +79,58 @@ export interface BackendStatus {
   dbc: { loaded: boolean; filename: string | null };
   settings: { ws_flush_ms: number };
   run: { running: boolean };
+  test_runner: TestRunnerSummary;
+  power: PowerStatus;
+  audio: AudioStatus;
+}
+
+export interface PowerStatus {
+  initialized: boolean;
+  error: string | null;
+  status_bits: number;
+}
+
+export interface AudioDevice {
+  index: number;
+  name: string;
+  channels: number;
+}
+
+export interface AudioStatus {
+  initialized: boolean;
+  error: string | null;
+  device_index: number | null;
+  devices: AudioDevice[];
+  recording: boolean;
+}
+
+export interface TestRunnerSummary {
+  loaded: boolean;
+  filename: string | null;
+  running: boolean;
+  case_count: number;
+  result_count: number;
+}
+
+export interface TestRunnerEvent {
+  ts: number;
+  case?: string;
+  type?: string;
+  message?: string;
+  signal?: string;
+  status?: string;
+  msg?: string;
+}
+
+export interface TestRunnerResult {
+  case: string;
+  cycle: number;
+  status: 'OK' | 'Fail';
+}
+
+export interface TestRunnerStatus extends TestRunnerSummary {
+  events: TestRunnerEvent[];
+  results: TestRunnerResult[];
 }
 
 export type WidgetType =
@@ -93,7 +145,8 @@ export type WidgetType =
   | 'multiButton'
   | 'multiCheckbox'
   | 'isotpTx'
-  | 'signalGraph';
+  | 'signalGraph'
+  | 'testRunner';
 
 export interface SignalBinding {
   message: string;

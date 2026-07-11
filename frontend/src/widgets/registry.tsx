@@ -7,6 +7,7 @@ import { TxBox } from './TxBox';
 import { ReplayBox } from './ReplayBox';
 import { IsoTpBox } from './IsoTpBox';
 import { GraphWidget } from './GraphWidget';
+import { TestRunnerBox } from './TestRunnerBox';
 
 interface WidgetMeta {
   label: string;
@@ -74,5 +75,10 @@ export const WIDGET_REGISTRY: Record<WidgetType, WidgetMeta> = {
     label: 'CAN 신호 그래프',
     component: GraphWidget,
     defaultSize: { w: 7, h: 5, minW: 1, minH: 2 },
+  },
+  testRunner: {
+    label: '테스트 시나리오 실행기',
+    component: TestRunnerBox,
+    defaultSize: { w: 8, h: 6, minW: 4, minH: 3 },
   },
 };

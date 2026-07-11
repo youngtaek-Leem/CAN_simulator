@@ -310,6 +310,111 @@ CAN 신호 할당을 위해서 CAN 데이터를 쉽게 보기 위하여 DBC 를 
     바꿔가며 전송해 모든 구간이 수평/수직선만으로(대각선 없이) 계단형으로 그려짐을
     스크린샷으로 확인했다.
 
+## Automation 시나리오 러너 통합 계획 (2026-07-11, 사용자 승인 완료 — Phase 1/2 개발 완료)
+
+`Automation/AppTest.py`(Tkinter 데스크톱 앱)와 `Automation/test_script_Rev01.json`을 분석해
+CAN_simulator 웹 앱에 통합하는 계획. AppTest.py는 JSON에 나열된 스텝을 순서대로 실행하는
+인터프리터로, 스텝 타입은 `ID`(케이스 경계+반복횟수), `Power`(전원 On/Off), `delay`,
+`CANReq`(신호 1회 전송), `CANEv`(전송 후 30ms 뒤 invalid 자동 전송 — CAN_simulator의 기존
+Event 규칙과 동일), `CANResp`(timeout 내 기대값 수신 대기/판정), `CANlogReplay`(.blf 재생,
+자기 자신의 TX ID 제외 필터 있음), `Audio`(StartREC/StopREC/compWAV — sounddevice 녹음 +
+상호상관 기반 파형 비교), `AP`(RMS 측정 등 자리표시자), `Loop`(id/gotoid 텍스트 라벨을
+스캔해 그 구간을 반복하는 수동 goto 방식). 실행 결과는 `{step, Signal, status}` 로그로
+누적되어 타임스탬프 JSON 파일로 저장된다.
+
+### 단계 구분
+- **Phase 1 (이번에 개발, 승인 완료)**: CAN 관련 스텝만 — `ID`/`CANReq`/`CANEv`/`delay`/
+  `CANResp`/`CANlogReplay`/`Loop`. 하드웨어 의존이 없어 virtual 버스로 전 과정 검증 가능.
+- **Phase 2 (추후 별도 승인 후 진행)**: `Power`/`Audio`. 사용자 확인: "python 코드에 있는
+  Power와 Audio 동작은 이미 검증이 끝난 코드이므로 그 방식대로 진행" — PyVISA SCPI
+  전원 제어, sounddevice 녹음 메커니즘은 AppTest.py 방식을 그대로 이식한다. 단, WAV
+  비교 알고리즘은 `Automation/compareWAV_MFCC.py`의 다중 지표(MFCC+DTW, 대역 제한 FFT
+  상관계수, RMS/ZCR/스펙트럴 센트로이드)로 교체하고, 사이클끼리 비교하던 기존 방식 대신
+  케이스별로 저장한 고정 기준(golden) WAV와 비교 + 통과 임계값을 설정 가능하게 개선한다
+  (사용자 승인: "MFCC 다중지표로 개선").
+
+### Phase 1 모듈 분해 — 개발 완료 (2026-07-11, 검증 통과)
+
+| 모듈 | 책임 | 인터페이스 | 의존 | 검증 방법 | 상태 |
+|---|---|---|---|---|---|
+| `backend/test_runner_service.py` | JSON 시나리오 파싱 + CAN 스텝 순차 실행 + 케이스별 pass/fail 결과 생성 | `load(text, filename)`, `start()`/`stop()`(백그라운드 스레드), `summary()`(경량), `status()`(전체: events+results) | `dbc_service`, `can_manager`(신규 `add_listener`/`remove_listener`), `tx_scheduler`, `replay_service` | pytest 13개(`tests/test_test_runner_service.py`): 신구 Loop 파싱, `_type` 비활성 블록 스킵, raw hex→scaled 값 변환, 멀티 시그널 CANReq, CANResp pass/timeout, Loop 반복 횟수 정확성, 종료 시 auto_entries 클리어, 결과 파일 저장, stop() 중단, CANlogReplay(+ 송신 노드 제외 필터) | **통과** |
+| `backend/main.py` API 확장 | 스크립트/로그파일 업로드·시작·중지 REST, 경량 상태를 `/api/status`에 포함 | `POST /api/testrunner/upload`, `/logfile/upload`, `/start`, `/stop`, `GET /api/testrunner/status` | test_runner_service | pytest 2개(`tests/test_api.py`): 업로드→시작→완료까지 REST 왕복, 연결 안 된 상태에서 거부됨, 중간에 stop() | **통과** |
+| `frontend/src/widgets/TestRunnerBox.tsx` | JSON/로그파일 업로드 UI, 시작/중지, 스텝별 실시간 로그, 케이스별 pass/fail 배지 | 경량 상태는 `canStore.status.test_runner`(WS), 상세 로그·결과는 400ms 주기로 `GET /api/testrunner/status` 폴링 | WidgetFrame, canStore, api client | 브라우저에서 실제 업로드(fetch로 직접 재현)→Start→로그/결과 실시간 확인 | **통과** |
+
+백엔드 60개 테스트(신규 15개 포함) 통과, `tsc`/`npm run build` 통과. 브라우저에서 실제
+`EngineData.EngineSpeed`를 CANReq로 보내고 CANResp로 같은 값을 확인하는 시나리오를
+업로드→실행해 "케이스 1 · 반복 1 · ✅OK"와 스텝별 로그(`[CANReq] EngineData → Sent`,
+`[CANResp] EngineData EngineSpeed → OK`)가 실시간으로 표시됨을 확인했다.
+
+### 통합 중 확정/구현된 개선 사항
+1. **Loop 문법**: 신규 스크립트는 중첩 구조 `{"type":"loop","cycle":3,"steps":[...]}`를
+   쓰고, 기존 `id`/`gotoid` 평면 스캔 방식 JSON도 자동 감지해 그대로 파싱하는 구버전
+   호환 파서를 병행 지원한다(`parse_script()`/`_parse_step_list()`).
+2. **CAN 연결 재사용**: AppTest.py는 채널·비트타이밍이 하드코딩된 별도 Vector 버스
+   인스턴스를 새로 열지만, CAN_simulator는 상단 바에 이미 PCAN/Vector/virtual 연결
+   UI가 있으므로 이를 그대로 재사용해 이중 연결을 피했다.
+3. **CANReq/CANEv를 동일하게 처리**: `tx_scheduler.send_signal()`이 이미 DBC의 `[TAG]`
+   기반 분류로 신호별 Event(30ms invalid)/Periodic 규칙을 정확히 적용하므로, AppTest.py처럼
+   CANEv에서 수동으로 30ms 뒤 invalid를 다시 보내는 별도 로직이 필요 없다 — CANReq와
+   CANEv를 완전히 동일하게 처리한다. Periodic 신호는 기존 위젯과 동일하게 auto_entries로
+   계속 재전송되다가, 시나리오 실행이 끝나면(정상 종료·중단 모두) `tx_scheduler.stop_auto()`
+   로 정리된다 — 전역 Start/Stop의 auto_entries 클리어와 동일한 패턴.
+4. **원시값(raw) 기준 처리**: JSON의 `Value`는 물리값이 아니라 원시 16진수 비트 패턴이므로,
+   CANReq/CANEv는 `raw*scale+offset`으로 물리값 변환 후 전송하고, CANResp는 `decode_raw()`
+   (스케일·VAL_ 라벨 없이 원시값만 디코딩하는 신규 메서드)로 비교해 신호의 scale이나
+   선택형 여부와 무관하게 항상 정확히 비교되도록 했다 — AppTest.py 원본은 이 변환이 없어
+   scale≠1인 신호에서는 값이 어긋날 수 있는 잠재 버그가 있었다.
+5. **CANlogReplay 제외 필터를 DBC 노드 기반으로**: AppTest.py의 하드코딩된 16진 ID
+   제외 목록 대신, 스텝에 `"excludeSenders": ["AMP_FD"]`처럼 DBC 노드 이름을 적어주면
+   `message.senders`를 통해 자동으로 frame_id를 찾아 제외한다 — 포터블하고 DBC가
+   바뀌어도 그대로 재사용 가능.
+6. **결과 리포트**: 로컬 JSON 파일 저장은 유지하되, 브라우저에서 케이스별 pass/fail과
+   스텝별 로그를 실시간으로 바로 확인할 수 있게 했다(Phase 2에서 오디오 파형 비교
+   그래프까지 확장 검토).
+
+### Phase 2 모듈 분해 — 개발 완료 (2026-07-11, 검증 통과)
+
+사용자 지시: "AppTest.py 코드에 있는 Power와 Audio 동작은 이미 검증이 끝난 코드이니 실수
+없이 integration 하면 잘 동작할 것이다" — SCPI 전원 제어 비트마스크와 sounddevice
+녹음 메커니즘은 AppTest.py 원본 그대로 이식했다(값 하나도 바꾸지 않음). 개선한 부분은
+사전 승인된 두 가지(WAV 비교 알고리즘, CANlogReplay 제외 필터)뿐이다.
+
+| 모듈 | 책임 | 인터페이스 | 의존 | 검증 방법 | 상태 |
+|---|---|---|---|---|---|
+| `backend/power_supply_service.py` | PyVISA SCPI로 ACC/IGN 전원 비트마스크 제어(AppTest.py `PowerSupply` 그대로 이식) | `connect()`/`disconnect()`/`info()`/`set_power(block)` | 없음(pyvisa 선택적 의존 — 미설치/무장비 시 `initialized=False`로 우아하게 저하) | pytest 5개(`tests/test_power_supply_service.py`): 초기 미연결 상태, 무장비 연결 시 저하, 미연결 시 제어 거부, AppTest.py와 동일한 비트마스크 전이 로직, BATT 커맨드 | **통과** |
+| `backend/audio_service.py` | 녹음(AppTest.py `Audio` 그대로 이식) + 다중 지표 WAV 비교(`compareWAV_MFCC.py` 이식: MFCC+DTW, 전체/대역제한 FFT 상관계수, 상호상관, RMS/ZCR/스펙트럴센트로이드) + golden 기준 WAV 저장/비교 | `start()`/`stop()`, `compare(rec_path, golden_name, threshold)`, `save_as_golden()`, `list_devices()`/`select_device()` | 없음(sounddevice/librosa/scikit-learn 선택적 의존) | pytest 9개(`tests/test_audio_service.py`): 무장비 시 장치목록 조회 안전, 장치 미선택 시 녹음 거부, 비교 대상 파일 없음 처리, 동일 신호 비교 시 통과, 무음 vs 톤 비교 시 실패, 7개 지표 모두 반환, golden 저장/원본 없음 처리 | **통과** |
+| `backend/test_runner_service.py` 확장 | 스텝 타입 `Power`/`Audio`(StartREC/StartRECtime/StartRECref/StopREC/compWAV/saveAsGolden) 실행, 서비스 미연결 시 해당 스텝만 Fail 처리하고 나머지 CAN 스텝은 계속 진행 | 생성자에 `power_service`/`audio_service` 선택적 주입 | power_supply_service, audio_service | pytest 5개 추가(`tests/test_test_runner_service.py`): Fake 서비스로 Power 스텝 호출 확인, 서비스 없을 때 우아한 실패, 녹음→비교 전체 시퀀스, golden 필드 누락 시 실패, saveAsGolden | **통과** |
+| `backend/main.py` API 확장 | 전원/오디오 연결·상태·장치선택 REST, golden WAV 업로드 | `POST /api/power/connect`, `/disconnect`, `GET /api/power/status`, `GET /api/audio/devices`, `POST /api/audio/device`, `GET /api/audio/status`, `POST /api/testrunner/golden/upload` | power_supply_service, audio_service | pytest 3개(`tests/test_api.py`): 무장비 시 전원 API 우아한 저하, 오디오 장치 조회·선택, golden WAV 업로드(+ 비-wav 확장자 거부) | **통과** |
+| `frontend/src/widgets/TestRunnerBox.tsx` 확장 | 전원 연결/해제 토글 버튼+상태, 오디오 장치 드롭다운+새로고침, golden WAV 업로드, 녹음 중 표시 | `canStore.status.power`/`.audio`(WS), `api.powerConnect/Disconnect`, `api.audioDevices/SelectDevice`, `api.uploadTestGolden` | WidgetFrame, canStore, api client | 브라우저 실제 확인(가상 버스+sample.dbc 연결 후): 전원 연결 클릭 시 실제 VISA 에러 메시지가 툴팁에 표시, 오디오 장치 드롭다운에 실제 맥 마이크 3개 나열 및 선택 시 `device_index` 반영, Power+Audio 스텝이 섞인 시나리오 실행 시 무장비 상태에서도 각 스텝이 우아하게 Fail 기록되며 나머지 CAN 스텝은 정상 진행되는 것을 실행 로그에서 확인 | **통과** |
+
+백엔드 81개 테스트(Phase 2 신규 17개 포함) 통과, `tsc -b --noEmit`/`npm run build` 통과.
+브라우저에서 가상 버스+sample.dbc로 Power(ACC_On)+CANReq(EngineSpeed)+Audio(StartRECtime+
+compWAV)가 섞인 스크립트를 업로드해 실행: 파워서플라이 미연결 시
+"[Power] ACC_On → 실패: 파워서플라이가 연결되어 있지 않습니다"가 기록된 채로 다음
+CANReq 스텝은 정상 전송(`[CANReq] EngineData → Sent`)되었고, 실제 마이크로 녹음을
+시도했을 때는(장치 선택 후) sounddevice가 반환한 실제 채널 오류(`Invalid number of
+channels`)까지 그대로 로그에 노출되며 스크립트가 중단되지 않고 compWAV까지 진행되어
+"비교할 녹음 파일 없음"으로 우아하게 종료 → 케이스 전체는 Fail로 정확히 집계됨을 확인했다.
+이는 하드웨어 없는 개발 환경에서 CAN 부분만 정상 검증되고, Power/Audio 하드웨어를 실제
+연결하면 동일 코드 경로로 그대로 동작하도록 설계된 대로임을 보여준다.
+
+### 미결정 사항
+- Phase 1/2 모두 개발 완료. 실제 파워서플라이(SCPI)·오디오 녹음 장비·DUT를 연결한
+  end-to-end 실기 검증은 아직 없음 — 하드웨어 준비되는 대로 진행 필요.
+- CANlogReplay용 .blf/.asc 파일은 `POST /api/testrunner/logfile/upload`로 개별
+  업로드해야 한다(스크립트 JSON과 로그 파일을 한 번에 묶어 올리는 기능은 아직 없음) —
+  실제 사용해보고 불편하면 개선.
+- 오디오 비교 임계값(`threshold`, 기본 0.8)의 실제 경보음 대비 최적값은 실기 검증 후
+  조정 필요 — 현재는 합성 사인파 테스트로만 검증됨(MFCC 지표가 아주 단순한 순수
+  단일주파수 톤끼리는 구분력이 약할 수 있음을 확인했으나, 실제 경보음은 배음 구조가
+  풍부해 이 한계의 영향이 제한적일 것으로 예상).
+- **`Automation/AppTest.py` 삭제 예정(사용자 확인, 2026-07-11): 실기 검증 완료 후 삭제.**
+  기능적으로는 `_process_block`이 실행하는 모든 스텝 타입(CANReq/CANEv/CANlogReplay/
+  delay/CANResp/Power/AP/Audio)이 이미 포팅 완료됐고(빈 스텁이던 `CheckResult01`
+  제외), Power/Audio 로직은 원본 그대로 이식했다. 하지만 실기(파워서플라이·마이크·DUT)
+  로 end-to-end 검증되기 전까지는 원본과 비교할 기준선으로 보존한다. 실기 검증이
+  통과하면 이 파일(및 `test_script_Rev01.json` 원본이 필요했던 이유)을 삭제해도 된다.
+
 ## 실기 검증 현황
 
 - **Vector CANcase — HS-CAN(classic CAN): 검증 완료 (2026-07-06, 사용자 확인).** 이상 없음.

@@ -1,4 +1,6 @@
+import json
 import threading
+import time
 
 import can
 from conftest import SAMPLES_DIR
@@ -205,6 +207,108 @@ def test_isotp_send_blocked_when_globally_stopped():
         )
         assert r.status_code == 400
         client.post("/api/disconnect")
+
+
+def test_testrunner_upload_and_run():
+    with make_client() as client:
+        client.post("/api/connect", json={"interface": "virtual", "channel": "t_api_runner"})
+        client.post("/api/run/start")  # earlier tests may have left the global run gate stopped
+        client.post(
+            "/api/dbc/upload",
+            files={"file": ("sample.dbc", (SAMPLES_DIR / "sample.dbc").read_bytes())},
+        )
+        script = json.dumps(
+            [
+                {"type": "ID", "num": "1", "Cycle": 1},
+                {"type": "CANReq", "Message": "EngineData", "Signal": "EngineSpeed", "Value": "0x01"},
+                {"type": "delay", "ms": 50},
+            ]
+        )
+        r = client.post(
+            "/api/testrunner/upload",
+            files={"file": ("t.json", script.encode("utf-8"))},
+        )
+        assert r.status_code == 200
+        assert r.json() == {"loaded": True, "filename": "t.json", "running": False, "case_count": 1, "result_count": 0}
+
+        assert client.get("/api/status").json()["test_runner"]["loaded"] is True
+
+        r = client.post("/api/testrunner/start")
+        assert r.status_code == 200
+        assert r.json()["running"] is True
+
+        deadline = time.time() + 3.0
+        while time.time() < deadline and client.get("/api/testrunner/status").json()["running"]:
+            time.sleep(0.05)
+
+        status = client.get("/api/testrunner/status").json()
+        assert status["running"] is False
+        assert status["results"] == [{"case": "1", "cycle": 1, "status": "OK"}]
+        # the script's own periodic auto-send must not still be armed
+        assert client.get("/api/status").json()["tx"]["auto_entries"] == []
+
+        client.post("/api/disconnect")
+
+
+def test_testrunner_stop_and_requires_connection():
+    with make_client() as client:
+        # disconnected at this point (previous test cleaned up) -> rejected
+        r = client.post("/api/testrunner/start")
+        assert r.status_code == 400
+
+        client.post("/api/connect", json={"interface": "virtual", "channel": "t_api_runner2"})
+        client.post("/api/run/start")  # earlier tests may have left the global run gate stopped
+        client.post(
+            "/api/dbc/upload",
+            files={"file": ("sample.dbc", (SAMPLES_DIR / "sample.dbc").read_bytes())},
+        )
+        script = json.dumps([{"type": "ID", "num": "1", "Cycle": 1}, {"type": "delay", "ms": 3000}])
+        client.post("/api/testrunner/upload", files={"file": ("t.json", script.encode("utf-8"))})
+        r = client.post("/api/testrunner/start")
+        assert r.status_code == 200
+        assert client.get("/api/testrunner/status").json()["running"] is True
+
+        r = client.post("/api/testrunner/stop")
+        assert r.json()["running"] is False
+        client.post("/api/disconnect")
+
+
+def test_power_api_degrades_gracefully_without_hardware():
+    with make_client() as client:
+        r = client.post("/api/power/connect")
+        assert r.status_code == 200
+        assert r.json()["initialized"] is False  # no real VISA instrument in CI/dev
+        assert client.get("/api/power/status").json()["initialized"] is False
+        r = client.post("/api/power/disconnect")
+        assert r.status_code == 200
+
+
+def test_audio_devices_and_selection_api():
+    with make_client() as client:
+        r = client.get("/api/audio/devices")
+        assert r.status_code == 200
+        assert "devices" in r.json()
+
+        r = client.post("/api/audio/device", json={"index": 0})
+        assert r.status_code == 200
+        assert r.json()["device_index"] == 0
+        assert client.get("/api/audio/status").json()["device_index"] == 0
+
+
+def test_testrunner_golden_upload():
+    with make_client() as client:
+        r = client.post(
+            "/api/testrunner/golden/upload",
+            files={"file": ("case1_golden.wav", b"RIFF....WAVEfmt ")},
+        )
+        assert r.status_code == 200
+        assert r.json() == {"saved": "case1_golden.wav"}
+
+        r = client.post(
+            "/api/testrunner/golden/upload",
+            files={"file": ("not_a_wav.txt", b"nope")},
+        )
+        assert r.status_code == 400
 
 
 def test_send_type_override_api():

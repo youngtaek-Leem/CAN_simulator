@@ -82,6 +82,19 @@ export const api = {
     post('/api/replay/start', { mode, frame_ids }),
   replayStop: () => post('/api/replay/stop'),
 
+  uploadTestScript: (file: File) => upload('/api/testrunner/upload', file),
+  uploadTestLogfile: (file: File) => upload('/api/testrunner/logfile/upload', file),
+  uploadTestGolden: (file: File) => upload('/api/testrunner/golden/upload', file),
+  testRunnerStart: () => post('/api/testrunner/start'),
+  testRunnerStop: () => post('/api/testrunner/stop'),
+  testRunnerStatus: () => request<import('../types').TestRunnerStatus>('/api/testrunner/status'),
+
+  powerConnect: () => post<import('../types').PowerStatus>('/api/power/connect'),
+  powerDisconnect: () => post<import('../types').PowerStatus>('/api/power/disconnect'),
+  audioDevices: () => request<import('../types').AudioStatus>('/api/audio/devices'),
+  audioSelectDevice: (index: number) =>
+    post<import('../types').AudioStatus>('/api/audio/device', { index }),
+
   listLayouts: () => request<{ layouts: string[] }>('/api/layouts'),
   getLayout: (name: string) => request(`/api/layouts/${encodeURIComponent(name)}`),
   saveLayout: (name: string, body: unknown) =>

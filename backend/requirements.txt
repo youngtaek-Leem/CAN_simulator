@@ -5,3 +5,14 @@ cantools>=39.4
 python-multipart>=0.0.9
 pytest>=8.0
 httpx>=0.27
+
+# Phase 2 test runner: Power/Audio steps (Automation/AppTest.py port).
+# Optional at import time (backend/power_supply_service.py and
+# audio_service.py degrade gracefully if these aren't installed or no
+# hardware is attached), but required to actually exercise those steps.
+pyvisa>=1.14        # programmable power supply (SCPI over VISA)
+sounddevice>=0.5    # audio recording
+scipy>=1.14         # WAV read/write, FFT/cross-correlation for comparison
+numpy>=1.26
+librosa>=0.10        # MFCC feature extraction for waveform comparison
+scikit-learn>=1.4    # cosine similarity for MFCC comparison

@@ -21,20 +21,39 @@ from pydantic import BaseModel
 
 import timer_util
 import isotp_service
+from audio_service import AudioService
 from can_manager import CanManager
 from dbc_service import DbcService
+from power_supply_service import PowerSupplyService
 from replay_service import ReplayService
+from test_runner_service import TestRunnerService
 from tx_scheduler import TxScheduler
 
 BASE_DIR = Path(__file__).resolve().parent
 UPLOAD_DIR = BASE_DIR / "uploads"
 LAYOUT_DIR = BASE_DIR / "layouts"
+TESTRUNNER_LOG_DIR = BASE_DIR / "uploads" / "testrunner_logs"
+TESTRUNNER_RESULT_DIR = BASE_DIR / "testrunner_results"
+TESTRUNNER_AUDIO_DIR = BASE_DIR / "uploads" / "testrunner_audio"
+TESTRUNNER_GOLDEN_DIR = BASE_DIR / "uploads" / "testrunner_golden"
 FRONTEND_DIST = BASE_DIR.parent / "frontend" / "dist"
 
 can_manager = CanManager()
 dbc_service = DbcService()
 tx_scheduler = TxScheduler(can_manager, dbc_service)
 replay_service = ReplayService(can_manager)
+power_supply_service = PowerSupplyService()
+audio_service = AudioService(TESTRUNNER_AUDIO_DIR, TESTRUNNER_GOLDEN_DIR)
+test_runner_service = TestRunnerService(
+    can_manager,
+    dbc_service,
+    tx_scheduler,
+    replay_service,
+    TESTRUNNER_LOG_DIR,
+    TESTRUNNER_RESULT_DIR,
+    power_service=power_supply_service,
+    audio_service=audio_service,
+)
 
 settings = {"ws_flush_ms": 30}
 # global run gate: when stopped, no TX at all and the RX stream is discarded
@@ -46,13 +65,19 @@ ws_clients: set[WebSocket] = set()
 async def lifespan(app: FastAPI):
     UPLOAD_DIR.mkdir(exist_ok=True)
     LAYOUT_DIR.mkdir(exist_ok=True)
+    TESTRUNNER_LOG_DIR.mkdir(parents=True, exist_ok=True)
+    TESTRUNNER_RESULT_DIR.mkdir(exist_ok=True)
+    TESTRUNNER_AUDIO_DIR.mkdir(parents=True, exist_ok=True)
+    TESTRUNNER_GOLDEN_DIR.mkdir(parents=True, exist_ok=True)
     timer_util.enable_1ms_timer()
     broadcaster = asyncio.create_task(_broadcast_loop())
     yield
     broadcaster.cancel()
+    test_runner_service.stop()
     replay_service.stop()
     tx_scheduler.shutdown()
     can_manager.disconnect()
+    power_supply_service.disconnect()
     timer_util.disable_1ms_timer()
 
 
@@ -140,6 +165,12 @@ def _status() -> dict:
         "dbc": {"loaded": dbc_service.loaded, "filename": dbc_service.filename},
         "settings": dict(settings),
         "run": dict(run_state),
+        # lightweight summary only -- the full step-by-step event log is
+        # fetched on demand via GET /api/testrunner/status, not broadcast
+        # to every client every 0.5s.
+        "test_runner": test_runner_service.summary(),
+        "power": power_supply_service.info(),
+        "audio": audio_service.info(),
     }
 
 
@@ -172,6 +203,7 @@ def run_stop():
     tx_scheduler.set_paused(True)
     tx_scheduler.stop_auto()
     replay_service.stop()
+    test_runner_service.stop()
     return _status()
 
 
@@ -201,6 +233,7 @@ def connect(req: ConnectRequest):
 
 @app.post("/api/disconnect")
 def disconnect():
+    test_runner_service.stop()
     replay_service.stop()
     tx_scheduler.stop()
     tx_scheduler.stop_auto()
@@ -385,6 +418,105 @@ def replay_start(req: ReplayStartRequest):
 @app.post("/api/replay/stop")
 def replay_stop():
     return replay_service.stop()
+
+
+# ---- Test scenario runner (Automation JSON scripts) -----------------------
+
+
+@app.post("/api/testrunner/upload")
+async def testrunner_upload_script(file: UploadFile):
+    raw = await file.read()
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        text = raw.decode("cp1252", errors="replace")
+    try:
+        return test_runner_service.load(text, file.filename or "script.json")
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"시나리오 JSON 파싱 오류: {exc}")
+
+
+@app.post("/api/testrunner/logfile/upload")
+async def testrunner_upload_logfile(file: UploadFile):
+    suffix = Path(file.filename or "").suffix.lower()
+    if suffix not in (".blf", ".asc"):
+        raise HTTPException(status_code=400, detail="only .blf / .asc are supported")
+    dest = TESTRUNNER_LOG_DIR / (file.filename or f"log{suffix}")
+    dest.write_bytes(await file.read())
+    return {"saved": dest.name}
+
+
+@app.post("/api/testrunner/start")
+def testrunner_start():
+    _require_running()
+    if not can_manager.connected:
+        raise HTTPException(status_code=400, detail="CAN bus is not connected")
+    if not dbc_service.loaded:
+        raise HTTPException(status_code=400, detail="no DBC loaded")
+    try:
+        return test_runner_service.start()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/api/testrunner/stop")
+def testrunner_stop():
+    return test_runner_service.stop()
+
+
+@app.get("/api/testrunner/status")
+def testrunner_status():
+    return test_runner_service.status()
+
+
+# ---- Power supply (Phase 2) ------------------------------------------------
+
+
+@app.post("/api/power/connect")
+def power_connect():
+    return power_supply_service.connect()
+
+
+@app.post("/api/power/disconnect")
+def power_disconnect():
+    return power_supply_service.disconnect()
+
+
+@app.get("/api/power/status")
+def power_status():
+    return power_supply_service.info()
+
+
+# ---- Audio (Phase 2) --------------------------------------------------------
+
+
+@app.get("/api/audio/devices")
+def audio_devices():
+    return audio_service.refresh_devices()
+
+
+class AudioDeviceRequest(BaseModel):
+    index: int
+
+
+@app.post("/api/audio/device")
+def audio_select_device(req: AudioDeviceRequest):
+    return audio_service.select_device(req.index)
+
+
+@app.get("/api/audio/status")
+def audio_status():
+    return audio_service.info()
+
+
+@app.post("/api/testrunner/golden/upload")
+async def testrunner_upload_golden(file: UploadFile):
+    suffix = Path(file.filename or "").suffix.lower()
+    if suffix != ".wav":
+        raise HTTPException(status_code=400, detail="only .wav is supported")
+    dest = TESTRUNNER_GOLDEN_DIR / (file.filename or "golden.wav")
+    dest.write_bytes(await file.read())
+    return {"saved": dest.name}
 
 
 # ---- Layout persistence --------------------------------------------------

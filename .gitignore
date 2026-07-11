@@ -13,11 +13,19 @@ frontend/node_modules/
 
 # Runtime data (not source)
 backend/uploads/
+backend/testrunner_results/
 
 # Real vehicle/OEM DBC files (proprietary, not for the public repo) —
 # samples/sample.dbc stays tracked, it's a small synthetic file used by tests.
 samples/AMP_FD_260501.dbc
 samples/AMP_HS_260201.dbc
+
+# Legacy Automation/ dump (proprietary OEM DBCs, Vector vxlapi DLLs, large
+# .blf CAN logs, draft scripts) -- kept local only as reference material for
+# the test-runner port (see Requirement.md "Automation 시나리오 러너 통합
+# 계획"). Not for the public repo.
+Automation/
+Automation.zip
 
 # OS
 .DS_Store
