@@ -2,12 +2,14 @@ import type { ComponentType } from 'react';
 import type { WidgetConfig, WidgetType } from '../types';
 import { CanMessageDisplay, TextDisplay } from './displays';
 import { ButtonWidget, CheckboxWidget, DropdownWidget, SliderWidget } from './controls';
-import { MultiButtonWidget, MultiCheckboxWidget } from './MultiControls';
+import { MultiButtonWidget, MultiCheckboxWidget, FunctionMultiButtonWidget, RandomMultiButtonWidget } from './MultiControls';
 import { TxBox } from './TxBox';
 import { ReplayBox } from './ReplayBox';
 import { IsoTpBox } from './IsoTpBox';
 import { GraphWidget } from './GraphWidget';
 import { TestRunnerBox } from './TestRunnerBox';
+import { FunctionButtonWidget } from './FunctionButtonWidget';
+import { RandomButtonWidget } from './RandomButtonWidget';
 
 interface WidgetMeta {
   label: string;
@@ -80,5 +82,25 @@ export const WIDGET_REGISTRY: Record<WidgetType, WidgetMeta> = {
     label: '테스트 시나리오 실행기',
     component: TestRunnerBox,
     defaultSize: { w: 8, h: 6, minW: 4, minH: 3 },
+  },
+  functionButton: {
+    label: 'Function 버튼',
+    component: FunctionButtonWidget,
+    defaultSize: { w: 2, h: 2, minW: 1, minH: 1 },
+  },
+  randomButton: {
+    label: 'Random 버튼',
+    component: RandomButtonWidget,
+    defaultSize: { w: 2, h: 2, minW: 1, minH: 1 },
+  },
+  functionMultiButton: {
+    label: 'Function 멀티 버튼',
+    component: FunctionMultiButtonWidget,
+    defaultSize: { w: 6, h: 4, minW: 1, minH: 2 },
+  },
+  randomMultiButton: {
+    label: 'Random 멀티 버튼',
+    component: RandomMultiButtonWidget,
+    defaultSize: { w: 6, h: 4, minW: 1, minH: 2 },
   },
 };

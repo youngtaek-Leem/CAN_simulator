@@ -8,7 +8,7 @@ from conftest import SAMPLES_DIR
 from can_manager import CanManager
 from dbc_service import DbcService
 from replay_service import ReplayService
-from test_runner_service import TestRunnerService, parse_script
+from test_runner_service import TestRunnerService, parse_functions, parse_script
 from tx_scheduler import TxScheduler
 
 
@@ -438,3 +438,122 @@ def test_audio_save_as_golden(runner_with_fakes):
     runner.start()
     time.sleep(0.3)
     assert audio.saved_golden == [(audio.started[0], "case1_golden.wav")]
+
+
+# ---- FUNC / Function Button (parsing + single-name execution) ----------------
+
+
+def test_parse_functions_boundary():
+    raw = [
+        {"type": "FUNC", "name": "PowerTest", "Cycle": 1},
+        {"type": "Power", "command": "ACC_On"},
+        {"type": "FUNC", "name": "TickTok", "Cycle": 2},
+        {"type": "delay", "ms": 5},
+    ]
+    functions = parse_functions(raw)
+    assert [f.num for f in functions] == ["PowerTest", "TickTok"]
+    assert functions[0].cycle == 1 and [s.type for s in functions[0].steps] == ["Power"]
+    assert functions[1].cycle == 2 and [s.type for s in functions[1].steps] == ["delay"]
+
+
+def test_disabled_func_blocks_are_skipped():
+    raw = [
+        {"type": "FUNC", "name": "A", "Cycle": 1},
+        {"type": "delay", "ms": 5},
+        {"_type": "FUNC", "name": "B", "Cycle": 1},
+        {"type": "delay", "ms": 5},
+    ]
+    functions = parse_functions(raw)
+    assert [f.num for f in functions] == ["A"]
+
+
+def test_start_function_runs_only_that_case(stack):
+    cm, dbc, sched, replay, runner, peer, log_dir, result_dir = stack
+    script = [
+        {"type": "FUNC", "name": "SendSpeed", "Cycle": 1},
+        {"type": "CANReq", "Message": "EngineData", "Signal": "EngineSpeed", "Value": "0x01"},
+        {"type": "FUNC", "name": "SendTurn", "Cycle": 1},
+        {"type": "CANReq", "Message": "DriverCommand", "Signal": "TurnSignal", "Value": "0x01"},
+    ]
+    runner.load_functions(json.dumps(script), "funcs.json")
+    runner.start_function("SendTurn")
+    frames = drain(peer, 0.3)
+    runner.stop()
+    assert any(f.arbitration_id == 0x300 for f in frames)
+    assert not any(f.arbitration_id == 0x100 for f in frames)
+    assert runner.status()["results"] == [{"case": "SendTurn", "cycle": 1, "status": "OK"}]
+
+
+def test_start_function_unknown_name_raises(stack):
+    cm, dbc, sched, replay, runner, peer, log_dir, result_dir = stack
+    runner.load_functions(json.dumps([{"type": "FUNC", "name": "A", "Cycle": 1}, {"type": "delay", "ms": 5}]), "f.json")
+    with pytest.raises(RuntimeError):
+        runner.start_function("DoesNotExist")
+
+
+def test_start_function_blocked_while_scenario_running(stack):
+    cm, dbc, sched, replay, runner, peer, log_dir, result_dir = stack
+    runner.load(json.dumps([{"type": "ID", "num": "1", "Cycle": 1}, {"type": "delay", "ms": 2000}]), "s.json")
+    runner.load_functions(json.dumps([{"type": "FUNC", "name": "A", "Cycle": 1}, {"type": "delay", "ms": 5}]), "f.json")
+    runner.start()
+    time.sleep(0.1)
+    with pytest.raises(RuntimeError):
+        runner.start_function("A")
+    runner.stop()
+
+
+def test_scenario_start_blocked_while_function_running(stack):
+    cm, dbc, sched, replay, runner, peer, log_dir, result_dir = stack
+    runner.load(json.dumps([{"type": "ID", "num": "1", "Cycle": 1}, {"type": "delay", "ms": 10}]), "s.json")
+    runner.load_functions(json.dumps([{"type": "FUNC", "name": "A", "Cycle": 1}, {"type": "delay", "ms": 2000}]), "f.json")
+    runner.start_function("A")
+    time.sleep(0.1)
+    with pytest.raises(RuntimeError):
+        runner.start()
+    runner.stop()
+
+
+def test_functions_summary_lists_names(stack):
+    cm, dbc, sched, replay, runner, peer, log_dir, result_dir = stack
+    assert runner.summary()["functions"] == {"loaded": False, "filename": None, "names": []}
+    script = [
+        {"type": "FUNC", "name": "PowerTest", "Cycle": 1},
+        {"type": "delay", "ms": 5},
+        {"type": "FUNC", "name": "TickTok", "Cycle": 1},
+        {"type": "delay", "ms": 5},
+    ]
+    runner.load_functions(json.dumps(script), "funcs.json")
+    assert runner.summary()["functions"] == {
+        "loaded": True,
+        "filename": "funcs.json",
+        "names": ["PowerTest", "TickTok"],
+    }
+
+
+def test_load_functions_without_func_blocks_raises(stack):
+    cm, dbc, sched, replay, runner, peer, log_dir, result_dir = stack
+    # an ordinary ID-based scenario script has no FUNC boundaries at all
+    script = [{"type": "ID", "num": "1", "Cycle": 1}, {"type": "delay", "ms": 5}]
+    with pytest.raises(ValueError):
+        runner.load_functions(json.dumps(script), "not_a_func_script.json")
+    # a rejected upload must not clobber a previously loaded function library
+    runner.load_functions(
+        json.dumps([{"type": "FUNC", "name": "A", "Cycle": 1}, {"type": "delay", "ms": 5}]), "good.json"
+    )
+    with pytest.raises(ValueError):
+        runner.load_functions(json.dumps(script), "bad.json")
+    assert runner.summary()["functions"]["filename"] == "good.json"
+
+
+def test_running_case_tracks_active_function(stack):
+    cm, dbc, sched, replay, runner, peer, log_dir, result_dir = stack
+    runner.load_functions(
+        json.dumps([{"type": "FUNC", "name": "SlowFunc", "Cycle": 1}, {"type": "delay", "ms": 300}]),
+        "f.json",
+    )
+    assert runner.summary()["running_case"] is None
+    runner.start_function("SlowFunc")
+    time.sleep(0.1)
+    assert runner.summary()["running_case"] == "SlowFunc"
+    runner.stop()
+    assert runner.summary()["running_case"] is None

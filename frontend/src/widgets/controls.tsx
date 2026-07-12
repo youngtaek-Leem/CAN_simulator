@@ -21,13 +21,56 @@ function useSendSignal(config: WidgetConfig) {
       setError((e as Error).message);
     }
   };
-  return { send, error };
+  return { send, error, setError };
+}
+
+/** Periodic signals: press 1 starts sending the configured value, press 2
+ * switches to sending the invalid value (bit-max) continuously, press 3
+ * switches back, etc. Event signals are unaffected -- they keep the plain
+ * single-value-per-click behavior (the backend's own 30ms-later invalid
+ * follow-up already applies there). */
+function usePeriodicInvalidToggle(config: WidgetConfig, value: number) {
+  const { dbc } = useApp();
+  const bound = findSignal(dbc, config.binding);
+  const isPeriodic = bound?.signal.send_type === 'periodic';
+  // what the *next* click will send, and what the *last* click actually
+  // sent (null before the first click, so the label starts out neutral)
+  const [pending, setPending] = useState<'valid' | 'invalid'>('valid');
+  const [lastSent, setLastSent] = useState<'valid' | 'invalid' | null>(null);
+  const { send, error, setError } = useSendSignal(config);
+
+  const activate = async () => {
+    if (!config.binding?.signal) {
+      send(value);
+      return;
+    }
+    if (!isPeriodic) {
+      send(value);
+      return;
+    }
+    if (pending === 'invalid') {
+      try {
+        await api.sendInvalid(config.binding.message, config.binding.signal);
+        setError(null);
+      } catch (e) {
+        setError((e as Error).message);
+      }
+    } else {
+      await send(value);
+    }
+    // advance the toggle regardless of send success -- consistent with the
+    // rest of this app's optimistic (no-rollback-on-failure) UI updates
+    setLastSent(pending);
+    setPending(pending === 'invalid' ? 'valid' : 'invalid');
+  };
+
+  const invalidActive = isPeriodic && lastSent === 'invalid';
+  return { activate, error, invalidActive };
 }
 
 export function ButtonWidget({ config }: { config: WidgetConfig }) {
-  const { send, error } = useSendSignal(config);
   const value = Number(config.options.value ?? 1);
-  const activate = () => send(value);
+  const { activate, error, invalidActive } = usePeriodicInvalidToggle(config, value);
   return (
     <div className="control-widget">
       <button
@@ -44,7 +87,11 @@ export function ButtonWidget({ config }: { config: WidgetConfig }) {
         }}
         disabled={!config.binding?.signal}
       >
-        {config.binding?.signal ? `${config.binding.signal} = ${value}` : '신호 미할당'}
+        {config.binding?.signal
+          ? invalidActive
+            ? `${config.binding.signal} = INVALID`
+            : `${config.binding.signal} = ${value}`
+          : '신호 미할당'}
       </button>
       {error && <span className="error">{error}</span>}
     </div>

@@ -229,7 +229,15 @@ def test_testrunner_upload_and_run():
             files={"file": ("t.json", script.encode("utf-8"))},
         )
         assert r.status_code == 200
-        assert r.json() == {"loaded": True, "filename": "t.json", "running": False, "case_count": 1, "result_count": 0}
+        assert r.json() == {
+            "loaded": True,
+            "filename": "t.json",
+            "running": False,
+            "running_case": None,
+            "case_count": 1,
+            "result_count": 0,
+            "functions": {"loaded": False, "filename": None, "names": []},
+        }
 
         assert client.get("/api/status").json()["test_runner"]["loaded"] is True
 
@@ -271,6 +279,66 @@ def test_testrunner_stop_and_requires_connection():
         r = client.post("/api/testrunner/stop")
         assert r.json()["running"] is False
         client.post("/api/disconnect")
+
+
+def test_testrunner_functions_upload_and_run():
+    with make_client() as client:
+        client.post("/api/connect", json={"interface": "virtual", "channel": "t_api_funcs"})
+        client.post("/api/run/start")  # earlier tests may have left the global run gate stopped
+        client.post(
+            "/api/dbc/upload",
+            files={"file": ("sample.dbc", (SAMPLES_DIR / "sample.dbc").read_bytes())},
+        )
+        script = json.dumps(
+            [
+                {"type": "FUNC", "name": "SendSpeed", "Cycle": 1},
+                {"type": "CANReq", "Message": "EngineData", "Signal": "EngineSpeed", "Value": "0x01"},
+                {"type": "FUNC", "name": "SendTurn", "Cycle": 1},
+                {"type": "CANReq", "Message": "DriverCommand", "Signal": "TurnSignal", "Value": "0x01"},
+                {"type": "delay", "ms": 50},
+            ]
+        )
+        r = client.post(
+            "/api/testrunner/functions/upload",
+            files={"file": ("funcs.json", script.encode("utf-8"))},
+        )
+        assert r.status_code == 200
+        assert r.json()["functions"] == {
+            "loaded": True,
+            "filename": "funcs.json",
+            "names": ["SendSpeed", "SendTurn"],
+        }
+        assert client.get("/api/status").json()["test_runner"]["functions"]["names"] == [
+            "SendSpeed",
+            "SendTurn",
+        ]
+
+        r = client.post("/api/testrunner/functions/start", json={"name": "SendTurn"})
+        assert r.status_code == 200
+        assert r.json()["running"] is True
+
+        deadline = time.time() + 3.0
+        while time.time() < deadline and client.get("/api/testrunner/status").json()["running"]:
+            time.sleep(0.05)
+
+        status = client.get("/api/testrunner/status").json()
+        assert status["results"] == [{"case": "SendTurn", "cycle": 1, "status": "OK"}]
+
+        r = client.post("/api/testrunner/functions/start", json={"name": "NoSuchFunc"})
+        assert r.status_code == 400
+
+        client.post("/api/disconnect")
+
+
+def test_testrunner_functions_upload_rejects_script_without_func_blocks():
+    with make_client() as client:
+        # an ordinary ID-based scenario script, not a FUNC master script
+        script = json.dumps([{"type": "ID", "num": "1", "Cycle": 1}, {"type": "delay", "ms": 5}])
+        r = client.post(
+            "/api/testrunner/functions/upload",
+            files={"file": ("scenario.json", script.encode("utf-8"))},
+        )
+        assert r.status_code == 400
 
 
 def test_power_api_degrades_gracefully_without_hardware():
@@ -329,3 +397,56 @@ def test_send_type_override_api():
         engine = next(m for m in r.json()["messages"] if m["name"] == "EngineData")
         speed = next(s for s in engine["signals"] if s["name"] == "EngineSpeed")
         assert speed["send_type"] == "event"
+
+
+def test_signal_generator_random_and_generate_api():
+    with make_client() as client:
+        client.post("/api/connect", json={"interface": "virtual", "channel": "t_api_gen"})
+        client.post("/api/run/start")  # earlier tests may have left the global run gate stopped
+        client.post(
+            "/api/dbc/upload",
+            files={"file": ("sample.dbc", (SAMPLES_DIR / "sample.dbc").read_bytes())},
+        )
+        r = client.post(
+            "/api/tx/signal/generator",
+            json={"message_name": "DriverCommand", "signal_name": "TurnSignal", "mode": "random"},
+        )
+        assert r.status_code == 200
+
+        r = client.post(
+            "/api/tx/signal/generate",
+            json={"message_name": "DriverCommand", "signal_name": "TurnSignal"},
+        )
+        assert r.status_code == 200
+        assert r.json()["sent"] is True
+        assert 0 <= r.json()["raw_value"] <= 15
+
+        # clearing the generator makes further generate calls fail
+        client.post(
+            "/api/tx/signal/generator",
+            json={"message_name": "DriverCommand", "signal_name": "TurnSignal", "mode": "fixed"},
+        )
+        r = client.post(
+            "/api/tx/signal/generate",
+            json={"message_name": "DriverCommand", "signal_name": "TurnSignal"},
+        )
+        assert r.status_code == 400
+
+        client.post("/api/disconnect")
+
+
+def test_signal_invalid_send_api():
+    with make_client() as client:
+        client.post("/api/connect", json={"interface": "virtual", "channel": "t_api_invalid"})
+        client.post("/api/run/start")  # earlier tests may have left the global run gate stopped
+        client.post(
+            "/api/dbc/upload",
+            files={"file": ("sample.dbc", (SAMPLES_DIR / "sample.dbc").read_bytes())},
+        )
+        r = client.post(
+            "/api/tx/signal/invalid",
+            json={"message_name": "EngineData", "signal_name": "EngineSpeed"},
+        )
+        assert r.status_code == 200
+        assert r.json() == {"sent": True, "raw_value": 0xFFFF, "send_type": "periodic"}
+        client.post("/api/disconnect")

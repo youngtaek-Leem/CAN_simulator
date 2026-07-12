@@ -1,6 +1,7 @@
 import time
 
 import can
+import pytest
 from conftest import SAMPLES_DIR
 
 from can_manager import CanManager
@@ -127,6 +128,147 @@ def test_fd_signal_sends_32_byte_fd_frame():
         assert all(f.is_fd for f in fd_frames)
         assert all(f.bitrate_switch for f in fd_frames)
         sched.stop_auto("FdSensorData")
+    finally:
+        teardown_stack(cm, sched, peer)
+
+
+def test_generator_random_stays_within_bit_range():
+    cm, dbc, sched, peer = setup_stack("t_gen_random")
+    try:
+        # TurnSignal is 4 bits unsigned -> raw range 0..15
+        sched.set_value_generator("DriverCommand", "TurnSignal", "random")
+        seen = set()
+        for _ in range(15):
+            sched.send_generated("DriverCommand", "TurnSignal")
+            seen.add(dbc._signal_state["DriverCommand"]["TurnSignal"])
+        assert seen and all(0 <= v <= 15 for v in seen)
+    finally:
+        teardown_stack(cm, sched, peer)
+
+
+def test_generator_range_cycles_and_wraps():
+    cm, dbc, sched, peer = setup_stack("t_gen_range")
+    try:
+        sched.set_value_generator("DriverCommand", "TurnSignal", "range", range_min=2, range_max=5, step=2)
+        values = []
+        for _ in range(4):
+            sched.send_generated("DriverCommand", "TurnSignal")
+            values.append(dbc._signal_state["DriverCommand"]["TurnSignal"])
+        assert values == [2, 4, 2, 4]
+    finally:
+        teardown_stack(cm, sched, peer)
+
+
+def test_generator_range_clamps_to_bit_bounds():
+    cm, dbc, sched, peer = setup_stack("t_gen_clamp")
+    try:
+        # requested range far exceeds TurnSignal's 4-bit (0..15) range
+        sched.set_value_generator("DriverCommand", "TurnSignal", "range", range_min=-100, range_max=1000, step=1)
+        for _ in range(20):
+            sched.send_generated("DriverCommand", "TurnSignal")
+            assert 0 <= dbc._signal_state["DriverCommand"]["TurnSignal"] <= 15
+    finally:
+        teardown_stack(cm, sched, peer)
+
+
+def test_periodic_generator_changes_value_every_tick():
+    cm, dbc, sched, peer = setup_stack("t_gen_periodic")
+    try:
+        # EngineSpeed is periodic (EngineData cycle = 10ms), 16-bit raw range
+        sched.set_value_generator("EngineData", "EngineSpeed", "random")
+        sched.send_generated("EngineData", "EngineSpeed")  # arms the auto entry
+        frames = collect(peer, 0.3)
+        engine = [f for f in frames if f.arbitration_id == 0x100]
+        assert len(engine) >= 5
+        raws = {int.from_bytes(f.data[0:2], "little") for f in engine}
+        assert len(raws) > 1, "periodic frames should show changing (random) values"
+        sched.stop_auto("EngineData")
+    finally:
+        teardown_stack(cm, sched, peer)
+
+
+def test_event_generator_does_not_auto_resend():
+    cm, dbc, sched, peer = setup_stack("t_gen_event")
+    try:
+        # DriverCommand (TurnSignal's message) is event-typed -- a registered
+        # generator must not create periodic auto-resend for it.
+        sched.set_value_generator("DriverCommand", "TurnSignal", "random")
+        sched.send_generated("DriverCommand", "TurnSignal")
+        frames = collect(peer, 0.3)
+        cmd_frames = [f for f in frames if f.arbitration_id == 0x300]
+        assert len(cmd_frames) == 2, f"expected exactly valid+invalid, got {len(cmd_frames)}"
+    finally:
+        teardown_stack(cm, sched, peer)
+
+
+def test_send_generated_without_registered_generator_raises():
+    cm, dbc, sched, peer = setup_stack("t_gen_missing")
+    try:
+        with pytest.raises(ValueError):
+            sched.send_generated("DriverCommand", "TurnSignal")
+    finally:
+        teardown_stack(cm, sched, peer)
+
+
+def test_set_value_generator_fixed_clears_it():
+    cm, dbc, sched, peer = setup_stack("t_gen_clear")
+    try:
+        sched.set_value_generator("DriverCommand", "TurnSignal", "random")
+        sched.send_generated("DriverCommand", "TurnSignal")  # no raise
+        sched.set_value_generator("DriverCommand", "TurnSignal", "fixed")
+        with pytest.raises(ValueError):
+            sched.send_generated("DriverCommand", "TurnSignal")
+    finally:
+        teardown_stack(cm, sched, peer)
+
+
+def test_send_invalid_persists_on_periodic_ticks():
+    cm, dbc, sched, peer = setup_stack("t_invalid_periodic")
+    try:
+        # EngineSpeed periodic, 16-bit unsigned -> invalid raw = 0xFFFF
+        sched.send_signal("EngineData", {"EngineSpeed": 3000})
+        collect(peer, 0.05)  # drain send_signal's own immediate frame
+        result = sched.send_invalid("EngineData", "EngineSpeed")
+        assert result == {"sent": True, "raw_value": 0xFFFF, "send_type": "periodic"}
+        frames = collect(peer, 0.3)
+        engine = [f for f in frames if f.arbitration_id == 0x100]
+        assert len(engine) >= 5
+        raws = {int.from_bytes(f.data[0:2], "little") for f in engine}
+        assert raws == {0xFFFF}, f"expected every periodic tick to stay invalid, got {raws}"
+        sched.stop_auto("EngineData")
+    finally:
+        teardown_stack(cm, sched, peer)
+
+
+def test_send_invalid_clears_registered_generator():
+    cm, dbc, sched, peer = setup_stack("t_invalid_clears_gen")
+    try:
+        sched.set_value_generator("EngineData", "EngineSpeed", "random")
+        sched.send_generated("EngineData", "EngineSpeed")
+        collect(peer, 0.05)  # drain send_generated's own immediate frame
+        sched.send_invalid("EngineData", "EngineSpeed")
+        frames = collect(peer, 0.3)
+        engine = [f for f in frames if f.arbitration_id == 0x100]
+        assert len(engine) >= 5
+        raws = {int.from_bytes(f.data[0:2], "little") for f in engine}
+        assert raws == {0xFFFF}, f"generator should not overwrite the invalid value, got {raws}"
+        sched.stop_auto("EngineData")
+    finally:
+        teardown_stack(cm, sched, peer)
+
+
+def test_send_signal_after_invalid_restores_valid_value():
+    cm, dbc, sched, peer = setup_stack("t_invalid_restore")
+    try:
+        sched.send_invalid("EngineData", "EngineSpeed")
+        collect(peer, 0.1)
+        sched.send_signal("EngineData", {"EngineSpeed": 1500})
+        frames = collect(peer, 0.3)
+        engine = [f for f in frames if f.arbitration_id == 0x100]
+        assert len(engine) >= 5
+        decoded = {dbc.decode(0x100, bytes(f.data))["signals"]["EngineSpeed"] for f in engine}
+        assert decoded == {1500}, f"expected restored value to stick, got {decoded}"
+        sched.stop_auto("EngineData")
     finally:
         teardown_stack(cm, sched, peer)
 

@@ -691,6 +691,14 @@ td.empty {
   opacity: 1;
 }
 
+/* Function 버튼: 자신이 트리거한 스크립트가 실행 중일 때 -- 다른 스크립트가
+   실행 중이라 그냥 비활성화된 것과 구분되는 색상 */
+.control-widget .big-btn.func-running:disabled {
+  background: #8c8c8c;
+  color: #fff;
+  border-color: #5a5a5a;
+}
+
 .control-widget input[type='checkbox'] {
   appearance: none;
   -webkit-appearance: none;

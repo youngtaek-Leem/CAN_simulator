@@ -346,6 +346,64 @@ def tx_auto_stop(req: AutoStopRequest):
     return tx_scheduler.stop_auto(req.message_name)
 
 
+class ValueGeneratorRequest(BaseModel):
+    message_name: str
+    signal_name: str
+    mode: str  # "fixed" | "random" | "range"
+    range_min: int | None = None
+    range_max: int | None = None
+    step: int = 1
+
+
+@app.post("/api/tx/signal/generator")
+def tx_signal_generator(req: ValueGeneratorRequest):
+    if not dbc_service.loaded:
+        raise HTTPException(status_code=400, detail="no DBC loaded")
+    try:
+        tx_scheduler.set_value_generator(
+            req.message_name, req.signal_name, req.mode, req.range_min, req.range_max, req.step
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"ok": True}
+
+
+class GenerateSendRequest(BaseModel):
+    message_name: str
+    signal_name: str
+
+
+@app.post("/api/tx/signal/generate")
+def tx_signal_generate(req: GenerateSendRequest):
+    _require_running()
+    if not can_manager.connected:
+        raise HTTPException(status_code=400, detail="CAN bus is not connected")
+    if not dbc_service.loaded:
+        raise HTTPException(status_code=400, detail="no DBC loaded")
+    try:
+        return tx_scheduler.send_generated(req.message_name, req.signal_name)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+class InvalidSendRequest(BaseModel):
+    message_name: str
+    signal_name: str
+
+
+@app.post("/api/tx/signal/invalid")
+def tx_signal_invalid(req: InvalidSendRequest):
+    _require_running()
+    if not can_manager.connected:
+        raise HTTPException(status_code=400, detail="CAN bus is not connected")
+    if not dbc_service.loaded:
+        raise HTTPException(status_code=400, detail="no DBC loaded")
+    try:
+        return tx_scheduler.send_invalid(req.message_name, req.signal_name)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
 class IsoTpSendRequest(BaseModel):
     tx_id: int
     fc_id: int
@@ -467,6 +525,36 @@ def testrunner_stop():
 @app.get("/api/testrunner/status")
 def testrunner_status():
     return test_runner_service.status()
+
+
+@app.post("/api/testrunner/functions/upload")
+async def testrunner_upload_functions(file: UploadFile):
+    raw = await file.read()
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        text = raw.decode("cp1252", errors="replace")
+    try:
+        return test_runner_service.load_functions(text, file.filename or "functions.json")
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"함수 마스터 JSON 파싱 오류: {exc}")
+
+
+class FunctionStartRequest(BaseModel):
+    name: str
+
+
+@app.post("/api/testrunner/functions/start")
+def testrunner_start_function(req: FunctionStartRequest):
+    _require_running()
+    if not can_manager.connected:
+        raise HTTPException(status_code=400, detail="CAN bus is not connected")
+    if not dbc_service.loaded:
+        raise HTTPException(status_code=400, detail="no DBC loaded")
+    try:
+        return test_runner_service.start_function(req.name)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
 
 # ---- Power supply (Phase 2) ------------------------------------------------

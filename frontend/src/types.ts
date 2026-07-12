@@ -108,8 +108,16 @@ export interface TestRunnerSummary {
   loaded: boolean;
   filename: string | null;
   running: boolean;
+  running_case: string | null;
   case_count: number;
   result_count: number;
+  functions: TestRunnerFunctionsSummary;
+}
+
+export interface TestRunnerFunctionsSummary {
+  loaded: boolean;
+  filename: string | null;
+  names: string[];
 }
 
 export interface TestRunnerEvent {
@@ -146,20 +154,30 @@ export type WidgetType =
   | 'multiCheckbox'
   | 'isotpTx'
   | 'signalGraph'
-  | 'testRunner';
+  | 'testRunner'
+  | 'functionButton'
+  | 'randomButton'
+  | 'functionMultiButton'
+  | 'randomMultiButton';
 
 export interface SignalBinding {
   message: string;
   signal: string;
 }
 
-// One cell of a multiButton / multiCheckbox grid widget.
+// One cell of a multiButton / multiCheckbox / functionMultiButton /
+// randomMultiButton grid widget.
 export interface MultiCell {
   binding?: SignalBinding;
   label?: string;
   value?: number; // button: value to send on click
   onValue?: number; // checkbox: value to send when checked
   offValue?: number; // checkbox: value to send when unchecked
+  funcName?: string; // functionMultiButton: FUNC name to trigger on click
+  mode?: 'random' | 'range'; // randomMultiButton: value generation mode
+  rangeMin?: number; // randomMultiButton range mode: raw min
+  rangeMax?: number; // randomMultiButton range mode: raw max
+  step?: number; // randomMultiButton range mode: raw step
 }
 
 export interface WidgetConfig {

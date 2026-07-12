@@ -289,6 +289,16 @@ function TopBar(props: TopBarProps) {
     }
   };
 
+  const functions = canStore.status?.test_runner.functions;
+  const uploadFunctions = async (file: File) => {
+    try {
+      await api.uploadFunctionScript(file);
+      props.notify(`함수 마스터 스크립트 로드됨: ${file.name}`);
+    } catch (e) {
+      props.notify(`함수 스크립트 오류: ${(e as Error).message}`);
+    }
+  };
+
   const running = canStore.status?.run?.running ?? false;
   const toggleRun = async () => {
     try {
@@ -394,6 +404,21 @@ function TopBar(props: TopBarProps) {
             ))}
           </select>
         )}
+      </span>
+
+      <span className="group">
+        <label className="small-btn file-btn">
+          함수 마스터 스크립트
+          <input
+            type="file"
+            accept=".json"
+            hidden
+            onChange={(e) => e.target.files?.[0] && uploadFunctions(e.target.files[0])}
+          />
+        </label>
+        <span className="hint">
+          {functions?.loaded ? `${functions.filename} — ${functions.names.length}개 기능` : '로드 안 됨'}
+        </span>
       </span>
 
       <span className="group">

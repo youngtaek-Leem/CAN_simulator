@@ -5,12 +5,25 @@
 import { useState, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { api } from '../api/client';
-import { findSignal, signalBitMax, useApp } from '../store/appContext';
+import { findSignal, signalBitMax, signalBitMin, signalRawBounds, useApp } from '../store/appContext';
 import { canStore } from '../store/canStore';
 import { MessageFilter, MessageOptions, type MessageFilterMode } from './MessageOptions';
-import type { WidgetConfig } from '../types';
+import type { DbcSignal, WidgetConfig } from '../types';
 
-const BINDABLE = new Set(['textDisplay', 'button', 'checkbox', 'dropdown', 'slider']);
+const BINDABLE = new Set(['textDisplay', 'button', 'checkbox', 'dropdown', 'slider', 'randomButton']);
+
+const clamp = (v: number, min: number, max: number) => Math.min(max, Math.max(min, v));
+
+/** Physical value range for a "전송 값" input: the signal's own declared
+ * DBC minimum/maximum when present (may be tighter than the bit width,
+ * e.g. a 4-bit signal documented as only using 0..14), falling back to the
+ * full bit-width range otherwise -- same convention as SliderWidget. */
+function signalValueRange(signal: DbcSignal): { min: number; max: number } {
+  return {
+    min: signal.minimum ?? signalBitMin(signal),
+    max: signal.maximum ?? signalBitMax(signal),
+  };
+}
 
 export function WidgetFrame({ config, children }: { config: WidgetConfig; children: ReactNode }) {
   const { editMode, removeWidget } = useApp();
@@ -52,6 +65,17 @@ function ConfigModal({ config, onClose }: { config: WidgetConfig; onClose: () =>
 
   const save = () => {
     updateWidget(draft);
+    if (config.type === 'randomButton' && draft.binding?.signal) {
+      const mode = (draft.options.mode as string | undefined) ?? 'random';
+      api.setValueGenerator(
+        draft.binding.message,
+        draft.binding.signal,
+        mode,
+        draft.options.rangeMin as number | undefined,
+        draft.options.rangeMax as number | undefined,
+        draft.options.step as number | undefined,
+      ).catch(() => {});
+    }
     onClose();
   };
 
@@ -147,29 +171,140 @@ function ConfigModal({ config, onClose }: { config: WidgetConfig; onClose: () =>
         {config.type === 'button' && (
           <label>
             전송 값
+            {bound && (
+              <span className="hint">
+                범위: {signalValueRange(bound.signal).min} ~ {signalValueRange(bound.signal).max}
+              </span>
+            )}
             <input
               type="number"
+              min={bound ? signalValueRange(bound.signal).min : undefined}
+              max={bound ? signalValueRange(bound.signal).max : undefined}
               value={String(draft.options.value ?? 1)}
-              onChange={(e) => setOption('value', Number(e.target.value))}
+              onChange={(e) => {
+                const raw = Number(e.target.value);
+                const { min, max } = bound ? signalValueRange(bound.signal) : { min: -Infinity, max: Infinity };
+                setOption('value', bound ? clamp(raw, min, max) : raw);
+              }}
             />
+          </label>
+        )}
+        {config.type === 'randomButton' && (
+          <>
+            <label>
+              값 모드
+              <select
+                value={(draft.options.mode as string | undefined) ?? 'random'}
+                onChange={(e) => setOption('mode', e.target.value)}
+              >
+                <option value="random">Random (전체 bit 범위)</option>
+                <option value="range">Range (순차 순환)</option>
+              </select>
+            </label>
+            {draft.options.mode === 'range' && (
+              <div className="row-2">
+                {bound && (
+                  <p className="hint">
+                    raw 범위: {signalRawBounds(bound.signal).min} ~ {signalRawBounds(bound.signal).max}
+                  </p>
+                )}
+                <label>
+                  최소값 (raw)
+                  <input
+                    type="number"
+                    min={bound ? signalRawBounds(bound.signal).min : undefined}
+                    max={bound ? signalRawBounds(bound.signal).max : undefined}
+                    value={String(draft.options.rangeMin ?? (bound ? signalRawBounds(bound.signal).min : 0))}
+                    onChange={(e) => {
+                      const raw = Number(e.target.value);
+                      const v = bound
+                        ? clamp(raw, signalRawBounds(bound.signal).min, signalRawBounds(bound.signal).max)
+                        : raw;
+                      setOption('rangeMin', v);
+                    }}
+                  />
+                </label>
+                <label>
+                  최대값 (raw)
+                  <input
+                    type="number"
+                    min={bound ? signalRawBounds(bound.signal).min : undefined}
+                    max={bound ? signalRawBounds(bound.signal).max : undefined}
+                    value={String(draft.options.rangeMax ?? (bound ? signalRawBounds(bound.signal).max : 1))}
+                    onChange={(e) => {
+                      const raw = Number(e.target.value);
+                      const v = bound
+                        ? clamp(raw, signalRawBounds(bound.signal).min, signalRawBounds(bound.signal).max)
+                        : raw;
+                      setOption('rangeMax', v);
+                    }}
+                  />
+                </label>
+                <label>
+                  step
+                  <input
+                    type="number"
+                    min={1}
+                    value={String(draft.options.step ?? 1)}
+                    onChange={(e) => setOption('step', Math.max(1, Number(e.target.value)))}
+                  />
+                </label>
+              </div>
+            )}
+          </>
+        )}
+        {config.type === 'functionButton' && (
+          <label>
+            실행할 함수
+            {!canStore.status?.test_runner.functions.loaded && (
+              <p className="hint">먼저 상단 툴바에서 함수 마스터 스크립트를 업로드하세요.</p>
+            )}
+            <select
+              value={(draft.options.funcName as string | undefined) ?? ''}
+              onChange={(e) => setOption('funcName', e.target.value || undefined)}
+            >
+              <option value="">— 선택 —</option>
+              {canStore.status?.test_runner.functions.names.map((name) => (
+                <option key={name} value={name}>
+                  {name}
+                </option>
+              ))}
+            </select>
           </label>
         )}
         {config.type === 'checkbox' && (
           <div className="row-2">
+            {bound && (
+              <p className="hint">
+                범위: {signalValueRange(bound.signal).min} ~ {signalValueRange(bound.signal).max}
+              </p>
+            )}
             <label>
               ON 값
               <input
                 type="number"
+                min={bound ? signalValueRange(bound.signal).min : undefined}
+                max={bound ? signalValueRange(bound.signal).max : undefined}
                 value={String(draft.options.onValue ?? 1)}
-                onChange={(e) => setOption('onValue', Number(e.target.value))}
+                onChange={(e) => {
+                  const raw = Number(e.target.value);
+                  const { min, max } = bound ? signalValueRange(bound.signal) : { min: -Infinity, max: Infinity };
+                  setOption('onValue', bound ? clamp(raw, min, max) : raw);
+                }}
               />
             </label>
             <label>
               OFF 값
               <input
                 type="number"
+                min={bound ? signalValueRange(bound.signal).min : undefined}
+                max={bound ? signalValueRange(bound.signal).max : undefined}
                 value={String(draft.options.offValue ?? 0)}
-                onChange={(e) => setOption('offValue', Number(e.target.value))}
+                onChange={(e) => {
+                  const raw = Number(e.target.value);
+                  const { min, max } = bound ? signalValueRange(bound.signal) : { min: -Infinity, max: Infinity };
+                  setOption('offValue', bound ? clamp(raw, min, max) : raw);
+                }}
               />
             </label>
           </div>

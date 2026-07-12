@@ -168,6 +168,13 @@ class DbcService:
             raw = dict(self._signal_state[message_name])
         return message.encode(raw, scaling=False, strict=False)
 
+    def set_raw_signal_value(self, message_name: str, signal_name: str, raw_value: int) -> None:
+        """Poke a single signal's raw state directly, bypassing encode/decode --
+        used by tx_scheduler's Random/Range value generators, which work in
+        raw bit units rather than physical (scaled) values."""
+        with self._lock:
+            self._signal_state[message_name][signal_name] = raw_value
+
     def _raw_to_scaled(self, message, raw: dict[str, Any]) -> dict[str, Any]:
         data = message.encode(raw, scaling=False, strict=False)
         return {

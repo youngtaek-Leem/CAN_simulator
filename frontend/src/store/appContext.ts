@@ -35,6 +35,19 @@ export function signalBitMax(signal: DbcSignal): number {
   return rawMax * signal.scale + signal.offset;
 }
 
+/** Smallest physical value representable by the signal's bit width (raw min * scale + offset). */
+export function signalBitMin(signal: DbcSignal): number {
+  const rawMin = signal.is_signed ? -(2 ** (signal.length - 1)) : 0;
+  return rawMin * signal.scale + signal.offset;
+}
+
+/** Raw (unscaled) integer bounds representable in the signal's bit width. */
+export function signalRawBounds(signal: DbcSignal): { min: number; max: number } {
+  return signal.is_signed
+    ? { min: -(2 ** (signal.length - 1)), max: 2 ** (signal.length - 1) - 1 }
+    : { min: 0, max: 2 ** signal.length - 1 };
+}
+
 /** DBC messages sorted alphabetically by name, for signal-picker dropdowns. */
 export function sortedMessages(dbc: DbcSummary): DbcMessage[] {
   return [...(dbc.messages ?? [])].sort((a, b) => a.name.localeCompare(b.name));

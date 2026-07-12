@@ -69,6 +69,18 @@ export const api = {
     post('/api/tx/signal', { message_name, values }),
   txAutoStop: (message_name?: string) =>
     post('/api/tx/auto/stop', { message_name: message_name ?? null }),
+  setValueGenerator: (
+    message_name: string,
+    signal_name: string,
+    mode: string,
+    range_min?: number,
+    range_max?: number,
+    step?: number,
+  ) => post('/api/tx/signal/generator', { message_name, signal_name, mode, range_min, range_max, step }),
+  sendGenerated: (message_name: string, signal_name: string) =>
+    post('/api/tx/signal/generate', { message_name, signal_name }),
+  sendInvalid: (message_name: string, signal_name: string) =>
+    post('/api/tx/signal/invalid', { message_name, signal_name }),
 
   isotpSend: (
     tx_id: number,
@@ -88,6 +100,9 @@ export const api = {
   testRunnerStart: () => post('/api/testrunner/start'),
   testRunnerStop: () => post('/api/testrunner/stop'),
   testRunnerStatus: () => request<import('../types').TestRunnerStatus>('/api/testrunner/status'),
+
+  uploadFunctionScript: (file: File) => upload('/api/testrunner/functions/upload', file),
+  functionStart: (name: string) => post('/api/testrunner/functions/start', { name }),
 
   powerConnect: () => post<import('../types').PowerStatus>('/api/power/connect'),
   powerDisconnect: () => post<import('../types').PowerStatus>('/api/power/disconnect'),

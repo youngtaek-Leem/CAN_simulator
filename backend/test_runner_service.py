@@ -27,6 +27,16 @@ Step types (see Requirement.md "Automation 시나리오 러너 통합 계획"):
 - Any block with "_type" instead of "type" is disabled/commented-out and
   skipped (including a whole case if it's "_type": "ID"), matching
   AppTest.py's convention.
+- FUNC: a second, independently-loaded script format for the "Function
+  Button" widget -- {"type": "FUNC", "name": "PowerTest", "Cycle": 1} marks
+  a function boundary exactly like "ID" does for scenario cases (same
+  Cycle/steps/Loop/_type-disable semantics), except keyed by name instead of
+  number. Loaded separately via load_functions() into self._functions (kept
+  apart from the scenario's self._cases so the two don't clobber each
+  other), and run one at a time by name via start_function() rather than
+  sequentially. Both run through the same _run()/_run_case() machinery and
+  share self._running, so a scenario run and a function run are mutually
+  exclusive -- they'd otherwise contend for the same CAN bus.
 
 Values in the JSON are raw hex bit patterns (e.g. "0x03"), not physical
 values -- they are converted via each signal's scale/offset before being
@@ -99,26 +109,39 @@ def _parse_step_list(blocks: list[dict]) -> list[Step]:
     return steps
 
 
-def parse_script(raw_steps: list[dict]) -> list[Case]:
+def _parse_boundary_blocks(raw_steps: list[dict], boundary_type: str, name_key: str) -> list[Case]:
+    """Shared by parse_script (ID/num) and parse_functions (FUNC/name) --
+    both split a flat step list into cases at a boundary marker, honoring
+    the same _type-disable convention."""
     cases: list[Case] = []
     i = 0
     n = len(raw_steps)
     while i < n:
         b = raw_steps[i]
-        is_id = b.get("type") == "ID"
-        is_disabled_id = b.get("_type") == "ID"
-        if is_id or is_disabled_id:
+        is_boundary = b.get("type") == boundary_type
+        is_disabled = b.get("_type") == boundary_type
+        if is_boundary or is_disabled:
             j = i + 1
             body: list[dict] = []
-            while j < n and raw_steps[j].get("type") != "ID" and raw_steps[j].get("_type") != "ID":
+            while j < n and raw_steps[j].get("type") != boundary_type and raw_steps[j].get("_type") != boundary_type:
                 body.append(raw_steps[j])
                 j += 1
-            if is_id:
-                cases.append(Case(num=str(b.get("num", "")), cycle=int(b.get("Cycle", 1)), steps=_parse_step_list(body)))
+            if is_boundary:
+                cases.append(
+                    Case(num=str(b.get(name_key, "")), cycle=int(b.get("Cycle", 1)), steps=_parse_step_list(body))
+                )
             i = j
         else:
-            i += 1  # stray block before the first ID -- ignore
+            i += 1  # stray block before the first boundary marker -- ignore
     return cases
+
+
+def parse_script(raw_steps: list[dict]) -> list[Case]:
+    return _parse_boundary_blocks(raw_steps, "ID", "num")
+
+
+def parse_functions(raw_steps: list[dict]) -> list[Case]:
+    return _parse_boundary_blocks(raw_steps, "FUNC", "name")
 
 
 class TestRunnerService:
@@ -149,9 +172,13 @@ class TestRunnerService:
         self._lock = threading.RLock()
         self._cases: list[Case] = []
         self._script_name: Optional[str] = None
+        self._functions: list[Case] = []
+        self._functions_name: Optional[str] = None
+        self._run_queue: list[Case] = []
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
         self._running = False
+        self._running_case: Optional[str] = None
         self._events: list[dict] = []
         self._results: list[dict] = []
 
@@ -169,6 +196,18 @@ class TestRunnerService:
             self._results = []
         return self.summary()
 
+    def load_functions(self, text: str, filename: str) -> dict:
+        raw = json.loads(text)
+        if not isinstance(raw, list):
+            raise ValueError("scenario JSON must be a top-level array of steps")
+        functions = parse_functions(raw)
+        if not functions:
+            raise ValueError("FUNC 블록이 없습니다 -- 함수 마스터 스크립트가 아닙니다")
+        with self._lock:
+            self._functions = functions
+            self._functions_name = filename
+        return self.summary()
+
     # ---- status -------------------------------------------------------------
 
     def summary(self) -> dict:
@@ -178,8 +217,14 @@ class TestRunnerService:
                 "loaded": self._script_name is not None,
                 "filename": self._script_name,
                 "running": self._running,
+                "running_case": self._running_case,
                 "case_count": len(self._cases),
                 "result_count": len(self._results),
+                "functions": {
+                    "loaded": self._functions_name is not None,
+                    "filename": self._functions_name,
+                    "names": [c.num for c in self._functions],
+                },
             }
 
     def status(self) -> dict:
@@ -199,9 +244,26 @@ class TestRunnerService:
                 raise RuntimeError("test script already running")
             if not self._cases:
                 raise RuntimeError("no test script loaded")
+            self._run_queue = list(self._cases)
             self._events = []
             self._results = []
             self._running = True
+        return self._launch_thread()
+
+    def start_function(self, name: str) -> dict:
+        with self._lock:
+            if self._running:
+                raise RuntimeError("test script already running")
+            case = next((c for c in self._functions if c.num == name), None)
+            if case is None:
+                raise RuntimeError(f"function not found: {name}")
+            self._run_queue = [case]
+            self._events = []
+            self._results = []
+            self._running = True
+        return self._launch_thread()
+
+    def _launch_thread(self) -> dict:
         self._last_recording = None
         self._stop_event.clear()
         self._thread = threading.Thread(target=self._run, daemon=True)
@@ -229,16 +291,11 @@ class TestRunnerService:
     def _run(self) -> None:
         try:
             with self._lock:
-                cases = list(self._cases)
+                cases = list(self._run_queue)
             for case in cases:
                 if self._stop_event.is_set():
                     break
-                for c in range(case.cycle):
-                    if self._stop_event.is_set():
-                        break
-                    self._log(case=case.num, msg=f"케이스 {case.num} 반복 {c + 1}/{case.cycle} 시작")
-                    ok = self._run_steps(case.steps, case.num)
-                    self._add_result(case=case.num, cycle=c + 1, status="OK" if ok else "Fail")
+                self._run_case(case)
         finally:
             # a script run is a self-contained scope: whatever periodic
             # auto-senders it armed via CANReq/CANEv must not keep firing
@@ -246,7 +303,18 @@ class TestRunnerService:
             self._tx.stop_auto()
             with self._lock:
                 self._running = False
+                self._running_case = None
             self._save_result_file()
+
+    def _run_case(self, case: Case) -> None:
+        with self._lock:
+            self._running_case = case.num
+        for c in range(case.cycle):
+            if self._stop_event.is_set():
+                return
+            self._log(case=case.num, msg=f"케이스 {case.num} 반복 {c + 1}/{case.cycle} 시작")
+            ok = self._run_steps(case.steps, case.num)
+            self._add_result(case=case.num, cycle=c + 1, status="OK" if ok else "Fail")
 
     def _run_steps(self, steps: list[Step], case_num: str) -> bool:
         ok = True
