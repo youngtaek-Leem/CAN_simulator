@@ -5,7 +5,7 @@
 // dragged (via the title bar) and resized, regardless of edit mode. Edit mode
 // only gates the per-widget config/remove buttons and stops TX/RX.
 
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   GridLayout,
   useContainerWidth,
@@ -268,7 +268,21 @@ function TopBar(props: TopBarProps) {
   const [bitrate, setBitrate] = useState(500000);
   const [fd, setFd] = useState(false);
   const [dataBitrate, setDataBitrate] = useState(2_000_000);
+  const [showMore, setShowMore] = useState(false);
+  const moreRef = useRef<HTMLSpanElement>(null);
   const connected = canStore.status?.can.connected ?? false;
+
+  // "더보기" 드롭다운 바깥을 클릭하면 닫는다
+  useEffect(() => {
+    if (!showMore) return;
+    const onMouseDown = (e: MouseEvent) => {
+      if (moreRef.current && !moreRef.current.contains(e.target as Node)) {
+        setShowMore(false);
+      }
+    };
+    document.addEventListener('mousedown', onMouseDown);
+    return () => document.removeEventListener('mousedown', onMouseDown);
+  }, [showMore]);
 
   const connect = async () => {
     try {
@@ -293,9 +307,9 @@ function TopBar(props: TopBarProps) {
   const uploadFunctions = async (file: File) => {
     try {
       await api.uploadFunctionScript(file);
-      props.notify(`함수 마스터 스크립트 로드됨: ${file.name}`);
+      props.notify(`Function Script 로드됨: ${file.name}`);
     } catch (e) {
-      props.notify(`함수 스크립트 오류: ${(e as Error).message}`);
+      props.notify(`Function Script 오류: ${(e as Error).message}`);
     }
   };
 
@@ -320,106 +334,6 @@ function TopBar(props: TopBarProps) {
       >
         {running ? '■ Stop' : '▶ Start'}
       </button>
-
-      <span className="group">
-        <select value={iface} onChange={(e) => setIface(e.target.value)} disabled={connected}>
-          <option value="virtual">Virtual</option>
-          <option value="pcan">PCAN</option>
-          <option value="vector">Vector (CANcase)</option>
-        </select>
-        <input
-          className="channel-input"
-          value={channel}
-          onChange={(e) => setChannel(e.target.value)}
-          disabled={connected}
-          placeholder="channel"
-        />
-        <select
-          value={bitrate}
-          onChange={(e) => setBitrate(Number(e.target.value))}
-          disabled={connected || iface === 'virtual'}
-        >
-          {[125000, 250000, 500000, 1000000].map((b) => (
-            <option key={b} value={b}>
-              {b / 1000} kbit/s
-            </option>
-          ))}
-        </select>
-        <label className="toggle fd-toggle" title="CAN-FD 활성화 (최대 64바이트 페이로드 + 데이터 위상 고속 전송)">
-          <input
-            type="checkbox"
-            checked={fd}
-            disabled={connected}
-            onChange={(e) => setFd(e.target.checked)}
-          />
-          FD
-        </label>
-        {fd && (
-          <select
-            value={dataBitrate}
-            onChange={(e) => setDataBitrate(Number(e.target.value))}
-            disabled={connected}
-            title="CAN-FD 데이터 위상 비트레이트"
-          >
-            {[1000000, 2000000, 4000000, 5000000, 8000000].map((b) => (
-              <option key={b} value={b}>
-                data {b / 1_000_000}Mbit/s
-              </option>
-            ))}
-          </select>
-        )}
-        {!connected ? (
-          <button className="small-btn primary" onClick={connect}>
-            연결
-          </button>
-        ) : (
-          <button className="small-btn danger" onClick={() => api.disconnect()}>
-            해제
-          </button>
-        )}
-      </span>
-
-      <span className="group">
-        <label className="small-btn file-btn">
-          DBC 업로드
-          <input
-            type="file"
-            accept=".dbc"
-            hidden
-            onChange={(e) => e.target.files?.[0] && uploadDbc(e.target.files[0])}
-          />
-        </label>
-        <span className="hint">{props.dbc.loaded ? props.dbc.filename : 'DBC 없음'}</span>
-        {props.dbc.loaded && props.dbc.nodes && props.dbc.nodes.length > 0 && (
-          <select
-            value={canStore.getRxNode()}
-            onChange={(e) => canStore.setRxNode(e.target.value)}
-            title="실제 DUT(실기) 노드를 선택하세요. 이 노드가 보내는 메시지는 신호 선택 목록에서 RX(시뮬레이터가 수신)로, 나머지는 TX(시뮬레이터가 대신 송신)로 분류됩니다"
-          >
-            <option value="">RX 노드 미설정</option>
-            {props.dbc.nodes.map((n) => (
-              <option key={n} value={n}>
-                RX 노드: {n}
-              </option>
-            ))}
-          </select>
-        )}
-      </span>
-
-      <span className="group">
-        <label className="small-btn file-btn">
-          함수 마스터 스크립트
-          <input
-            type="file"
-            accept=".json"
-            hidden
-            onChange={(e) => e.target.files?.[0] && uploadFunctions(e.target.files[0])}
-          />
-        </label>
-        <span className="hint">
-          {functions?.loaded ? `${functions.filename} — ${functions.names.length}개 기능` : '로드 안 됨'}
-        </span>
-      </span>
 
       <span className="group">
         <select
@@ -453,27 +367,158 @@ function TopBar(props: TopBarProps) {
         </select>
       </span>
 
-      <span className="group">
-        <input
-          className="layout-input"
-          value={props.layoutName}
-          onChange={(e) => props.setLayoutName(e.target.value)}
-          placeholder="레이아웃 이름"
-        />
-        <button className="small-btn" onClick={props.saveLayout}>
-          저장
+      <span className="spacer" />
+
+      <span className="topbar-more" ref={moreRef}>
+        <button className="small-btn" onClick={() => setShowMore((v) => !v)}>
+          ⋯ 더보기
         </button>
-        <select value="" onChange={(e) => e.target.value && props.loadLayout(e.target.value)}>
-          <option value="">불러오기…</option>
-          {props.layoutList.map((n) => (
-            <option key={n} value={n}>
-              {n}
-            </option>
-          ))}
-        </select>
+        {showMore && (
+          <div className="topbar-more-panel">
+            <div className="topbar-more-section">
+              <div className="topbar-more-heading">CAN 설정</div>
+              <div className="topbar-more-row">
+                <select value={iface} onChange={(e) => setIface(e.target.value)} disabled={connected}>
+                  <option value="virtual">Virtual</option>
+                  <option value="pcan">PCAN</option>
+                  <option value="vector">Vector (CANcase)</option>
+                </select>
+                <input
+                  className="channel-input"
+                  value={channel}
+                  onChange={(e) => setChannel(e.target.value)}
+                  disabled={connected}
+                  placeholder="channel"
+                />
+                <select
+                  value={bitrate}
+                  onChange={(e) => setBitrate(Number(e.target.value))}
+                  disabled={connected || iface === 'virtual'}
+                >
+                  {[125000, 250000, 500000, 1000000].map((b) => (
+                    <option key={b} value={b}>
+                      {b / 1000} kbit/s
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="topbar-more-row">
+                <label
+                  className="toggle fd-toggle"
+                  title="CAN-FD 활성화 (최대 64바이트 페이로드 + 데이터 위상 고속 전송)"
+                >
+                  <input
+                    type="checkbox"
+                    checked={fd}
+                    disabled={connected}
+                    onChange={(e) => setFd(e.target.checked)}
+                  />
+                  FD
+                </label>
+                {fd && (
+                  <select
+                    value={dataBitrate}
+                    onChange={(e) => setDataBitrate(Number(e.target.value))}
+                    disabled={connected}
+                    title="CAN-FD 데이터 위상 비트레이트"
+                  >
+                    {[1000000, 2000000, 4000000, 5000000, 8000000].map((b) => (
+                      <option key={b} value={b}>
+                        data {b / 1_000_000}Mbit/s
+                      </option>
+                    ))}
+                  </select>
+                )}
+                {!connected ? (
+                  <button className="small-btn primary" onClick={connect}>
+                    연결
+                  </button>
+                ) : (
+                  <button className="small-btn danger" onClick={() => api.disconnect()}>
+                    해제
+                  </button>
+                )}
+              </div>
+            </div>
+
+            <div className="topbar-more-section">
+              <div className="topbar-more-heading">DBC 업로드</div>
+              <div className="topbar-more-row">
+                <label className="small-btn file-btn">
+                  DBC 업로드
+                  <input
+                    type="file"
+                    accept=".dbc"
+                    hidden
+                    onChange={(e) => e.target.files?.[0] && uploadDbc(e.target.files[0])}
+                  />
+                </label>
+                <span className="hint">{props.dbc.loaded ? props.dbc.filename : 'DBC 없음'}</span>
+              </div>
+              {props.dbc.loaded && props.dbc.nodes && props.dbc.nodes.length > 0 && (
+                <div className="topbar-more-row">
+                  <select
+                    value={canStore.getRxNode()}
+                    onChange={(e) => canStore.setRxNode(e.target.value)}
+                    title="실제 DUT(실기) 노드를 선택하세요. 이 노드가 보내는 메시지는 신호 선택 목록에서 RX(시뮬레이터가 수신)로, 나머지는 TX(시뮬레이터가 대신 송신)로 분류됩니다"
+                  >
+                    <option value="">RX 노드 미설정</option>
+                    {props.dbc.nodes.map((n) => (
+                      <option key={n} value={n}>
+                        RX 노드: {n}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+            </div>
+
+            <div className="topbar-more-section">
+              <div className="topbar-more-heading">Function Script</div>
+              <div className="topbar-more-row">
+                <label className="small-btn file-btn">
+                  Function Script
+                  <input
+                    type="file"
+                    accept=".json"
+                    hidden
+                    onChange={(e) => e.target.files?.[0] && uploadFunctions(e.target.files[0])}
+                  />
+                </label>
+                <span className="hint">
+                  {functions?.loaded
+                    ? `${functions.filename} — ${functions.names.length}개 기능`
+                    : '로드 안 됨'}
+                </span>
+              </div>
+            </div>
+
+            <div className="topbar-more-section">
+              <div className="topbar-more-heading">설정저장/불러오기</div>
+              <div className="topbar-more-row">
+                <input
+                  className="layout-input"
+                  value={props.layoutName}
+                  onChange={(e) => props.setLayoutName(e.target.value)}
+                  placeholder="레이아웃 이름"
+                />
+                <button className="small-btn" onClick={props.saveLayout}>
+                  저장
+                </button>
+                <select value="" onChange={(e) => e.target.value && props.loadLayout(e.target.value)}>
+                  <option value="">불러오기…</option>
+                  {props.layoutList.map((n) => (
+                    <option key={n} value={n}>
+                      {n}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+          </div>
+        )}
       </span>
 
-      <span className="spacer" />
       <button className="small-btn" onClick={props.openSettings}>
         ⚙ 설정
       </button>

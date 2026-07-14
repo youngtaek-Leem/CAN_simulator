@@ -18,16 +18,6 @@ interface WidgetMeta {
 }
 
 export const WIDGET_REGISTRY: Record<WidgetType, WidgetMeta> = {
-  canMessageDisplay: {
-    label: 'CAN 메시지 표시창',
-    component: CanMessageDisplay,
-    defaultSize: { w: 6, h: 5, minW: 3, minH: 2 },
-  },
-  textDisplay: {
-    label: '텍스트 표시창',
-    component: TextDisplay,
-    defaultSize: { w: 3, h: 2, minW: 2, minH: 1 },
-  },
   button: {
     label: '버튼',
     component: ButtonWidget,
@@ -37,26 +27,6 @@ export const WIDGET_REGISTRY: Record<WidgetType, WidgetMeta> = {
     label: '체크박스',
     component: CheckboxWidget,
     defaultSize: { w: 2, h: 1, minW: 1, minH: 1 },
-  },
-  dropdown: {
-    label: '드롭다운',
-    component: DropdownWidget,
-    defaultSize: { w: 3, h: 1, minW: 2, minH: 1 },
-  },
-  slider: {
-    label: '슬라이더',
-    component: SliderWidget,
-    defaultSize: { w: 4, h: 2, minW: 2, minH: 1 },
-  },
-  txBox: {
-    label: 'CAN 메시지 전송 박스',
-    component: TxBox,
-    defaultSize: { w: 7, h: 5, minW: 4, minH: 3 },
-  },
-  replayBox: {
-    label: 'CAN 로그 Replay 박스',
-    component: ReplayBox,
-    defaultSize: { w: 5, h: 3, minW: 3, minH: 2 },
   },
   multiButton: {
     label: '멀티 버튼',
@@ -68,20 +38,15 @@ export const WIDGET_REGISTRY: Record<WidgetType, WidgetMeta> = {
     component: MultiCheckboxWidget,
     defaultSize: { w: 6, h: 4, minW: 1, minH: 2 },
   },
-  isotpTx: {
-    label: 'ISO-TP 메시지 전송',
-    component: IsoTpBox,
-    defaultSize: { w: 6, h: 4, minW: 1, minH: 2 },
+  dropdown: {
+    label: '드롭다운',
+    component: DropdownWidget,
+    defaultSize: { w: 3, h: 1, minW: 2, minH: 1 },
   },
-  signalGraph: {
-    label: 'CAN 신호 그래프',
-    component: GraphWidget,
-    defaultSize: { w: 7, h: 5, minW: 1, minH: 2 },
-  },
-  testRunner: {
-    label: '테스트 시나리오 실행기',
-    component: TestRunnerBox,
-    defaultSize: { w: 8, h: 6, minW: 4, minH: 3 },
+  slider: {
+    label: '슬라이더',
+    component: SliderWidget,
+    defaultSize: { w: 4, h: 2, minW: 2, minH: 1 },
   },
   functionButton: {
     label: 'Function 버튼',
@@ -103,4 +68,40 @@ export const WIDGET_REGISTRY: Record<WidgetType, WidgetMeta> = {
     component: RandomMultiButtonWidget,
     defaultSize: { w: 6, h: 4, minW: 1, minH: 2 },
   },
+  txBox: {
+    label: 'CAN 메시지 전송 박스',
+    component: TxBox,
+    defaultSize: { w: 7, h: 5, minW: 4, minH: 3 },
+  },
+  isotpTx: {
+    label: 'ISO-TP 메시지 전송',
+    component: IsoTpBox,
+    defaultSize: { w: 6, h: 4, minW: 1, minH: 2 },
+  },
+  replayBox: {
+    label: 'CAN 로그 Replay 박스',
+    component: ReplayBox,
+    defaultSize: { w: 5, h: 3, minW: 3, minH: 2 },
+  },
+  testRunner: {
+    label: '테스트 Sequence 실행기',
+    component: TestRunnerBox,
+    defaultSize: { w: 8, h: 6, minW: 4, minH: 3 },
+  },
+  signalGraph: {
+    label: 'CAN 신호 그래프',
+    component: GraphWidget,
+    defaultSize: { w: 7, h: 5, minW: 1, minH: 2 },
+  },
+  canMessageDisplay: {
+    label: 'CAN 메시지 표시창',
+    component: CanMessageDisplay,
+    defaultSize: { w: 6, h: 5, minW: 3, minH: 2 },
+  },
+  textDisplay: {
+    label: '텍스트 표시창',
+    component: TextDisplay,
+    defaultSize: { w: 3, h: 2, minW: 2, minH: 1 },
+  },
+
 };
