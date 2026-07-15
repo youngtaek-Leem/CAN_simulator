@@ -347,6 +347,142 @@ CAN 신호 할당을 위해서 CAN 데이터를 쉽게 보기 위하여 DBC 를 
     노출 등 기존 동작은 변경 없이 그대로 이전했다. 검증: `npm run build` 통과, 브라우저에서
     더보기 드롭다운 내 FD 체크박스 토글 시 드롭다운이 닫히지 않고 데이터 비트레이트 셀렉트가
     바로 나타남을 확인, 콘솔 에러 없음.
+30. Event 신호 미설정 형제 invalid 처리, 멀티 드롭다운/슬라이더, 신호 검색 입력, 멀티 페이지
+    탭 (2026-07-15, 사용자 승인 완료 — 4개 모듈 개발 완료):
+    - **Event 메시지의 다른 신호 invalid 처리** (`backend/dbc_service.py`): Event 신호를
+      전송할 때, 같은 메시지에 있는 다른 신호가 raw 0으로(또는 이전에 보낸 값을 계속
+      "기억"해서) 나가던 버그를 수정했다. **최초 구현(당일 동일 세션 내, 사용자 확인 후
+      재수정)**: "한 번도 설정된 적 없는 신호만" invalid로 치환하고, 이미 한 번이라도
+      설정된 적 있는 신호는 그 마지막 값을 계속 기억해서 재사용하는 `_touched` 이력 방식으로
+      만들었으나, 사용자가 "이벤트 신호를 보낼 때 Valid(설정값) 하나만 실제 값이고, 같은
+      메시지의 다른 신호는 이력과 무관하게 **항상** Invalid여야 한다"고 정정 — 최종 구현은
+      이력(`_touched`)을 전부 제거하고, `encode_with_values`에서 지금 막 설정 중인 신호가
+      하나라도 event 송신속성이면 그 호출에서 `values`에 없는 나머지 신호 전부를 각자의
+      invalid 값(`(1<<length)-1`)으로 매번 무조건 치환한다. `encode_invalid`(30ms 후
+      후속 프레임)도 마찬가지로 메시지의 모든 신호를 예외 없이 invalid로 인코딩하도록
+      단순화했다(`_signal_state` 조회 자체가 불필요해짐). 두 경우 모두 치환은 **전송용
+      프레임에만** 적용되고 영구 상태(`_signal_state`)는 오염되지 않으므로, 이후 실제로
+      다른 신호를 설정하면 깨끗한 값부터 시작한다. Periodic 메시지(invalid 개념 없음,
+      설정 중인 신호가 전부 periodic인 호출)는 영향받지 않고 기존처럼 상태가 누적된다.
+      검증: 신규 pytest(`test_event_send_forces_other_signals_invalid_every_time` —
+      한 신호를 설정한 직후 다른 신호를 설정해도 앞서 설정한 신호가 다시 invalid로
+      나가는지, 영구 상태는 두 값 모두 정상 유지되는지 확인) 및 기존
+      `test_invalid_value_encoding`을 새 사양에 맞게 갱신(형제 신호가 이제 마지막 값이
+      아니라 invalid로 나가는지 확인), `test_untouched_periodic_sibling_stays_zero_not_invalid`
+      포함 백엔드 전체 106개 테스트 통과.
+    - **공용 신호 검색 입력 컴포넌트** (`frontend/src/widgets/MessageOptions.tsx`의
+      `SignalPicker`): 기존 "메시지 선택 → 그 메시지의 신호 선택" 2단 select 방식과 별개로,
+      신호 이름 일부를 입력하면 그 문자열을 포함하는 모든 신호(전체 메시지 대상)가
+      "신호명 — 메시지명" 형태로 나열되고 클릭하면 메시지+신호가 한 번에 선택되는 검색
+      입력을 추가했다. 기존 방식과 공존하며 같은 `binding` 상태를 공유한다. 이 컴포넌트로
+      기존에 각자 따로 구현돼 있던 3곳 — `WidgetFrame.tsx`의 `ConfigModal`, `MultiControls.tsx`의
+      `CellEditModal`, `GraphWidget.tsx`의 `AddSeriesModal`(기존엔 `messageName`/`signalName`
+      개별 state였던 것을 `SignalBinding` 하나로 리팩터) — 을 통일했다. 검증: 브라우저에서
+      "Speed" 검색 시 `EngineSpeed`(EngineData)/`Speed`(VehicleSpeed) 둘 다 나열되고 선택 시
+      메시지·신호 select가 함께 갱신됨을 3곳 모두에서 확인, 콘솔 에러 없음.
+    - **멀티 드롭다운 / 멀티 슬라이더 위젯** (`frontend/src/widgets/MultiControls.tsx`):
+      기존 멀티 버튼/멀티 체크박스와 동일한 그리드 인프라(`getGrid`/`useCellUpdater`/
+      `.multi-grid`)를 재사용해 `MultiDropdownWidget`(셀마다 독립적으로 신호의 VAL_
+      선택지를 드롭다운으로 전송, 단일 `DropdownWidget`과 동일 로직)과
+      `MultiSliderWidget`(셀마다 독립적으로 100ms 스로틀 전송, 단일 `SliderWidget`과 동일
+      로직)을 추가했다. `MultiCell`에 슬라이더 전용 물리값 필드 `sliderMin`/`sliderMax`/
+      `sliderStep`을 신설(기존 `rangeMin`/`rangeMax`/`step`은 Random 모드의 raw 값 전용이라
+      의미가 달라 재사용하지 않음). `CellEditModal`의 `kind`에 `'dropdown'`/`'slider'` 추가,
+      `WidgetFrame.tsx`의 행/열 개수 설정 노출 조건과 `registry.tsx`에도 등록. 검증: 브라우저에서
+      `DriverCommand.TurnSignal`(VAL_ 선택지)을 멀티 드롭다운 셀에 할당해 "Left" 선택 시
+      TX 2(valid+30ms invalid, Event 규칙)를 확인했고, `EngineData.EngineSpeed`(periodic)를
+      멀티 슬라이더 셀에 할당해 2000rpm으로 이동 시 주기 자동 송신(+auto 1)이 걸리는 것을
+      확인, 콘솔 에러 없음.
+    - **멀티 페이지 탭** (`frontend/src/App.tsx`): 위젯 캔버스가 페이지 하나뿐이던 것을,
+      `widgets`/`layout` 평면 배열을 `pages: {id, name, widgets, layout}[]` + `activePageId`
+      구조로 리팩터해 상단바 아래 탭 바(`PageTabs`)로 여러 페이지에 위젯을 나눠 배치할 수
+      있게 했다. `addWidget`/`updateWidget`/`arrange`/`effectiveLayout`은 활성 페이지에만
+      스코프하되, `removeWidget`의 "다른 위젯이 같은 메시지를 아직 쓰는지" 체크는 숨겨진
+      다른 탭의 위젯도 여전히 그 신호를 쓰고 있을 수 있으므로 전체 페이지를 훑도록 했다.
+      캔버스는 `GridLayout` 인스턴스 하나만 유지하고 활성 페이지 데이터만 먹인다(탭 전환 시
+      다른 페이지 위젯은 언마운트 — 백엔드 송수신은 프론트 렌더링과 무관하게 계속 동작하므로
+      주기 신호는 탭을 벗어나도 안 끊기고, `GraphWidget`처럼 언마운트 시 `unwatchSignal`하는
+      위젯만 탭을 벗어나면 기록이 멈춤). 편집 모드에서만 페이지 이름 변경(✎)·삭제(✕, 마지막
+      1개는 삭제 불가)·추가(+ 페이지) 컨트롤이 보인다. 레이아웃 저장 형식을
+      `{layout, widgets}` → `{pages: Page[]}`로 확장하되, `pages` 키가 없는 기존 저장
+      파일은 불러올 때 자동으로 단일 페이지로 감싸 하위 호환을 보장한다(백엔드
+      `backend/main.py`의 레이아웃 저장 API는 스키마 검증 없이 JSON을 그대로 저장/반환하므로
+      백엔드 변경은 불필요했다). 검증: 브라우저에서 페이지 추가/이름변경(Sensors)/삭제(마지막
+      1개는 삭제 버튼 사라짐, 삭제 시 활성 탭 자동 전환) 확인, 각 페이지에 다른 위젯을 넣고
+      탭 전환해도 서로 섞이지 않음을 확인, 기존 레거시 단일 페이지 레이아웃("default")을
+      불러왔을 때 "Page 1" 하나로 정상 마이그레이션됨을 확인, 새로 만든 2페이지 레이아웃을
+      저장 후 다시 불러와 두 페이지와 각각의 위젯이 그대로 복원됨을 확인, 콘솔 에러 없음.
+    - `npm run build`(tsc+vite) 전 모듈 공통으로 통과, 백엔드 전체 106개 pytest 통과(모듈 1
+      외에는 백엔드 변경 없음, 회귀 없음 재확인). `.claude/launch.json`에 `backend`(uvicorn)
+      실행 설정을 추가해 브라우저 검증 시 백엔드도 함께 띄울 수 있게 했다.
+31. Event 신호 invalid 처리 정정 — 이력(remember) 방식 제거 (2026-07-15, 30번 항목의 사용자
+    피드백 반영): 30번 항목 최초 구현은 "한 번도 설정된 적 없는 신호만" invalid로 치환하고
+    이미 설정된 적 있는 신호는 마지막 값을 계속 "기억"해서 재사용했는데, 사용자가 "이벤트
+    신호를 보낼 때 Valid(설정값)는 그 신호 하나뿐이고, 같은 메시지의 다른 신호는 이력과
+    무관하게 항상 Invalid여야 한다"고 정정했다. `backend/dbc_service.py`에서 이력 추적용
+    `_touched` 필드를 완전히 제거하고, `encode_with_values`는 지금 설정 중인 신호가 하나라도
+    event 속성이면 그 호출에서 값이 주어지지 않은 나머지 신호 전부를 매번 무조건 각자의
+    invalid 값으로 치환하도록 단순화했다. `encode_invalid`(30ms 후 후속 프레임)도 메시지의
+    모든 신호(호출 대상 신호 포함)를 예외 없이 invalid로 인코딩하도록 단순화해 `_signal_state`
+    조회 자체가 불필요해졌다. 두 경우 모두 치환은 전송 프레임에만 적용되고 영구 상태는
+    오염되지 않는다. Periodic 전용 전송(설정 중인 신호가 전부 periodic)은 영향 없음. 검증:
+    기존 `test_invalid_value_encoding`을 새 사양대로 갱신(형제 신호가 마지막 값이 아니라
+    invalid로 나가는지)하고, `test_event_send_forces_other_signals_invalid_every_time`을
+    신규 추가(직전에 설정한 신호도 다음 이벤트 전송 시 다시 invalid로 나가는지, 영구 상태는
+    두 값 모두 정상 유지되는지)해 백엔드 전체 106개 테스트 통과.
+32. 레이아웃 저장 시 DBC/Function Script 원본 함께 저장 (2026-07-15): "설정 저장할 때 DBC
+    파일과 Function Script(json) 파일도 같이 저장해라"는 요청. 조사 결과 백엔드
+    `DbcService`/`TestRunnerService` 모두 업로드된 원본 텍스트를 보관하지 않고 파싱된
+    객체만 유지하고 있어(디스크에도 저장 안 함), 레이아웃 저장 시점의 raw 텍스트를 꺼낼
+    방법이 없었다. `DbcService`에 `raw_text` 필드(로드 시 원본 저장)와 `raw()` 메서드,
+    `TestRunnerService`에 `_functions_raw` 필드와 `functions_raw()` 메서드를 추가하고,
+    `GET /api/dbc/raw`/`GET /api/testrunner/functions/raw` 엔드포인트로 노출했다. 프론트
+    `saveLayout`은 저장 직전 이 두 엔드포인트를 조회해 DBC/Function Script가 로드돼 있으면
+    `{filename, content}`를 레이아웃 JSON에 `dbc`/`functionScript` 키로 함께 저장한다(로드
+    안 돼 있으면 생략, 하위 호환 — 기존 저장 형식과 그대로 호환). `loadLayout`은 불러온
+    JSON에 이 키들이 있으면 `File` 객체로 재구성해 `/api/dbc/upload`/`/api/testrunner/
+    functions/upload`로 먼저 복원한 뒤(실패해도 나머지 복원은 계속 진행, 실패만 배너로
+    알림) `refreshDbc()`로 프론트 상태를 갱신하고 위젯 페이지를 복원한다. 검증: 신규
+    pytest(`test_dbc_and_function_script_raw_endpoints`, 전역 싱글톤 공유로 인해 "초기
+    미로드" 전제 없이 업로드→raw 조회 라운드트립만 검증) 포함 백엔드 106→107개 테스트
+    통과. 브라우저에서 DBC+Function Script 업로드 후 레이아웃 저장 → 백엔드 프로세스를
+    완전히 재시작(메모리 초기화, DBC/Function Script 모두 미로드 상태로 리셋)한 뒤 그
+    레이아웃을 불러와 DBC(sample.dbc)와 Function Script(testfunc.json)가 자동으로
+    재업로드·복원되고 실제 신호/함수 목록이 정상 조회됨을 `curl`로 재확인, 기존 레거시
+    레이아웃(dbc/functionScript 키 없음)도 에러 없이 정상 로드됨을 확인, 콘솔 에러 없음.
+33. CAN 설정 저장/불러오기, 그래프 순서 변경, Y축 정수화, Random 범위 지정 (2026-07-15,
+    사용자 승인 완료 — 4개 모듈 개발 완료):
+    - **CAN 설정값 저장/불러오기** (`frontend/src/App.tsx`): `iface`/`channel`/`bitrate`/`fd`/
+      `dataBitrate`가 `TopBar` 내부 로컬 state였던 것을 `App` 레벨 `canConfig` state로
+      끌어올려, "설정저장/불러오기"에 `canConfig`를 항상 포함하도록 했다. 불러오기 시
+      값만 복원하고 **실제 연결은 자동으로 하지 않는다**(연결은 부수효과 있는 동작이라
+      사용자가 "연결" 버튼을 직접 눌러야 함). `canConfig` 키가 없는 기존 레이아웃은 현재
+      값 유지(하위 호환). 검증: PCAN/1000kbit/FD로 값을 바꿔 저장 → Virtual로 되돌린 뒤
+      불러오기로 PCAN/1000kbit/FD가 정확히 복원되고 자동 연결은 되지 않음을 브라우저에서
+      확인.
+    - **CAN 신호 그래프 순서 변경** (`frontend/src/widgets/GraphWidget.tsx`): 위젯 내부에
+      쌓인 미니 차트(신호별)들의 순서를 바꿀 수 있도록 `moveSeries(index, dir)`를 추가하고,
+      각 차트 헤더에 편집 모드 전용 "▲"/"▼" 아이콘 버튼을 추가했다(첫/마지막 차트는 해당
+      방향 버튼 비활성화). 맨 아래 차트만 X축 라벨을 그리는 기존 로직은 배열 순서 기준이라
+      별도 처리 없이 순서 변경에 자동으로 따라간다. 검증: 신호 2개 추가 후 ▼ 클릭으로
+      순서와 X축 라벨 위치가 함께 바뀜을 브라우저에서 확인.
+    - **Y축 정수 표시**: `fmt(v)`(Y축 눈금 전용 포맷 함수)를 `Math.round(v).toString()`으로
+      단순화해 소수점 없이 정수만 표시하도록 했다(데이터/자동맞춤 계산 자체는 float 유지,
+      표시 문자열만 정수화). 검증: 그래프 Y축에 소수점이 전혀 안 보임을 스크린샷으로 확인.
+    - **Random 버튼 "Random" 모드에 범위 지정 지원** (`backend/tx_scheduler.py`
+      `set_value_generator`): 기존엔 `mode="random"`이 항상 전체 bit 범위에서만 뽑았는데,
+      `range` 모드와 동일한 클램핑 로직을 적용해 `range_min`/`range_max`가 주어지면 그 범위
+      안에서, 없으면 기존처럼 전체 bit 범위에서 뽑도록 확장했다(`step`은 random과 무관해
+      무시). 프론트(`WidgetFrame.tsx`, `MultiControls.tsx`)는 이미 `mode`와 무관하게
+      `rangeMin`/`rangeMax`를 백엔드로 전달하고 있어 최소값/최대값 입력 UI를
+      `{mode === 'range'}` 조건에서 빼내 Random/Range 두 모드 모두에서 보이도록만
+      수정(step 입력만 Range 모드 전용으로 유지), 두 모드 모두 값모드 표시 라벨에 범위가
+      지정돼 있으면 `Random 2~5`처럼 보이도록 개선. Range(순차 순환) 기능 자체는 변경
+      없음. 검증: 신규 pytest `test_generator_random_respects_range` 포함 백엔드 108개
+      테스트 통과. 브라우저에서 `DriverCommand.TurnSignal`(raw 0~15)을 Random 모드 +
+      최소2/최대5로 설정 후 5회 클릭한 `raw_value` 응답이 각각 3,2,3,3,5로 모두 2~5
+      범위 안에서만 나옴을 네트워크 요청으로 직접 확인.
+    - `npm run build`(tsc+vite) 통과, 콘솔 에러 없음.
 
 ## Automation 시나리오 러너 통합 계획 (2026-07-11, 사용자 승인 완료 — Phase 1/2 개발 완료)
 

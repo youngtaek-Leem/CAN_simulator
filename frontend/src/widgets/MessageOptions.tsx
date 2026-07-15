@@ -4,8 +4,9 @@
 // / 'rx' show only that group as a flat list. Pair with <MessageFilter> for
 // the TX/RX/전체 toggle buttons.
 
-import { groupedMessages } from '../store/appContext';
-import type { DbcMessage, DbcSummary } from '../types';
+import { useMemo, useState } from 'react';
+import { groupedMessages, sortedMessages } from '../store/appContext';
+import type { DbcMessage, DbcSignal, DbcSummary, SignalBinding } from '../types';
 
 export type MessageFilterMode = 'all' | 'tx' | 'rx';
 
@@ -64,5 +65,116 @@ export function MessageFilter({
         </button>
       ))}
     </span>
+  );
+}
+
+const SIGNAL_SEARCH_MAX = 30;
+
+/**
+ * Unified CAN-signal binding picker: a free-text search box (type any
+ * substring of a signal name -> matching signals across every message are
+ * listed, pick one to set both message+signal at once) alongside the
+ * existing message-select -> signal-select cascade, both wired to the same
+ * `binding` state so either input method works interchangeably.
+ */
+export function SignalPicker({
+  dbc,
+  rxNode,
+  binding,
+  onChange,
+  messageLabelFor = (m) => m.name,
+}: {
+  dbc: DbcSummary;
+  rxNode: string;
+  binding: SignalBinding | undefined;
+  onChange: (b: SignalBinding | undefined) => void;
+  messageLabelFor?: (m: DbcMessage) => string;
+}) {
+  const [query, setQuery] = useState('');
+  const [msgFilter, setMsgFilter] = useState<MessageFilterMode>('all');
+  const message = dbc.messages?.find((m) => m.name === binding?.message);
+
+  const allSignals = useMemo(() => {
+    const list: { message: DbcMessage; signal: DbcSignal }[] = [];
+    for (const m of sortedMessages(dbc)) {
+      for (const s of m.signals) list.push({ message: m, signal: s });
+    }
+    return list;
+  }, [dbc]);
+
+  const matches =
+    query.trim() === ''
+      ? []
+      : allSignals
+          .filter(({ signal }) => signal.name.toLowerCase().includes(query.trim().toLowerCase()))
+          .slice(0, SIGNAL_SEARCH_MAX);
+
+  const pick = (m: DbcMessage, s: DbcSignal) => {
+    onChange({ message: m.name, signal: s.name });
+    setQuery('');
+  };
+
+  return (
+    <>
+      <label>
+        신호 검색 (이름 일부 입력)
+        <input
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="예: Speed"
+        />
+      </label>
+      {matches.length > 0 && (
+        <div className="signal-search-list">
+          {matches.map(({ message: m, signal: s }) => (
+            <div
+              key={`${m.name}.${s.name}`}
+              className="signal-search-item"
+              // onMouseDown (not onClick) fires before the input's onBlur,
+              // so the selection registers before any blur-driven close
+              onMouseDown={(e) => {
+                e.preventDefault();
+                pick(m, s);
+              }}
+            >
+              <span>{s.name}</span>
+              <span className="hint">{m.name}</span>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <label>
+        CAN 메시지
+        <span className="select-with-filter">
+          <select
+            value={binding?.message ?? ''}
+            onChange={(e) =>
+              onChange(e.target.value ? { message: e.target.value, signal: '' } : undefined)
+            }
+          >
+            <option value="">— 선택 —</option>
+            <MessageOptions dbc={dbc} rxNode={rxNode} filter={msgFilter} labelFor={messageLabelFor} />
+          </select>
+          <MessageFilter value={msgFilter} onChange={setMsgFilter} />
+        </span>
+      </label>
+      {message && (
+        <label>
+          신호
+          <select
+            value={binding?.signal ?? ''}
+            onChange={(e) => onChange({ message: message.name, signal: e.target.value })}
+          >
+            <option value="">— 선택 —</option>
+            {message.signals.map((s) => (
+              <option key={s.name} value={s.name}>
+                {s.name} ({s.length}bit, {s.send_type})
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
+    </>
   );
 }

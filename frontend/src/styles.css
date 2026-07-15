@@ -86,6 +86,63 @@ body {
   margin-right: 6px;
 }
 
+/* ---- page tabs ---- */
+
+.page-tabs {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 4px 8px 0;
+  background: var(--panel);
+  border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+
+.page-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding: 4px 4px 4px 10px;
+  border: 1px solid var(--border);
+  border-bottom: none;
+  border-radius: 6px 6px 0 0;
+  background: var(--bg);
+  color: var(--text-dim);
+}
+
+.page-tab-active {
+  background: var(--panel-2);
+  color: var(--text);
+}
+
+.page-tab-label {
+  background: transparent;
+  border: none;
+  padding: 0;
+  color: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.page-tab-rename {
+  width: 90px;
+  font-size: 12px;
+  padding: 1px 4px;
+}
+
+.page-tab-actions {
+  display: inline-flex;
+}
+
+.page-tab-actions .icon-btn {
+  font-size: 11px;
+  padding: 0 3px;
+}
+
+.page-tab-add {
+  margin: 0 0 4px 4px;
+}
+
 .group {
   display: inline-flex;
   align-items: center;
@@ -622,6 +679,29 @@ td.empty {
   overflow: hidden;
 }
 
+.multi-cell-dropdown {
+  width: 100%;
+  height: 100%;
+  min-height: 28px;
+  padding: 4px 20px 4px 6px;
+  font-size: 12px;
+}
+
+.multi-cell-slider {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 2px;
+  height: 100%;
+  padding: 0 20px 0 4px;
+  font-size: 12px;
+  overflow: hidden;
+}
+
+.multi-cell-slider .slider-header {
+  font-size: 11px;
+}
+
 .multi-cell-edit {
   position: absolute;
   top: 1px;
@@ -1076,6 +1156,32 @@ td.empty {
   font-weight: 600;
   color: var(--text-dim);
   text-transform: uppercase;
+}
+
+/* ---- signal search suggestions (SignalPicker) ---- */
+
+.signal-search-list {
+  max-height: 160px;
+  overflow: auto;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  display: flex;
+  flex-direction: column;
+}
+
+.signal-search-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--text);
+}
+
+.signal-search-item:hover {
+  background: var(--panel-2);
 }
 
 /* ---- test scenario runner box ---- */

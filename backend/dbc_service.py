@@ -37,12 +37,18 @@ def _plain(value: Any) -> Any:
     return value
 
 
+def _invalid_raw(signal) -> int:
+    return (1 << signal.length) - 1
+
+
 class DbcService:
     def __init__(self):
         self.db: Optional[cantools.database.can.Database] = None
         self.filename: Optional[str] = None
+        self.raw_text: Optional[str] = None
         # last valid signal values per message, used to fill the other
-        # signals of a frame when one signal is written
+        # signals of a frame when one signal is written (periodic messages
+        # only -- see encode_with_values)
         self._signal_state: dict[str, dict[str, Any]] = {}
         # user override of send type per "message.signal" key
         self._send_type_override: dict[str, str] = {}
@@ -57,11 +63,21 @@ class DbcService:
         with self._lock:
             self.db = db
             self.filename = filename
+            self.raw_text = text
             self._signal_state = {
                 m.name: self._zero_state(m) for m in db.messages
             }
             self._send_type_override = {}
         return self.summary()
+
+    def raw(self) -> Optional[dict]:
+        """Currently-loaded DBC's original source text and filename, so a
+        saved layout can bundle it and a later load can restore it (see
+        POST /api/layouts/{name}). None if no DBC is loaded."""
+        with self._lock:
+            if self.raw_text is None:
+                return None
+            return {"filename": self.filename, "content": self.raw_text}
 
     def _zero_state(self, message) -> dict[str, Any]:
         raw = message.decode(bytes(message.length), scaling=False, decode_choices=False)
@@ -113,7 +129,7 @@ class DbcService:
                                 else None
                             ),
                             "send_type": self._signal_send_type(m, s),
-                            "invalid_raw": (1 << s.length) - 1,
+                            "invalid_raw": _invalid_raw(s),
                         }
                         for s in m.signals
                     ],
@@ -139,27 +155,48 @@ class DbcService:
         return self._signal_send_type(message, signal)
 
     def encode_with_values(self, message_name: str, values: dict[str, Any]) -> bytes:
-        """Encode a frame applying `values` (scaled) over the stored state."""
+        """Encode a frame applying `values` (scaled) over the stored state.
+
+        If any of the signals being set is "event" type, every OTHER signal
+        in the message is forced to its own invalid raw value in the
+        outgoing frame -- an Event send carries exactly one real value (the
+        signal just set); nothing else is "remembered" from earlier writes.
+        This substitution is transmit-only: the persisted state keeps the
+        real (pre-substitution) values, so a later real write still starts
+        from the true baseline. Periodic-only sends are unaffected -- their
+        other signals keep coming from the persisted state as before, since
+        Periodic messages have no invalid concept and rely on that state
+        accumulating real values across successive writes.
+        """
         message = self.get_message(message_name)
         with self._lock:
             state = self._signal_state[message_name]
             data = message.encode(
                 {**self._raw_to_scaled(message, state), **values}, strict=False
             )
-            state.update(message.decode(data, scaling=False, decode_choices=False))
+            persisted = message.decode(data, scaling=False, decode_choices=False)
+            state.update(persisted)
+
+            is_event_send = any(
+                self._signal_send_type(message, s) == "event"
+                for s in message.signals
+                if s.name in values
+            )
+            if is_event_send:
+                tx_raw = dict(persisted)
+                for s in message.signals:
+                    if s.name not in values:
+                        tx_raw[s.name] = _invalid_raw(s)
+                data = message.encode(tx_raw, scaling=False, strict=False)
         return data
 
     def encode_invalid(self, message_name: str, signal_name: str) -> bytes:
-        """Encode a frame with `signal_name` forced to its invalid raw value.
-
-        The invalid value is NOT stored in the state, so later frames of the
-        same message fall back to the last valid values.
-        """
+        """Encode a frame with every signal in the message -- `signal_name`
+        included -- forced to its own invalid raw value. This is the 30ms-
+        later Event follow-up: the whole frame reads as invalid, nothing is
+        read from or written to persisted state."""
         message = self.get_message(message_name)
-        signal = next(s for s in message.signals if s.name == signal_name)
-        with self._lock:
-            raw = dict(self._signal_state[message_name])
-        raw[signal_name] = (1 << signal.length) - 1
+        raw = {s.name: _invalid_raw(s) for s in message.signals}
         return message.encode(raw, scaling=False, strict=False)
 
     def encode_current(self, message_name: str) -> bytes:

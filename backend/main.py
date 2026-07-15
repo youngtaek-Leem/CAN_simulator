@@ -274,6 +274,11 @@ def get_dbc():
     return dbc_service.summary()
 
 
+@app.get("/api/dbc/raw")
+def get_dbc_raw():
+    return dbc_service.raw() or {"loaded": False}
+
+
 class SendTypeOverride(BaseModel):
     message_name: str
     signal_name: str
@@ -538,6 +543,11 @@ async def testrunner_upload_functions(file: UploadFile):
         return test_runner_service.load_functions(text, file.filename or "functions.json")
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"함수 마스터 JSON 파싱 오류: {exc}")
+
+
+@app.get("/api/testrunner/functions/raw")
+def testrunner_functions_raw():
+    return test_runner_service.functions_raw() or {"loaded": False}
 
 
 class FunctionStartRequest(BaseModel):

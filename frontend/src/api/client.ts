@@ -59,6 +59,7 @@ export const api = {
 
   uploadDbc: (file: File) => upload('/api/dbc/upload', file),
   getDbc: () => request('/api/dbc'),
+  getDbcRaw: () => request<{ filename: string; content: string } | { loaded: false }>('/api/dbc/raw'),
   overrideSendType: (message_name: string, signal_name: string, send_type: string) =>
     post('/api/dbc/send-type', { message_name, signal_name, send_type }),
 
@@ -102,6 +103,8 @@ export const api = {
   testRunnerStatus: () => request<import('../types').TestRunnerStatus>('/api/testrunner/status'),
 
   uploadFunctionScript: (file: File) => upload('/api/testrunner/functions/upload', file),
+  getFunctionScriptRaw: () =>
+    request<{ filename: string; content: string } | { loaded: false }>('/api/testrunner/functions/raw'),
   functionStart: (name: string) => post('/api/testrunner/functions/start', { name }),
 
   powerConnect: () => post<import('../types').PowerStatus>('/api/power/connect'),

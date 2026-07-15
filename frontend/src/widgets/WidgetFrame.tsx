@@ -7,7 +7,7 @@ import { createPortal } from 'react-dom';
 import { api } from '../api/client';
 import { findSignal, signalBitMax, signalBitMin, signalRawBounds, useApp } from '../store/appContext';
 import { canStore } from '../store/canStore';
-import { MessageFilter, MessageOptions, type MessageFilterMode } from './MessageOptions';
+import { SignalPicker } from './MessageOptions';
 import type { DbcSignal, WidgetConfig } from '../types';
 
 const BINDABLE = new Set(['textDisplay', 'button', 'checkbox', 'dropdown', 'slider', 'randomButton']);
@@ -56,9 +56,7 @@ function ConfigModal({ config, onClose }: { config: WidgetConfig; onClose: () =>
     options: { ...config.options },
   });
   const bindable = BINDABLE.has(config.type);
-  const message = dbc.messages?.find((m) => m.name === draft.binding?.message);
   const bound = findSignal(dbc, draft.binding);
-  const [msgFilter, setMsgFilter] = useState<MessageFilterMode>('all');
 
   const setOption = (key: string, value: unknown) =>
     setDraft((d) => ({ ...d, options: { ...d.options, [key]: value } }));
@@ -98,52 +96,13 @@ function ConfigModal({ config, onClose }: { config: WidgetConfig; onClose: () =>
             {!dbc.loaded && <p className="hint">신호 할당을 하려면 먼저 DBC를 업로드하세요.</p>}
             {dbc.loaded && (
               <>
-                <label>
-                  CAN 메시지
-                  <span className="select-with-filter">
-                    <select
-                      value={draft.binding?.message ?? ''}
-                      onChange={(e) =>
-                        setDraft({
-                          ...draft,
-                          binding: e.target.value
-                            ? { message: e.target.value, signal: '' }
-                            : undefined,
-                        })
-                      }
-                    >
-                      <option value="">— 선택 —</option>
-                      <MessageOptions
-                        dbc={dbc}
-                        rxNode={canStore.getRxNode()}
-                        filter={msgFilter}
-                        labelFor={(m) => `${m.name} (0x${m.frame_id.toString(16).toUpperCase()})`}
-                      />
-                    </select>
-                    <MessageFilter value={msgFilter} onChange={setMsgFilter} />
-                  </span>
-                </label>
-                {message && (
-                  <label>
-                    신호
-                    <select
-                      value={draft.binding?.signal ?? ''}
-                      onChange={(e) =>
-                        setDraft({
-                          ...draft,
-                          binding: { message: message.name, signal: e.target.value },
-                        })
-                      }
-                    >
-                      <option value="">— 선택 —</option>
-                      {message.signals.map((s) => (
-                        <option key={s.name} value={s.name}>
-                          {s.name} ({s.length}bit, {s.send_type})
-                        </option>
-                      ))}
-                    </select>
-                  </label>
-                )}
+                <SignalPicker
+                  dbc={dbc}
+                  rxNode={canStore.getRxNode()}
+                  binding={draft.binding}
+                  onChange={(b) => setDraft({ ...draft, binding: b })}
+                  messageLabelFor={(m) => `${m.name} (0x${m.frame_id.toString(16).toUpperCase()})`}
+                />
                 {bound && (
                   <label>
                     송신 속성 (Event: 30ms 후 invalid 값 자동 송신)
@@ -197,49 +156,49 @@ function ConfigModal({ config, onClose }: { config: WidgetConfig; onClose: () =>
                 value={(draft.options.mode as string | undefined) ?? 'random'}
                 onChange={(e) => setOption('mode', e.target.value)}
               >
-                <option value="random">Random (전체 bit 범위)</option>
+                <option value="random">Random (기본: 전체 bit 범위)</option>
                 <option value="range">Range (순차 순환)</option>
               </select>
             </label>
-            {draft.options.mode === 'range' && (
-              <div className="row-2">
-                {bound && (
-                  <p className="hint">
-                    raw 범위: {signalRawBounds(bound.signal).min} ~ {signalRawBounds(bound.signal).max}
-                  </p>
-                )}
-                <label>
-                  최소값 (raw)
-                  <input
-                    type="number"
-                    min={bound ? signalRawBounds(bound.signal).min : undefined}
-                    max={bound ? signalRawBounds(bound.signal).max : undefined}
-                    value={String(draft.options.rangeMin ?? (bound ? signalRawBounds(bound.signal).min : 0))}
-                    onChange={(e) => {
-                      const raw = Number(e.target.value);
-                      const v = bound
-                        ? clamp(raw, signalRawBounds(bound.signal).min, signalRawBounds(bound.signal).max)
-                        : raw;
-                      setOption('rangeMin', v);
-                    }}
-                  />
-                </label>
-                <label>
-                  최대값 (raw)
-                  <input
-                    type="number"
-                    min={bound ? signalRawBounds(bound.signal).min : undefined}
-                    max={bound ? signalRawBounds(bound.signal).max : undefined}
-                    value={String(draft.options.rangeMax ?? (bound ? signalRawBounds(bound.signal).max : 1))}
-                    onChange={(e) => {
-                      const raw = Number(e.target.value);
-                      const v = bound
-                        ? clamp(raw, signalRawBounds(bound.signal).min, signalRawBounds(bound.signal).max)
-                        : raw;
-                      setOption('rangeMax', v);
-                    }}
-                  />
-                </label>
+            <div className="row-2">
+              {bound && (
+                <p className="hint">
+                  raw 범위: {signalRawBounds(bound.signal).min} ~ {signalRawBounds(bound.signal).max}
+                </p>
+              )}
+              <label>
+                최소값 (raw, 비우면 전체 범위)
+                <input
+                  type="number"
+                  min={bound ? signalRawBounds(bound.signal).min : undefined}
+                  max={bound ? signalRawBounds(bound.signal).max : undefined}
+                  value={String(draft.options.rangeMin ?? (bound ? signalRawBounds(bound.signal).min : 0))}
+                  onChange={(e) => {
+                    const raw = Number(e.target.value);
+                    const v = bound
+                      ? clamp(raw, signalRawBounds(bound.signal).min, signalRawBounds(bound.signal).max)
+                      : raw;
+                    setOption('rangeMin', v);
+                  }}
+                />
+              </label>
+              <label>
+                최대값 (raw, 비우면 전체 범위)
+                <input
+                  type="number"
+                  min={bound ? signalRawBounds(bound.signal).min : undefined}
+                  max={bound ? signalRawBounds(bound.signal).max : undefined}
+                  value={String(draft.options.rangeMax ?? (bound ? signalRawBounds(bound.signal).max : 1))}
+                  onChange={(e) => {
+                    const raw = Number(e.target.value);
+                    const v = bound
+                      ? clamp(raw, signalRawBounds(bound.signal).min, signalRawBounds(bound.signal).max)
+                      : raw;
+                    setOption('rangeMax', v);
+                  }}
+                />
+              </label>
+              {draft.options.mode === 'range' && (
                 <label>
                   step
                   <input
@@ -249,8 +208,8 @@ function ConfigModal({ config, onClose }: { config: WidgetConfig; onClose: () =>
                     onChange={(e) => setOption('step', Math.max(1, Number(e.target.value)))}
                   />
                 </label>
-              </div>
-            )}
+              )}
+            </div>
           </>
         )}
         {config.type === 'functionButton' && (
@@ -309,7 +268,10 @@ function ConfigModal({ config, onClose }: { config: WidgetConfig; onClose: () =>
             </label>
           </div>
         )}
-        {(config.type === 'multiButton' || config.type === 'multiCheckbox') && (
+        {(config.type === 'multiButton' ||
+          config.type === 'multiCheckbox' ||
+          config.type === 'multiDropdown' ||
+          config.type === 'multiSlider') && (
           <div className="row-2">
             <label>
               가로 개수(열)

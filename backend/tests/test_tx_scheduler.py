@@ -146,6 +146,20 @@ def test_generator_random_stays_within_bit_range():
         teardown_stack(cm, sched, peer)
 
 
+def test_generator_random_respects_range():
+    cm, dbc, sched, peer = setup_stack("t_gen_random_range")
+    try:
+        # TurnSignal is 4 bits (0..15) -- narrow the random draw to 2..5
+        sched.set_value_generator("DriverCommand", "TurnSignal", "random", range_min=2, range_max=5)
+        seen = set()
+        for _ in range(30):
+            sched.send_generated("DriverCommand", "TurnSignal")
+            seen.add(dbc._signal_state["DriverCommand"]["TurnSignal"])
+        assert seen and all(2 <= v <= 5 for v in seen)
+    finally:
+        teardown_stack(cm, sched, peer)
+
+
 def test_generator_range_cycles_and_wraps():
     cm, dbc, sched, peer = setup_stack("t_gen_range")
     try:

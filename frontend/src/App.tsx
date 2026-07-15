@@ -22,9 +22,50 @@ import { WIDGET_REGISTRY } from './widgets/registry';
 import { WidgetFrame } from './widgets/WidgetFrame';
 import type { DbcSummary, MultiCell, WidgetConfig, WidgetType } from './types';
 
+interface Page {
+  id: string;
+  name: string;
+  widgets: WidgetConfig[];
+  layout: LayoutItem[];
+}
+
+interface SavedFile {
+  filename: string;
+  content: string;
+}
+
+interface CanConfig {
+  iface: string;
+  channel: string;
+  bitrate: number;
+  fd: boolean;
+  dataBitrate: number;
+}
+
+const DEFAULT_CAN_CONFIG: CanConfig = {
+  iface: 'virtual',
+  channel: 'ch0',
+  bitrate: 500000,
+  fd: false,
+  dataBitrate: 2_000_000,
+};
+
 interface SavedLayout {
+  pages: Page[];
+  dbc?: SavedFile;
+  functionScript?: SavedFile;
+  canConfig?: CanConfig;
+}
+
+/** Legacy single-page save format (before multi-page tabs) -- still
+ * readable so old saved layouts keep working. */
+interface LegacySavedLayout {
   layout: LayoutItem[];
   widgets: WidgetConfig[];
+}
+
+function makePage(id: string, name: string): Page {
+  return { id, name, widgets: [], layout: [] };
 }
 
 /** DBC message names a widget could have armed an auto-periodic sender for
@@ -47,15 +88,26 @@ export default function App() {
   useCanVersion();
   const [dbc, setDbc] = useState<DbcSummary>({ loaded: false });
   const [editMode, setEditMode] = useState(true);
-  const [widgets, setWidgets] = useState<WidgetConfig[]>([]);
-  const [layout, setLayout] = useState<LayoutItem[]>([]);
+  const [pages, setPages] = useState<Page[]>([makePage('p1', 'Page 1')]);
+  const [activePageId, setActivePageId] = useState('p1');
   const [layoutName, setLayoutName] = useState('default');
   const [layoutList, setLayoutList] = useState<string[]>([]);
   const [showSettings, setShowSettings] = useState(false);
   const [banner, setBanner] = useState<string | null>(null);
   const [activeId, setActiveId] = useState<string | null>(null);
+  const [canConfig, setCanConfig] = useState<CanConfig>(DEFAULT_CAN_CONFIG);
 
   const { width, containerRef, mounted } = useContainerWidth();
+
+  const activePage = pages.find((p) => p.id === activePageId) ?? pages[0];
+
+  // if the active page was just removed, fall back to the first remaining one
+  useEffect(() => {
+    if (!pages.some((p) => p.id === activePageId)) {
+      setActivePageId(pages[0]?.id ?? 'p1');
+      setActiveId(null);
+    }
+  }, [pages, activePageId]);
 
   // requirement: while in edit mode all TX/RX activity must be stopped
   useEffect(() => {
@@ -80,37 +132,62 @@ export default function App() {
     window.setTimeout(() => setBanner(null), 3000);
   };
 
-  // ---- widget management -------------------------------------------------
+  // ---- widget management (scoped to the active page) --------------------
+
+  const updateActivePage = useCallback(
+    (fn: (p: Page) => Page) => {
+      setPages((ps) => ps.map((p) => (p.id === activePageId ? fn(p) : p)));
+    },
+    [activePageId],
+  );
 
   const addWidget = (type: WidgetType) => {
     const meta = WIDGET_REGISTRY[type];
     const id = `w${Date.now()}`;
-    setWidgets((w) => [...w, { id, type, title: meta.label, options: {} }]);
-    // cascade new widgets from the top-left (no auto-compaction)
-    setLayout((l) => {
-      const n = l.length;
-      return [...l, { i: id, x: (n % 6) * 2, y: n, ...meta.defaultSize }];
+    updateActivePage((p) => {
+      // cascade new widgets from the top-left (no auto-compaction)
+      const n = p.layout.length;
+      return {
+        ...p,
+        widgets: [...p.widgets, { id, type, title: meta.label, options: {} }],
+        layout: [...p.layout, { i: id, x: (n % 6) * 2, y: n, ...meta.defaultSize }],
+      };
     });
   };
 
-  const updateWidget = useCallback((cfg: WidgetConfig) => {
-    setWidgets((w) => w.map((x) => (x.id === cfg.id ? cfg : x)));
-  }, []);
+  const updateWidget = useCallback(
+    (cfg: WidgetConfig) => {
+      updateActivePage((p) => ({
+        ...p,
+        widgets: p.widgets.map((x) => (x.id === cfg.id ? cfg : x)),
+      }));
+    },
+    [updateActivePage],
+  );
 
   const removeWidget = useCallback(
     (id: string) => {
-      const target = widgets.find((w) => w.id === id);
+      // a signal a removed widget was driving may still be in active use by
+      // a widget sitting on a different (currently hidden) page, so this
+      // must scan every page, not just the active one
+      const allWidgets = pages.flatMap((p) => p.widgets);
+      const target = allWidgets.find((w) => w.id === id);
       if (target) {
-        const remaining = widgets.filter((w) => w.id !== id);
+        const remaining = allWidgets.filter((w) => w.id !== id);
         for (const messageName of sendableMessages(target)) {
           const stillBound = remaining.some((w) => sendableMessages(w).includes(messageName));
           if (!stillBound) api.txAutoStop(messageName).catch(() => {});
         }
       }
-      setWidgets((w) => w.filter((x) => x.id !== id));
-      setLayout((l) => l.filter((x) => x.i !== id));
+      setPages((ps) =>
+        ps.map((p) => ({
+          ...p,
+          widgets: p.widgets.filter((x) => x.id !== id),
+          layout: p.layout.filter((x) => x.i !== id),
+        })),
+      );
     },
-    [widgets],
+    [pages],
   );
 
   const ctx = useMemo(
@@ -124,23 +201,30 @@ export default function App() {
   // registry.tsx takes effect immediately for existing widgets too.
   const effectiveLayout = useMemo(
     () =>
-      layout.map((item) => {
-        const widget = widgets.find((w) => w.id === item.i);
+      activePage.layout.map((item) => {
+        const widget = activePage.widgets.find((w) => w.id === item.i);
         if (!widget) return item;
         const { minW, minH } = WIDGET_REGISTRY[widget.type].defaultSize;
         return { ...item, minW, minH };
       }),
-    [layout, widgets],
+    [activePage.layout, activePage.widgets],
   );
 
-  // ---- layout persistence --------------------------------------------------
+  // ---- layout persistence (all pages) ---------------------------------------
 
   const saveLayout = async () => {
     try {
-      await api.saveLayout(layoutName, { layout, widgets } satisfies SavedLayout);
+      const [dbcRaw, funcRaw] = await Promise.all([
+        api.getDbcRaw().catch(() => null),
+        api.getFunctionScriptRaw().catch(() => null),
+      ]);
+      const body: SavedLayout = { pages, canConfig };
+      if (dbcRaw && 'content' in dbcRaw) body.dbc = dbcRaw;
+      if (funcRaw && 'content' in funcRaw) body.functionScript = funcRaw;
+      await api.saveLayout(layoutName, body);
       const r = await api.listLayouts();
       setLayoutList(r.layouts);
-      notify(`레이아웃 "${layoutName}" 저장됨`);
+      notify(`레이아웃 "${layoutName}" 저장됨${body.dbc ? ' (DBC 포함)' : ''}${body.functionScript ? ' (Function Script 포함)' : ''}`);
     } catch (e) {
       notify(`저장 실패: ${(e as Error).message}`);
     }
@@ -148,9 +232,38 @@ export default function App() {
 
   const loadLayout = async (name: string) => {
     try {
-      const saved = (await api.getLayout(name)) as SavedLayout;
-      setWidgets(saved.widgets ?? []);
-      setLayout(saved.layout ?? []);
+      const saved = (await api.getLayout(name)) as Partial<SavedLayout> & Partial<LegacySavedLayout>;
+      if (saved.dbc?.content) {
+        try {
+          await api.uploadDbc(new File([saved.dbc.content], saved.dbc.filename, { type: 'text/plain' }));
+        } catch (e) {
+          notify(`DBC 복원 실패: ${(e as Error).message}`);
+        }
+      }
+      if (saved.functionScript?.content) {
+        try {
+          await api.uploadFunctionScript(
+            new File([saved.functionScript.content], saved.functionScript.filename, {
+              type: 'application/json',
+            }),
+          );
+        } catch (e) {
+          notify(`Function Script 복원 실패: ${(e as Error).message}`);
+        }
+      }
+      refreshDbc();
+      // CAN 설정값만 복원하고 실제 연결은 자동으로 하지 않는다 -- 연결은 사용자가
+      // "연결" 버튼으로 직접 트리거해야 하는 부수효과 있는 동작이다.
+      if (saved.canConfig) setCanConfig(saved.canConfig);
+      // legacy saves (before multi-page tabs) have no `pages` key -- wrap
+      // their single layout/widgets pair into one page
+      const loadedPages: Page[] =
+        saved.pages && saved.pages.length > 0
+          ? saved.pages
+          : [{ ...makePage('p1', 'Page 1'), widgets: saved.widgets ?? [], layout: saved.layout ?? [] }];
+      setPages(loadedPages);
+      setActivePageId(loadedPages[0].id);
+      setActiveId(null);
       setLayoutName(name);
       notify(`레이아웃 "${name}" 불러옴`);
     } catch (e) {
@@ -161,25 +274,50 @@ export default function App() {
   // auto-arrange: tile (바둑판) keeps sizes and packs rows left→right,
   // cascade (계단식) staggers widgets diagonally
   const arrange = (mode: 'tile' | 'cascade') => {
-    setLayout((l) => {
+    updateActivePage((p) => {
+      let newLayout: LayoutItem[];
       if (mode === 'cascade') {
-        return l.map((it, n) => ({ ...it, x: Math.min(n, Math.max(0, 12 - it.w)), y: n }));
+        newLayout = p.layout.map((it, n) => ({ ...it, x: Math.min(n, Math.max(0, 12 - it.w)), y: n }));
+      } else {
+        let x = 0;
+        let y = 0;
+        let rowH = 0;
+        newLayout = p.layout.map((it) => {
+          if (x + it.w > 12) {
+            x = 0;
+            y += rowH;
+            rowH = 0;
+          }
+          const placed = { ...it, x, y };
+          x += it.w;
+          rowH = Math.max(rowH, it.h);
+          return placed;
+        });
       }
-      let x = 0;
-      let y = 0;
-      let rowH = 0;
-      return l.map((it) => {
-        if (x + it.w > 12) {
-          x = 0;
-          y += rowH;
-          rowH = 0;
-        }
-        const placed = { ...it, x, y };
-        x += it.w;
-        rowH = Math.max(rowH, it.h);
-        return placed;
-      });
+      return { ...p, layout: newLayout };
     });
+  };
+
+  // ---- page (tab) management -------------------------------------------------
+
+  const addPage = () => {
+    const id = `p${Date.now()}`;
+    setPages((ps) => [...ps, makePage(id, `Page ${ps.length + 1}`)]);
+    setActivePageId(id);
+    setActiveId(null);
+  };
+
+  const renamePage = (id: string, name: string) => {
+    setPages((ps) => ps.map((p) => (p.id === id ? { ...p, name } : p)));
+  };
+
+  const removePage = (id: string) => {
+    setPages((ps) => (ps.length <= 1 ? ps : ps.filter((p) => p.id !== id)));
+  };
+
+  const switchPage = (id: string) => {
+    setActivePageId(id);
+    setActiveId(null);
   };
 
   // ---- render ----------------------------------------------------------------
@@ -201,6 +339,17 @@ export default function App() {
           loadLayout={loadLayout}
           openSettings={() => setShowSettings(true)}
           notify={notify}
+          canConfig={canConfig}
+          setCanConfig={setCanConfig}
+        />
+        <PageTabs
+          pages={pages}
+          activePageId={activePageId}
+          editMode={editMode}
+          onSwitch={switchPage}
+          onAdd={addPage}
+          onRename={renamePage}
+          onRemove={removePage}
         />
         {banner && <div className="banner">{banner}</div>}
         <div className="canvas" ref={containerRef}>
@@ -212,9 +361,9 @@ export default function App() {
               compactor={freeCompactor}
               dragConfig={{ enabled: true, handle: '.drag-handle' }}
               resizeConfig={{ enabled: true, handles: ['se', 'e', 's'] }}
-              onLayoutChange={(l: Layout) => setLayout([...l])}
+              onLayoutChange={(l: Layout) => updateActivePage((p) => ({ ...p, layout: [...l] }))}
             >
-              {widgets.map((w) => {
+              {activePage.widgets.map((w) => {
                 const Comp = WIDGET_REGISTRY[w.type].component;
                 return (
                   <div
@@ -230,7 +379,7 @@ export default function App() {
               })}
             </GridLayout>
           )}
-          {widgets.length === 0 && (
+          {activePage.widgets.length === 0 && (
             <div className="empty-canvas">
               상단의 "+ 위젯 추가"에서 컴포넌트를 배치해 GUI를 구성하세요.
             </div>
@@ -240,6 +389,77 @@ export default function App() {
         {showSettings && <SettingsModal onClose={() => setShowSettings(false)} />}
       </div>
     </AppContext.Provider>
+  );
+}
+
+// ---- page tabs -----------------------------------------------------------------
+
+interface PageTabsProps {
+  pages: Page[];
+  activePageId: string;
+  editMode: boolean;
+  onSwitch: (id: string) => void;
+  onAdd: () => void;
+  onRename: (id: string, name: string) => void;
+  onRemove: (id: string) => void;
+}
+
+function PageTabs({ pages, activePageId, editMode, onSwitch, onAdd, onRename, onRemove }: PageTabsProps) {
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [draft, setDraft] = useState('');
+
+  const startRename = (p: Page) => {
+    setEditingId(p.id);
+    setDraft(p.name);
+  };
+
+  const commitRename = (id: string) => {
+    const name = draft.trim();
+    if (name) onRename(id, name);
+    setEditingId(null);
+  };
+
+  return (
+    <div className="page-tabs">
+      {pages.map((p) => (
+        <div key={p.id} className={`page-tab ${p.id === activePageId ? 'page-tab-active' : ''}`}>
+          {editingId === p.id ? (
+            <input
+              className="page-tab-rename"
+              value={draft}
+              autoFocus
+              onChange={(e) => setDraft(e.target.value)}
+              onBlur={() => commitRename(p.id)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') commitRename(p.id);
+                if (e.key === 'Escape') setEditingId(null);
+              }}
+            />
+          ) : (
+            <button className="page-tab-label" onClick={() => onSwitch(p.id)}>
+              {p.name}
+            </button>
+          )}
+          {editMode && editingId !== p.id && (
+            <span className="page-tab-actions">
+              <button className="icon-btn" title="이름 변경" onClick={() => startRename(p)}>
+                ✎
+              </button>
+              {pages.length > 1 && (
+                <button className="icon-btn" title="페이지 삭제" onClick={() => onRemove(p.id)}>
+                  ✕
+                </button>
+              )}
+            </span>
+          )}
+        </div>
+      ))}
+      {editMode && (
+        <button className="small-btn page-tab-add" onClick={onAdd}>
+          + 페이지
+        </button>
+      )}
+    </div>
   );
 }
 
@@ -259,15 +479,18 @@ interface TopBarProps {
   loadLayout: (name: string) => void;
   openSettings: () => void;
   notify: (text: string) => void;
+  canConfig: CanConfig;
+  setCanConfig: (c: CanConfig) => void;
 }
 
 function TopBar(props: TopBarProps) {
   useCanVersion();
-  const [iface, setIface] = useState('virtual');
-  const [channel, setChannel] = useState('ch0');
-  const [bitrate, setBitrate] = useState(500000);
-  const [fd, setFd] = useState(false);
-  const [dataBitrate, setDataBitrate] = useState(2_000_000);
+  const { iface, channel, bitrate, fd, dataBitrate } = props.canConfig;
+  const setIface = (v: string) => props.setCanConfig({ ...props.canConfig, iface: v });
+  const setChannel = (v: string) => props.setCanConfig({ ...props.canConfig, channel: v });
+  const setBitrate = (v: number) => props.setCanConfig({ ...props.canConfig, bitrate: v });
+  const setFd = (v: boolean) => props.setCanConfig({ ...props.canConfig, fd: v });
+  const setDataBitrate = (v: number) => props.setCanConfig({ ...props.canConfig, dataBitrate: v });
   const [showMore, setShowMore] = useState(false);
   const moreRef = useRef<HTMLSpanElement>(null);
   const connected = canStore.status?.can.connected ?? false;

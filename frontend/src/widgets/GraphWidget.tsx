@@ -10,8 +10,8 @@ import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { canStore, useCanVersion, type HistoryPoint } from '../store/canStore';
 import { useApp } from '../store/appContext';
-import { MessageFilter, MessageOptions, type MessageFilterMode } from './MessageOptions';
-import type { WidgetConfig } from '../types';
+import { SignalPicker } from './MessageOptions';
+import type { SignalBinding, WidgetConfig } from '../types';
 
 interface GraphSeries {
   message: string;
@@ -75,10 +75,9 @@ function niceTicks(min: number, max: number, count: number): number[] {
   return Array.from({ length: count + 1 }, (_, i) => min + step * i);
 }
 
+/** Y-axis tick label -- integers only (data/auto-fit math stays float). */
 function fmt(v: number): string {
-  if (Math.abs(v) >= 1000) return v.toFixed(0);
-  if (Math.abs(v) >= 10) return v.toFixed(1);
-  return v.toFixed(2);
+  return Math.round(v).toString();
 }
 
 /** X-axis rolling window size for display next to the +/- zoom buttons. */
@@ -123,6 +122,13 @@ export function GraphWidget({ config }: { config: WidgetConfig }) {
       options: { ...config.options, series: series.filter((s) => seriesKey(s) !== key) },
     });
   };
+  const moveSeries = (index: number, dir: -1 | 1) => {
+    const target = index + dir;
+    if (target < 0 || target >= series.length) return;
+    const next = [...series];
+    [next[index], next[target]] = [next[target], next[index]];
+    updateWidget({ ...config, options: { ...config.options, series: next } });
+  };
   const zoomXWindow = (deltaMs: number) => {
     setXWindowMs((w) => Math.min(MAX_X_WINDOW_MS, Math.max(MIN_X_WINDOW_MS, w + deltaMs)));
   };
@@ -154,6 +160,10 @@ export function GraphWidget({ config }: { config: WidgetConfig }) {
             showXAxis={i === series.length - 1}
             xWindowMs={xWindowMs}
             onRemove={() => removeSeries(seriesKey(s))}
+            onMoveUp={() => moveSeries(i, -1)}
+            onMoveDown={() => moveSeries(i, 1)}
+            canMoveUp={i > 0}
+            canMoveDown={i < series.length - 1}
           />
         ))}
       </div>
@@ -170,12 +180,20 @@ function SignalChart({
   showXAxis,
   xWindowMs,
   onRemove,
+  onMoveUp,
+  onMoveDown,
+  canMoveUp,
+  canMoveDown,
 }: {
   series: GraphSeries;
   editMode: boolean;
   showXAxis: boolean;
   xWindowMs: number;
   onRemove: () => void;
+  onMoveUp: () => void;
+  onMoveDown: () => void;
+  canMoveUp: boolean;
+  canMoveDown: boolean;
 }) {
   useCanVersion();
   const key = seriesKey(series);
@@ -441,9 +459,17 @@ function SignalChart({
           ⟲
         </button>
         {editMode && (
-          <button className="icon-btn" title="제거" onClick={onRemove}>
-            ✕
-          </button>
+          <>
+            <button className="icon-btn" title="위로 이동" disabled={!canMoveUp} onClick={onMoveUp}>
+              ▲
+            </button>
+            <button className="icon-btn" title="아래로 이동" disabled={!canMoveDown} onClick={onMoveDown}>
+              ▼
+            </button>
+            <button className="icon-btn" title="제거" onClick={onRemove}>
+              ✕
+            </button>
+          </>
         )}
       </div>
       <div className="graph-canvas-wrap" ref={wrapRef}>
@@ -470,14 +496,11 @@ function AddSeriesModal({
   onClose: () => void;
 }) {
   const { dbc } = useApp();
-  const [messageName, setMessageName] = useState('');
-  const [signalName, setSignalName] = useState('');
-  const [msgFilter, setMsgFilter] = useState<MessageFilterMode>('all');
-  const message = dbc.messages?.find((m) => m.name === messageName);
+  const [binding, setBinding] = useState<SignalBinding | undefined>(undefined);
 
   const add = () => {
-    if (!messageName || !signalName) return;
-    onAdd({ message: messageName, signal: signalName, color: nextColor(existing) });
+    if (!binding?.message || !binding.signal) return;
+    onAdd({ message: binding.message, signal: binding.signal, color: nextColor(existing) });
     onClose();
   };
 
@@ -487,45 +510,16 @@ function AddSeriesModal({
         <h3>그래프에 신호 추가</h3>
         {!dbc.loaded && <p className="hint">신호 할당을 하려면 먼저 DBC를 업로드하세요.</p>}
         {dbc.loaded && (
-          <>
-            <label>
-              CAN 메시지
-              <span className="select-with-filter">
-                <select
-                  value={messageName}
-                  onChange={(e) => {
-                    setMessageName(e.target.value);
-                    setSignalName('');
-                  }}
-                >
-                  <option value="">— 선택 —</option>
-                  <MessageOptions
-                    dbc={dbc}
-                    rxNode={canStore.getRxNode()}
-                    filter={msgFilter}
-                    labelFor={(m) => m.name}
-                  />
-                </select>
-                <MessageFilter value={msgFilter} onChange={setMsgFilter} />
-              </span>
-            </label>
-            {message && (
-              <label>
-                신호
-                <select value={signalName} onChange={(e) => setSignalName(e.target.value)}>
-                  <option value="">— 선택 —</option>
-                  {message.signals.map((s) => (
-                    <option key={s.name} value={s.name}>
-                      {s.name} ({s.length}bit)
-                    </option>
-                  ))}
-                </select>
-              </label>
-            )}
-          </>
+          <SignalPicker
+            dbc={dbc}
+            rxNode={canStore.getRxNode()}
+            binding={binding}
+            onChange={setBinding}
+            messageLabelFor={(m) => m.name}
+          />
         )}
         <div className="modal-buttons">
-          <button onClick={add} disabled={!messageName || !signalName}>
+          <button onClick={add} disabled={!binding?.message || !binding.signal}>
             추가
           </button>
           <button onClick={onClose}>취소</button>

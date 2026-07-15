@@ -84,13 +84,51 @@ def test_invalid_value_encoding():
     svc = make_service()
     svc.encode_with_values("DriverCommand", {"TurnSignal": 2, "WiperMode": 3})
     inv = svc.encode_invalid("DriverCommand", "TurnSignal")
-    # low nibble of byte 0 must be all ones (4-bit invalid = 0xF)
-    assert inv[0] & 0x0F == 0x0F
-    # other signals keep their last valid values
-    assert inv[1] == 3  # WiperMode
+    # the whole frame reads as invalid -- not just the named signal
+    assert inv[0] & 0x0F == 0x0F  # TurnSignal (4-bit) invalid
+    assert (inv[0] >> 4) & 0x1 == 1  # HornRequest (1-bit) invalid
+    assert inv[1] == 0xFF  # WiperMode (8-bit) invalid, not its last value of 3
     # invalid value is not persisted in the state
     current = svc.encode_current("DriverCommand")
     assert current[0] & 0x0F == 0x02
+
+
+def test_event_send_forces_other_signals_invalid_every_time():
+    svc = make_service()
+    # send TurnSignal -- the other two signals (never set) must be invalid
+    data = svc.encode_with_values("DriverCommand", {"TurnSignal": 2})
+    assert (data[0] >> 4) & 0x1 == 1  # HornRequest invalid
+    assert data[1] == 0xFF  # WiperMode invalid
+
+    # now send WiperMode -- TurnSignal/HornRequest must ALSO be invalid in
+    # this frame, even though TurnSignal was just set moments ago: an Event
+    # send has no "memory" of previously-sent real values for other signals
+    data2 = svc.encode_with_values("DriverCommand", {"WiperMode": 5})
+    assert data2[0] & 0x0F == 0x0F  # TurnSignal invalid, not 2
+    assert (data2[0] >> 4) & 0x1 == 1  # HornRequest invalid
+    assert data2[1] == 5  # WiperMode itself carries the real value
+
+    # the 30ms-later invalid follow-up forces the WHOLE frame invalid,
+    # including the signal that was just set
+    inv = svc.encode_invalid("DriverCommand", "WiperMode")
+    assert inv[0] & 0x0F == 0x0F
+    assert (inv[0] >> 4) & 0x1 == 1
+    assert inv[1] == 0xFF
+
+    # substitution is transmit-only -- persisted state keeps each signal's
+    # real value even though no single frame ever showed them together
+    current = svc.encode_current("DriverCommand")
+    assert current[0] & 0x0F == 0x02  # TurnSignal
+    assert current[1] == 5  # WiperMode
+
+
+def test_untouched_periodic_sibling_stays_zero_not_invalid():
+    svc = make_service()
+    # EngineData is periodic ([P] tag) -- periodic has no invalid concept, so
+    # an untouched sibling should stay at raw 0, not be substituted
+    data = svc.encode_with_values("EngineData", {"EngineSpeed": 1000})
+    decoded = svc.decode_raw(0x100, data)
+    assert decoded["EngineTemp"] == 0
 
 
 def test_state_persists_between_writes():

@@ -330,6 +330,26 @@ def test_testrunner_functions_upload_and_run():
         client.post("/api/disconnect")
 
 
+def test_dbc_and_function_script_raw_endpoints():
+    # dbc_service/test_runner_service are module-level singletons shared by
+    # every TestClient in this process, so "nothing loaded yet" isn't a safe
+    # assumption here -- other tests in the suite may have already loaded a
+    # DBC/function script before this one runs. Only assert the post-upload
+    # round-trip.
+    with make_client() as client:
+        dbc_text = (SAMPLES_DIR / "sample.dbc").read_text(encoding="utf-8")
+        client.post("/api/dbc/upload", files={"file": ("sample.dbc", dbc_text.encode("utf-8"))})
+        r = client.get("/api/dbc/raw")
+        assert r.status_code == 200
+        assert r.json() == {"filename": "sample.dbc", "content": dbc_text}
+
+        script = json.dumps([{"type": "FUNC", "name": "SendSpeed", "Cycle": 1}])
+        client.post("/api/testrunner/functions/upload", files={"file": ("funcs.json", script.encode("utf-8"))})
+        r = client.get("/api/testrunner/functions/raw")
+        assert r.status_code == 200
+        assert r.json() == {"filename": "funcs.json", "content": script}
+
+
 def test_testrunner_functions_upload_rejects_script_without_func_blocks():
     with make_client() as client:
         # an ordinary ID-based scenario script, not a FUNC master script

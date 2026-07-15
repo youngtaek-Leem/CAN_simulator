@@ -4,12 +4,12 @@
 // is bound to its own CAN signal via a small per-cell edit popup shown only
 // in edit mode.
 
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { api } from '../api/client';
-import { findSignal, signalRawBounds, useApp } from '../store/appContext';
+import { findSignal, signalBitMax, signalRawBounds, useApp } from '../store/appContext';
 import { canStore, useCanVersion } from '../store/canStore';
-import { MessageFilter, MessageOptions, type MessageFilterMode } from './MessageOptions';
+import { SignalPicker } from './MessageOptions';
 import type { MultiCell, WidgetConfig } from '../types';
 
 function getGrid(config: WidgetConfig): { rows: number; cols: number; cells: MultiCell[] } {
@@ -203,6 +203,186 @@ export function MultiCheckboxWidget({ config }: { config: WidgetConfig }) {
   );
 }
 
+// Grid of dropdown cells, each independently bound to its own signal --
+// same options-from-VAL_-table behavior as the single DropdownWidget.
+export function MultiDropdownWidget({ config }: { config: WidgetConfig }) {
+  const { editMode, dbc } = useApp();
+  const { rows, cols, cells } = getGrid(config);
+  const updateCell = useCellUpdater(config);
+  const [editingIndex, setEditingIndex] = useState<number | null>(null);
+  const [selected, setSelected] = useState<Record<number, string>>({});
+  const [error, setError] = useState<string | null>(null);
+
+  const select = async (i: number, cell: MultiCell, raw: string) => {
+    setSelected((s) => ({ ...s, [i]: raw }));
+    if (!cell.binding?.signal || raw === '') return;
+    try {
+      await api.txSignal(cell.binding.message, { [cell.binding.signal]: Number(raw) });
+      setError(null);
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
+
+  return (
+    <div className="multi-widget control-widget">
+      <div
+        className="multi-grid"
+        style={{ gridTemplateColumns: `repeat(${cols}, 1fr)`, gridTemplateRows: `repeat(${rows}, 1fr)` }}
+      >
+        {Array.from({ length: rows * cols }, (_, i) => {
+          const cell = cells[i] ?? {};
+          const bound = findSignal(dbc, cell.binding);
+          const choices = bound?.signal.choices ?? null;
+          return (
+            <div className="multi-cell" key={i}>
+              <select
+                className="multi-cell-dropdown"
+                value={selected[i] ?? ''}
+                disabled={!choices}
+                onChange={(e) => select(i, cell, e.target.value)}
+              >
+                <option value="">
+                  {cell.label || (choices ? cell.binding!.signal : '신호 미할당')}
+                </option>
+                {choices &&
+                  Object.entries(choices).map(([raw, label]) => (
+                    <option key={raw} value={raw}>
+                      {label} ({raw})
+                    </option>
+                  ))}
+              </select>
+              {editMode && (
+                <button
+                  className="icon-btn multi-cell-edit"
+                  title="셀 설정"
+                  onClick={() => setEditingIndex(i)}
+                >
+                  ⚙
+                </button>
+              )}
+            </div>
+          );
+        })}
+      </div>
+      {error && <span className="error">{error}</span>}
+      {editingIndex !== null && (
+        <CellEditModal
+          kind="dropdown"
+          cell={cells[editingIndex] ?? {}}
+          onSave={(patch) => {
+            updateCell(editingIndex, patch);
+            setEditingIndex(null);
+          }}
+          onClose={() => setEditingIndex(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+// Grid of slider cells, each independently bound to its own signal -- same
+// 100ms-throttled send behavior as the single SliderWidget, per-cell state.
+export function MultiSliderWidget({ config }: { config: WidgetConfig }) {
+  const { editMode, dbc } = useApp();
+  const { rows, cols, cells } = getGrid(config);
+  const updateCell = useCellUpdater(config);
+  const [editingIndex, setEditingIndex] = useState<number | null>(null);
+  const [values, setValues] = useState<Record<number, number>>({});
+  const [error, setError] = useState<string | null>(null);
+  const lastSent = useRef<Record<number, number>>({});
+
+  const range = (cell: MultiCell) => {
+    const bound = findSignal(dbc, cell.binding);
+    const min = cell.sliderMin ?? bound?.signal.minimum ?? 0;
+    const max = cell.sliderMax ?? bound?.signal.maximum ?? (bound ? signalBitMax(bound.signal) : 100);
+    const step = cell.sliderStep ?? 1;
+    return { min, max, step };
+  };
+
+  const send = async (cell: MultiCell, v: number) => {
+    if (!cell.binding?.signal) return;
+    try {
+      await api.txSignal(cell.binding.message, { [cell.binding.signal]: v });
+      setError(null);
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
+
+  const onChange = (i: number, cell: MultiCell, v: number) => {
+    setValues((s) => ({ ...s, [i]: v }));
+    const now = performance.now();
+    if (now - (lastSent.current[i] ?? 0) >= 100) {
+      lastSent.current[i] = now;
+      void send(cell, v);
+    }
+  };
+
+  const flush = (i: number, cell: MultiCell, v: number) => {
+    lastSent.current[i] = performance.now();
+    void send(cell, v);
+  };
+
+  return (
+    <div className="multi-widget control-widget">
+      <div
+        className="multi-grid"
+        style={{ gridTemplateColumns: `repeat(${cols}, 1fr)`, gridTemplateRows: `repeat(${rows}, 1fr)` }}
+      >
+        {Array.from({ length: rows * cols }, (_, i) => {
+          const cell = cells[i] ?? {};
+          const bound = findSignal(dbc, cell.binding);
+          const { min, max, step } = range(cell);
+          const value = values[i] ?? min;
+          return (
+            <div className="multi-cell multi-cell-slider" key={i}>
+              <div className="slider-header">
+                <span>{cell.label || cell.binding?.signal || `#${i + 1}`}</span>
+                <span className="mono">
+                  {value}
+                  {bound?.signal.unit ? ` ${bound.signal.unit}` : ''}
+                </span>
+              </div>
+              <input
+                type="range"
+                min={min}
+                max={max}
+                step={step}
+                value={value}
+                disabled={!cell.binding?.signal}
+                onChange={(e) => onChange(i, cell, Number(e.target.value))}
+                onPointerUp={() => flush(i, cell, values[i] ?? min)}
+              />
+              {editMode && (
+                <button
+                  className="icon-btn multi-cell-edit"
+                  title="셀 설정"
+                  onClick={() => setEditingIndex(i)}
+                >
+                  ⚙
+                </button>
+              )}
+            </div>
+          );
+        })}
+      </div>
+      {error && <span className="error">{error}</span>}
+      {editingIndex !== null && (
+        <CellEditModal
+          kind="slider"
+          cell={cells[editingIndex] ?? {}}
+          onSave={(patch) => {
+            updateCell(editingIndex, patch);
+            setEditingIndex(null);
+          }}
+          onClose={() => setEditingIndex(null)}
+        />
+      )}
+    </div>
+  );
+}
+
 // Grid of buttons that each trigger one FUNC block from the loaded function
 // master script (see FunctionButtonWidget.tsx for the single-button version
 // and its design notes -- same shared test_runner_service engine, same
@@ -354,7 +534,13 @@ export function RandomMultiButtonWidget({ config }: { config: WidgetConfig }) {
         {Array.from({ length: rows * cols }, (_, i) => {
           const cell = cells[i] ?? {};
           const invalidActive = lastSent[i] === 'invalid';
-          const modeLabel = cell.mode === 'range' ? `Range ${cell.rangeMin ?? ''}~${cell.rangeMax ?? ''}` : 'Random';
+          const cellHasRange = cell.rangeMin !== undefined || cell.rangeMax !== undefined;
+          const modeLabel =
+            cell.mode === 'range'
+              ? `Range ${cell.rangeMin ?? ''}~${cell.rangeMax ?? ''}`
+              : cellHasRange
+                ? `Random ${cell.rangeMin ?? ''}~${cell.rangeMax ?? ''}`
+                : 'Random';
           const label =
             cell.label ||
             (cell.binding?.signal ? (invalidActive ? `${cell.binding.signal} = INVALID` : `${cell.binding.signal} [${modeLabel}]`) : `#${i + 1}`);
@@ -409,18 +595,22 @@ function CellEditModal({
   onSave,
   onClose,
 }: {
-  kind: 'button' | 'checkbox' | 'function' | 'random';
+  kind: 'button' | 'checkbox' | 'function' | 'random' | 'dropdown' | 'slider';
   cell: MultiCell;
   onSave: (patch: MultiCell) => void;
   onClose: () => void;
 }) {
   const { dbc } = useApp();
   const [draft, setDraft] = useState<MultiCell>({ ...cell });
-  const message = dbc.messages?.find((m) => m.name === draft.binding?.message);
   const bound = findSignal(dbc, draft.binding);
-  const [msgFilter, setMsgFilter] = useState<MessageFilterMode>('all');
-  const kindLabel =
-    kind === 'button' ? '버튼' : kind === 'checkbox' ? '체크박스' : kind === 'function' ? 'Function 버튼' : 'Random 버튼';
+  const kindLabel = {
+    button: '버튼',
+    checkbox: '체크박스',
+    function: 'Function 버튼',
+    random: 'Random 버튼',
+    dropdown: '드롭다운',
+    slider: '슬라이더',
+  }[kind];
 
   return createPortal(
     <div className="modal-backdrop" onClick={onClose}>
@@ -454,51 +644,13 @@ function CellEditModal({
         )}
         {kind !== 'function' && !dbc.loaded && <p className="hint">신호 할당을 하려면 먼저 DBC를 업로드하세요.</p>}
         {kind !== 'function' && dbc.loaded && (
-          <>
-            <label>
-              CAN 메시지
-              <span className="select-with-filter">
-                <select
-                  value={draft.binding?.message ?? ''}
-                  onChange={(e) =>
-                    setDraft({
-                      ...draft,
-                      binding: e.target.value
-                        ? { message: e.target.value, signal: '' }
-                        : undefined,
-                    })
-                  }
-                >
-                  <option value="">— 선택 —</option>
-                  <MessageOptions
-                    dbc={dbc}
-                    rxNode={canStore.getRxNode()}
-                    filter={msgFilter}
-                    labelFor={(m) => `${m.name} (0x${m.frame_id.toString(16).toUpperCase()})`}
-                  />
-                </select>
-                <MessageFilter value={msgFilter} onChange={setMsgFilter} />
-              </span>
-            </label>
-            {message && (
-              <label>
-                신호
-                <select
-                  value={draft.binding?.signal ?? ''}
-                  onChange={(e) =>
-                    setDraft({ ...draft, binding: { message: message.name, signal: e.target.value } })
-                  }
-                >
-                  <option value="">— 선택 —</option>
-                  {message.signals.map((s) => (
-                    <option key={s.name} value={s.name}>
-                      {s.name} ({s.length}bit, {s.send_type})
-                    </option>
-                  ))}
-                </select>
-              </label>
-            )}
-          </>
+          <SignalPicker
+            dbc={dbc}
+            rxNode={canStore.getRxNode()}
+            binding={draft.binding}
+            onChange={(b) => setDraft({ ...draft, binding: b })}
+            messageLabelFor={(m) => `${m.name} (0x${m.frame_id.toString(16).toUpperCase()})`}
+          />
         )}
         {kind === 'button' && (
           <label>
@@ -530,6 +682,36 @@ function CellEditModal({
             </label>
           </div>
         )}
+        {kind === 'slider' && (
+          <div className="row-2">
+            <label>
+              최소
+              <input
+                type="number"
+                value={String(draft.sliderMin ?? bound?.signal.minimum ?? 0)}
+                onChange={(e) => setDraft({ ...draft, sliderMin: Number(e.target.value) })}
+              />
+            </label>
+            <label>
+              최대
+              <input
+                type="number"
+                value={String(
+                  draft.sliderMax ?? bound?.signal.maximum ?? (bound ? signalBitMax(bound.signal) : 100),
+                )}
+                onChange={(e) => setDraft({ ...draft, sliderMax: Number(e.target.value) })}
+              />
+            </label>
+            <label>
+              간격
+              <input
+                type="number"
+                value={String(draft.sliderStep ?? 1)}
+                onChange={(e) => setDraft({ ...draft, sliderStep: Number(e.target.value) })}
+              />
+            </label>
+          </div>
+        )}
         {kind === 'random' && (
           <>
             <label>
@@ -538,49 +720,49 @@ function CellEditModal({
                 value={draft.mode ?? 'random'}
                 onChange={(e) => setDraft({ ...draft, mode: e.target.value as 'random' | 'range' })}
               >
-                <option value="random">Random (전체 bit 범위)</option>
+                <option value="random">Random (기본: 전체 bit 범위)</option>
                 <option value="range">Range (순차 순환)</option>
               </select>
             </label>
-            {draft.mode === 'range' && (
-              <div className="row-2">
-                {bound && (
-                  <p className="hint">
-                    raw 범위: {signalRawBounds(bound.signal).min} ~ {signalRawBounds(bound.signal).max}
-                  </p>
-                )}
-                <label>
-                  최소값 (raw)
-                  <input
-                    type="number"
-                    min={bound ? signalRawBounds(bound.signal).min : undefined}
-                    max={bound ? signalRawBounds(bound.signal).max : undefined}
-                    value={String(draft.rangeMin ?? (bound ? signalRawBounds(bound.signal).min : 0))}
-                    onChange={(e) => {
-                      const raw = Number(e.target.value);
-                      const v = bound
-                        ? Math.min(signalRawBounds(bound.signal).max, Math.max(signalRawBounds(bound.signal).min, raw))
-                        : raw;
-                      setDraft({ ...draft, rangeMin: v });
-                    }}
-                  />
-                </label>
-                <label>
-                  최대값 (raw)
-                  <input
-                    type="number"
-                    min={bound ? signalRawBounds(bound.signal).min : undefined}
-                    max={bound ? signalRawBounds(bound.signal).max : undefined}
-                    value={String(draft.rangeMax ?? (bound ? signalRawBounds(bound.signal).max : 1))}
-                    onChange={(e) => {
-                      const raw = Number(e.target.value);
-                      const v = bound
-                        ? Math.min(signalRawBounds(bound.signal).max, Math.max(signalRawBounds(bound.signal).min, raw))
-                        : raw;
-                      setDraft({ ...draft, rangeMax: v });
-                    }}
-                  />
-                </label>
+            <div className="row-2">
+              {bound && (
+                <p className="hint">
+                  raw 범위: {signalRawBounds(bound.signal).min} ~ {signalRawBounds(bound.signal).max}
+                </p>
+              )}
+              <label>
+                최소값 (raw, 비우면 전체 범위)
+                <input
+                  type="number"
+                  min={bound ? signalRawBounds(bound.signal).min : undefined}
+                  max={bound ? signalRawBounds(bound.signal).max : undefined}
+                  value={String(draft.rangeMin ?? (bound ? signalRawBounds(bound.signal).min : 0))}
+                  onChange={(e) => {
+                    const raw = Number(e.target.value);
+                    const v = bound
+                      ? Math.min(signalRawBounds(bound.signal).max, Math.max(signalRawBounds(bound.signal).min, raw))
+                      : raw;
+                    setDraft({ ...draft, rangeMin: v });
+                  }}
+                />
+              </label>
+              <label>
+                최대값 (raw, 비우면 전체 범위)
+                <input
+                  type="number"
+                  min={bound ? signalRawBounds(bound.signal).min : undefined}
+                  max={bound ? signalRawBounds(bound.signal).max : undefined}
+                  value={String(draft.rangeMax ?? (bound ? signalRawBounds(bound.signal).max : 1))}
+                  onChange={(e) => {
+                    const raw = Number(e.target.value);
+                    const v = bound
+                      ? Math.min(signalRawBounds(bound.signal).max, Math.max(signalRawBounds(bound.signal).min, raw))
+                      : raw;
+                    setDraft({ ...draft, rangeMax: v });
+                  }}
+                />
+              </label>
+              {draft.mode === 'range' && (
                 <label>
                   step
                   <input
@@ -590,8 +772,8 @@ function CellEditModal({
                     onChange={(e) => setDraft({ ...draft, step: Math.max(1, Number(e.target.value)) })}
                   />
                 </label>
-              </div>
-            )}
+              )}
+            </div>
           </>
         )}
         <div className="modal-buttons">

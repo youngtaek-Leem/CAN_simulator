@@ -174,6 +174,7 @@ class TestRunnerService:
         self._script_name: Optional[str] = None
         self._functions: list[Case] = []
         self._functions_name: Optional[str] = None
+        self._functions_raw: Optional[str] = None
         self._run_queue: list[Case] = []
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
@@ -206,7 +207,17 @@ class TestRunnerService:
         with self._lock:
             self._functions = functions
             self._functions_name = filename
+            self._functions_raw = text
         return self.summary()
+
+    def functions_raw(self) -> Optional[dict]:
+        """Currently-loaded function master script's original source text
+        and filename, so a saved layout can bundle it and a later load can
+        restore it. None if no function script is loaded."""
+        with self._lock:
+            if self._functions_raw is None:
+                return None
+            return {"filename": self._functions_name, "content": self._functions_raw}
 
     # ---- status -------------------------------------------------------------
 

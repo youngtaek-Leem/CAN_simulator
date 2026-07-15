@@ -67,7 +67,13 @@ export function RandomButtonWidget({ config }: { config: WidgetConfig }) {
   };
 
   const invalidActive = isPeriodic && lastSent === 'invalid';
-  const modeLabel = mode === 'range' ? `Range ${rangeMin ?? ''}~${rangeMax ?? ''}` : 'Random';
+  const hasRange = rangeMin !== undefined || rangeMax !== undefined;
+  const modeLabel =
+    mode === 'range'
+      ? `Range ${rangeMin ?? ''}~${rangeMax ?? ''}`
+      : hasRange
+        ? `Random ${rangeMin ?? ''}~${rangeMax ?? ''}`
+        : 'Random';
 
   return (
     <div className="control-widget">

@@ -152,6 +152,8 @@ export type WidgetType =
   | 'replayBox'
   | 'multiButton'
   | 'multiCheckbox'
+  | 'multiDropdown'
+  | 'multiSlider'
   | 'isotpTx'
   | 'signalGraph'
   | 'testRunner'
@@ -178,6 +180,9 @@ export interface MultiCell {
   rangeMin?: number; // randomMultiButton range mode: raw min
   rangeMax?: number; // randomMultiButton range mode: raw max
   step?: number; // randomMultiButton range mode: raw step
+  sliderMin?: number; // multiSlider: physical (scaled) minimum
+  sliderMax?: number; // multiSlider: physical (scaled) maximum
+  sliderStep?: number; // multiSlider: physical (scaled) step
 }
 
 export interface WidgetConfig {

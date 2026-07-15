@@ -1,152 +1,169 @@
 {
-  "layout": [
+  "pages": [
     {
-      "i": "w1783604744882",
-      "x": 0,
-      "y": 0,
-      "w": 6,
-      "h": 5,
-      "minW": 3,
-      "minH": 2,
-      "moved": false,
-      "static": false
-    },
-    {
-      "i": "w1783604748143",
-      "x": 6,
-      "y": 0,
-      "w": 4,
-      "h": 2,
-      "minW": 2,
-      "minH": 1,
-      "moved": true,
-      "static": false
-    },
-    {
-      "i": "w1783604866883",
-      "x": 7,
-      "y": 5,
-      "w": 2,
-      "h": 2,
-      "minW": 1,
-      "minH": 1,
-      "moved": true,
-      "static": false
-    },
-    {
-      "i": "w1783604893846",
-      "x": 1,
-      "y": 1,
-      "w": 10,
-      "h": 7,
-      "minW": 1,
-      "minH": 2,
-      "moved": true,
-      "static": false
-    },
-    {
-      "i": "w1783605030442",
-      "x": 6,
-      "y": 3,
-      "w": 4,
-      "h": 2,
-      "minW": 2,
-      "minH": 1,
-      "moved": true,
-      "static": false
-    },
-    {
-      "i": "w1783638442860",
-      "x": 6,
-      "y": 1,
-      "w": 4,
-      "h": 2,
-      "minW": 2,
-      "minH": 1,
-      "moved": true,
-      "static": false
+      "id": "p1",
+      "name": "Page 1",
+      "widgets": [
+        {
+          "id": "w1783604744882",
+          "type": "canMessageDisplay",
+          "title": "CAN 메시지 표시창",
+          "options": {
+            "viewMode": "trace"
+          }
+        },
+        {
+          "id": "w1783604748143",
+          "type": "slider",
+          "title": "슬라이더",
+          "options": {
+            "max": 75
+          },
+          "binding": {
+            "message": "VCU_03_100ms",
+            "signal": "VCU_VgsSftMod"
+          }
+        },
+        {
+          "id": "w1783604866883",
+          "type": "button",
+          "title": "버튼",
+          "options": {
+            "value": 2
+          },
+          "binding": {
+            "message": "HU_AMP_04_00ms",
+            "signal": "AMP_FadeSet"
+          }
+        },
+        {
+          "id": "w1783604893846",
+          "type": "signalGraph",
+          "title": "CAN 신호 그래프",
+          "options": {
+            "series": [
+              {
+                "message": "HU_AMP_04_00ms",
+                "signal": "AMP_MainVolumeSet",
+                "color": "#3b82f6"
+              },
+              {
+                "message": "HU_AMP_04_00ms",
+                "signal": "AMP_VRTTSvolumeStep",
+                "color": "#f87171"
+              },
+              {
+                "message": "CLU_AMP_01_200ms",
+                "signal": "Warn_Sound_FCW",
+                "color": "#34d399"
+              }
+            ]
+          }
+        },
+        {
+          "id": "w1783605030442",
+          "type": "slider",
+          "title": "슬라이더",
+          "options": {
+            "max": 75
+          },
+          "binding": {
+            "message": "HU_AMP_04_00ms",
+            "signal": "AMP_VRTTSvolumeStep"
+          }
+        },
+        {
+          "id": "w1783638442860",
+          "type": "slider",
+          "title": "슬라이더",
+          "options": {
+            "max": 7
+          },
+          "binding": {
+            "message": "CLU_AMP_01_200ms",
+            "signal": "Warn_Sound_FCW"
+          }
+        }
+      ],
+      "layout": [
+        {
+          "i": "w1783604744882",
+          "x": 0,
+          "y": 0,
+          "w": 6,
+          "h": 5,
+          "minW": 3,
+          "minH": 2,
+          "moved": false,
+          "static": false
+        },
+        {
+          "i": "w1783604748143",
+          "x": 6,
+          "y": 0,
+          "w": 4,
+          "h": 2,
+          "minW": 2,
+          "minH": 1,
+          "moved": true,
+          "static": false
+        },
+        {
+          "i": "w1783604866883",
+          "x": 7,
+          "y": 5,
+          "w": 2,
+          "h": 2,
+          "minW": 1,
+          "minH": 1,
+          "moved": true,
+          "static": false
+        },
+        {
+          "i": "w1783604893846",
+          "x": 1,
+          "y": 1,
+          "w": 10,
+          "h": 7,
+          "minW": 1,
+          "minH": 2,
+          "moved": true,
+          "static": false
+        },
+        {
+          "i": "w1783605030442",
+          "x": 6,
+          "y": 3,
+          "w": 4,
+          "h": 2,
+          "minW": 2,
+          "minH": 1,
+          "moved": true,
+          "static": false
+        },
+        {
+          "i": "w1783638442860",
+          "x": 6,
+          "y": 1,
+          "w": 4,
+          "h": 2,
+          "minW": 2,
+          "minH": 1,
+          "moved": true,
+          "static": false
+        }
+      ]
     }
   ],
-  "widgets": [
-    {
-      "id": "w1783604744882",
-      "type": "canMessageDisplay",
-      "title": "CAN 메시지 표시창",
-      "options": {
-        "viewMode": "trace"
-      }
-    },
-    {
-      "id": "w1783604748143",
-      "type": "slider",
-      "title": "슬라이더",
-      "options": {
-        "max": 75
-      },
-      "binding": {
-        "message": "VCU_03_100ms",
-        "signal": "VCU_VgsSftMod"
-      }
-    },
-    {
-      "id": "w1783604866883",
-      "type": "button",
-      "title": "버튼",
-      "options": {
-        "value": 2
-      },
-      "binding": {
-        "message": "HU_AMP_04_00ms",
-        "signal": "AMP_FadeSet"
-      }
-    },
-    {
-      "id": "w1783604893846",
-      "type": "signalGraph",
-      "title": "CAN 신호 그래프",
-      "options": {
-        "series": [
-          {
-            "message": "HU_AMP_04_00ms",
-            "signal": "AMP_MainVolumeSet",
-            "color": "#3b82f6"
-          },
-          {
-            "message": "HU_AMP_04_00ms",
-            "signal": "AMP_VRTTSvolumeStep",
-            "color": "#f87171"
-          },
-          {
-            "message": "CLU_AMP_01_200ms",
-            "signal": "Warn_Sound_FCW",
-            "color": "#34d399"
-          }
-        ]
-      }
-    },
-    {
-      "id": "w1783605030442",
-      "type": "slider",
-      "title": "슬라이더",
-      "options": {
-        "max": 75
-      },
-      "binding": {
-        "message": "HU_AMP_04_00ms",
-        "signal": "AMP_VRTTSvolumeStep"
-      }
-    },
-    {
-      "id": "w1783638442860",
-      "type": "slider",
-      "title": "슬라이더",
-      "options": {
-        "max": 7
-      },
-      "binding": {
-        "message": "CLU_AMP_01_200ms",
-        "signal": "Warn_Sound_FCW"
-      }
-    }
-  ]
+  "canConfig": {
+    "iface": "virtual",
+    "channel": "ch0",
+    "bitrate": 500000,
+    "fd": false,
+    "dataBitrate": 1000000
+  },
+  "dbc": {
+    "filename": "FD_Test.dbc",
+    "content": "VERSION \"\"\r\n\r\n\r\nNS_ : \r\n\tNS_DESC_\r\n\tCM_\r\n\tBA_DEF_\r\n\tBA_\r\n\tVAL_\r\n\tCAT_DEF_\r\n\tCAT_\r\n\tFILTER\r\n\tBA_DEF_DEF_\r\n\tEV_DATA_\r\n\tENVVAR_DATA_\r\n\tSGTYPE_\r\n\tSGTYPE_VAL_\r\n\tBA_DEF_SGTYPE_\r\n\tBA_SGTYPE_\r\n\tSIG_TYPE_REF_\r\n\tVAL_TABLE_\r\n\tSIG_GROUP_\r\n\tSIG_VALTYPE_\r\n\tSIGTYPE_VALTYPE_\r\n\tBO_TX_BU_\r\n\tBA_DEF_REL_\r\n\tBA_REL_\r\n\tBA_DEF_DEF_REL_\r\n\tBU_SG_REL_\r\n\tBU_EV_REL_\r\n\tBU_BO_REL_\r\n\tSG_MUL_VAL_\r\n\r\nBS_:\r\n\r\nBU_:\r\n\r\n\r\n\r\n\r\nBA_DEF_ BO_  \"CANFD_BRS\" ENUM  \"0\",\"1\";\r\nBA_DEF_  \"DBName\" STRING ;\r\nBA_DEF_  \"BusType\" STRING ;\r\nBA_DEF_ BU_  \"NodeLayerModules\" STRING ;\r\nBA_DEF_ BU_  \"ECU\" STRING ;\r\nBA_DEF_ BU_  \"CANoeJitterMax\" INT 0 0;\r\nBA_DEF_ BU_  \"CANoeJitterMin\" INT 0 0;\r\nBA_DEF_ BU_  \"CANoeDrift\" INT 0 0;\r\nBA_DEF_ BU_  \"CANoeStartDelay\" INT 0 0;\r\nBA_DEF_ BO_  \"VFrameFormat\" ENUM  \"StandardCAN\",\"ExtendedCAN\",\"reserved\",\"reserved\",\"reserved\",\"reserved\",\"reserved\",\"reserved\",\"reserved\",\"reserved\",\"reserved\",\"reserved\",\"reserved\",\"reserved\",\"StandardCAN_FD\",\"ExtendedCAN_FD\";\r\nBA_DEF_DEF_  \"CANFD_BRS\" \"1\";\r\nBA_DEF_DEF_  \"DBName\" \"\";\r\nBA_DEF_DEF_  \"BusType\" \"\";\r\nBA_DEF_DEF_  \"NodeLayerModules\" \"\";\r\nBA_DEF_DEF_  \"ECU\" \"\";\r\nBA_DEF_DEF_  \"CANoeJitterMax\" 0;\r\nBA_DEF_DEF_  \"CANoeJitterMin\" 0;\r\nBA_DEF_DEF_  \"CANoeDrift\" 0;\r\nBA_DEF_DEF_  \"CANoeStartDelay\" 0;\r\nBA_DEF_DEF_  \"VFrameFormat\" \"StandardCAN\";\r\nBA_ \"BusType\" \"CAN FD\";\r\nBA_ \"DBName\" \"CAN_FD\";\r\n\r\n"
+  }
 }

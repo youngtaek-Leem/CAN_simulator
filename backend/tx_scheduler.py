@@ -152,11 +152,12 @@ class TxScheduler:
         step: int = 1,
     ) -> None:
         """Register (or clear, with mode="fixed") a raw-value generator for a
-        signal. "random": every call returns a fresh random raw value across
-        the signal's full bit range. "range": a stateful generator that
-        starts at range_min and advances by `step` on every call, wrapping
-        back to range_min once it passes range_max -- both bounds are clamped
-        into the signal's bit-representable range."""
+        signal. "random": every call returns a fresh random raw value, within
+        [range_min, range_max] if given, else across the signal's full bit
+        range (the default). "range": a stateful generator that starts at
+        range_min and advances by `step` on every call, wrapping back to
+        range_min once it passes range_max -- both bounds are clamped into
+        the signal's bit-representable range."""
         if mode == "fixed":
             with self._lock:
                 self._value_generators.get(message_name, {}).pop(signal_name, None)
@@ -167,8 +168,13 @@ class TxScheduler:
         raw_min, raw_max = _signal_raw_bounds(signal)
 
         if mode == "random":
+            lo = raw_min if range_min is None else max(raw_min, min(raw_max, int(range_min)))
+            hi = raw_max if range_max is None else max(raw_min, min(raw_max, int(range_max)))
+            if lo > hi:
+                lo, hi = hi, lo
+
             def generator() -> int:
-                return random.randint(raw_min, raw_max)
+                return random.randint(lo, hi)
         elif mode == "range":
             lo = raw_min if range_min is None else max(raw_min, min(raw_max, int(range_min)))
             hi = raw_max if range_max is None else max(raw_min, min(raw_max, int(range_max)))

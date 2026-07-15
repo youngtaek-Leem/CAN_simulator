@@ -2,7 +2,14 @@ import type { ComponentType } from 'react';
 import type { WidgetConfig, WidgetType } from '../types';
 import { CanMessageDisplay, TextDisplay } from './displays';
 import { ButtonWidget, CheckboxWidget, DropdownWidget, SliderWidget } from './controls';
-import { MultiButtonWidget, MultiCheckboxWidget, FunctionMultiButtonWidget, RandomMultiButtonWidget } from './MultiControls';
+import {
+  MultiButtonWidget,
+  MultiCheckboxWidget,
+  MultiDropdownWidget,
+  MultiSliderWidget,
+  FunctionMultiButtonWidget,
+  RandomMultiButtonWidget,
+} from './MultiControls';
 import { TxBox } from './TxBox';
 import { ReplayBox } from './ReplayBox';
 import { IsoTpBox } from './IsoTpBox';
@@ -28,16 +35,6 @@ export const WIDGET_REGISTRY: Record<WidgetType, WidgetMeta> = {
     component: CheckboxWidget,
     defaultSize: { w: 2, h: 1, minW: 1, minH: 1 },
   },
-  multiButton: {
-    label: '멀티 버튼',
-    component: MultiButtonWidget,
-    defaultSize: { w: 6, h: 4, minW: 1, minH: 2 },
-  },
-  multiCheckbox: {
-    label: '멀티 체크박스',
-    component: MultiCheckboxWidget,
-    defaultSize: { w: 6, h: 4, minW: 1, minH: 2 },
-  },
   dropdown: {
     label: '드롭다운',
     component: DropdownWidget,
@@ -58,28 +55,48 @@ export const WIDGET_REGISTRY: Record<WidgetType, WidgetMeta> = {
     component: RandomButtonWidget,
     defaultSize: { w: 2, h: 2, minW: 1, minH: 1 },
   },
+  multiButton: {
+    label: '멀티 버튼',
+    component: MultiButtonWidget,
+    defaultSize: { w: 6, h: 4, minW: 1, minH: 2 },
+  },
+  multiCheckbox: {
+    label: '멀티 체크박스',
+    component: MultiCheckboxWidget,
+    defaultSize: { w: 6, h: 4, minW: 1, minH: 2 },
+  },
+  multiDropdown: {
+    label: '멀티 드롭다운',
+    component: MultiDropdownWidget,
+    defaultSize: { w: 6, h: 4, minW: 1, minH: 2 },
+  },
+  multiSlider: {
+    label: '멀티 슬라이더',
+    component: MultiSliderWidget,
+    defaultSize: { w: 6, h: 4, minW: 1, minH: 2 },
+  },
   functionMultiButton: {
-    label: 'Function 멀티 버튼',
+    label: '멀티 Function 버튼',
     component: FunctionMultiButtonWidget,
     defaultSize: { w: 6, h: 4, minW: 1, minH: 2 },
   },
   randomMultiButton: {
-    label: 'Random 멀티 버튼',
+    label: '멀티 Random 버튼',
     component: RandomMultiButtonWidget,
     defaultSize: { w: 6, h: 4, minW: 1, minH: 2 },
   },
   txBox: {
-    label: 'CAN 메시지 전송 박스',
+    label: 'CAN 메시지 전송[IG]',
     component: TxBox,
     defaultSize: { w: 7, h: 5, minW: 4, minH: 3 },
   },
   isotpTx: {
-    label: 'ISO-TP 메시지 전송',
+    label: 'ISO-TP 메시지 전송[UDS]',
     component: IsoTpBox,
     defaultSize: { w: 6, h: 4, minW: 1, minH: 2 },
   },
   replayBox: {
-    label: 'CAN 로그 Replay 박스',
+    label: 'CAN 로그 Replay',
     component: ReplayBox,
     defaultSize: { w: 5, h: 3, minW: 3, minH: 2 },
   },
