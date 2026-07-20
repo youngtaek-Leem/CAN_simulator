@@ -10,7 +10,7 @@ import { canStore } from '../store/canStore';
 import { SignalPicker } from './MessageOptions';
 import type { DbcSignal, WidgetConfig } from '../types';
 
-const BINDABLE = new Set(['textDisplay', 'button', 'checkbox', 'dropdown', 'slider', 'randomButton']);
+const BINDABLE = new Set(['button', 'checkbox', 'dropdown', 'slider', 'randomButton']);
 
 const clamp = (v: number, min: number, max: number) => Math.min(max, Math.max(min, v));
 

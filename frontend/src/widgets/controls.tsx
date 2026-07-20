@@ -3,8 +3,8 @@
 // backend applies the Event(valid → 30ms → invalid) / Periodic rule.
 
 import { useRef, useState } from 'react';
-import { api } from '../api/client';
 import { findSignal, signalBitMax, useApp } from '../store/appContext';
+import { canStore } from '../store/canStore';
 import type { WidgetConfig } from '../types';
 
 function useSendSignal(config: WidgetConfig) {
@@ -15,7 +15,7 @@ function useSendSignal(config: WidgetConfig) {
       return;
     }
     try {
-      await api.txSignal(config.binding.message, { [config.binding.signal]: value });
+      await canStore.sendSignal(config.binding.message, { [config.binding.signal]: value });
       setError(null);
     } catch (e) {
       setError((e as Error).message);
@@ -50,7 +50,7 @@ function usePeriodicInvalidToggle(config: WidgetConfig, value: number) {
     }
     if (pending === 'invalid') {
       try {
-        await api.sendInvalid(config.binding.message, config.binding.signal);
+        await canStore.sendInvalid(config.binding.message, config.binding.signal);
         setError(null);
       } catch (e) {
         setError((e as Error).message);

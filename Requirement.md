@@ -430,26 +430,35 @@ CAN 신호 할당을 위해서 CAN 데이터를 쉽게 보기 위하여 DBC 를 
     invalid로 나가는지)하고, `test_event_send_forces_other_signals_invalid_every_time`을
     신규 추가(직전에 설정한 신호도 다음 이벤트 전송 시 다시 invalid로 나가는지, 영구 상태는
     두 값 모두 정상 유지되는지)해 백엔드 전체 106개 테스트 통과.
-32. 레이아웃 저장 시 DBC/Function Script 원본 함께 저장 (2026-07-15): "설정 저장할 때 DBC
-    파일과 Function Script(json) 파일도 같이 저장해라"는 요청. 조사 결과 백엔드
-    `DbcService`/`TestRunnerService` 모두 업로드된 원본 텍스트를 보관하지 않고 파싱된
-    객체만 유지하고 있어(디스크에도 저장 안 함), 레이아웃 저장 시점의 raw 텍스트를 꺼낼
-    방법이 없었다. `DbcService`에 `raw_text` 필드(로드 시 원본 저장)와 `raw()` 메서드,
-    `TestRunnerService`에 `_functions_raw` 필드와 `functions_raw()` 메서드를 추가하고,
-    `GET /api/dbc/raw`/`GET /api/testrunner/functions/raw` 엔드포인트로 노출했다. 프론트
-    `saveLayout`은 저장 직전 이 두 엔드포인트를 조회해 DBC/Function Script가 로드돼 있으면
-    `{filename, content}`를 레이아웃 JSON에 `dbc`/`functionScript` 키로 함께 저장한다(로드
-    안 돼 있으면 생략, 하위 호환 — 기존 저장 형식과 그대로 호환). `loadLayout`은 불러온
-    JSON에 이 키들이 있으면 `File` 객체로 재구성해 `/api/dbc/upload`/`/api/testrunner/
-    functions/upload`로 먼저 복원한 뒤(실패해도 나머지 복원은 계속 진행, 실패만 배너로
-    알림) `refreshDbc()`로 프론트 상태를 갱신하고 위젯 페이지를 복원한다. 검증: 신규
-    pytest(`test_dbc_and_function_script_raw_endpoints`, 전역 싱글톤 공유로 인해 "초기
-    미로드" 전제 없이 업로드→raw 조회 라운드트립만 검증) 포함 백엔드 106→107개 테스트
-    통과. 브라우저에서 DBC+Function Script 업로드 후 레이아웃 저장 → 백엔드 프로세스를
-    완전히 재시작(메모리 초기화, DBC/Function Script 모두 미로드 상태로 리셋)한 뒤 그
-    레이아웃을 불러와 DBC(sample.dbc)와 Function Script(testfunc.json)가 자동으로
-    재업로드·복원되고 실제 신호/함수 목록이 정상 조회됨을 `curl`로 재확인, 기존 레거시
-    레이아웃(dbc/functionScript 키 없음)도 에러 없이 정상 로드됨을 확인, 콘솔 에러 없음.
+32. 레이아웃 저장 시 DBC/Function Script **파일명만** 기록, 없으면 에러 표시 (2026-07-15,
+    최초 구현 후 같은 날 사용자 피드백으로 재수정): 최초 구현은 "설정 저장할 때 DBC 파일과
+    Function Script(json) 파일도 같이 저장해라"를 "파일 내용 전체를 레이아웃 JSON에 임베드"로
+    해석해 `DbcService.raw_text`/`raw()`, `TestRunnerService._functions_raw`/`functions_raw()`,
+    `GET /api/dbc/raw`/`GET /api/testrunner/functions/raw` 엔드포인트를 추가하고
+    `{filename, content}` 전체를 저장 후 불러오기 시 자동 재업로드하는 방식으로 만들었으나,
+    사용자가 "의도는 CAN 설정값 저장이었다. DBC/JSON은 각자 로컬에 이미 갖고 있으니 파일
+    내용을 전부 저장할 필요 없이 파일명만 저장하고, 로컬에 그 파일이 없으면 에러 메시지를
+    표시하라"고 정정했다 — 브라우저의 `<input type=file>`은 보안상 선택된 파일의 전체 경로를
+    노출하지 않고 파일명만 제공하므로(임의 로컬 경로를 스크립트가 읽는 것은 애초에 불가능),
+    "경로 저장 후 자동으로 가져오기"는 기술적으로 불가능하고 "파일명만 기록해 현재 로드
+    상태와 대조"가 유일하게 가능한 구현이다. 최초 구현에서 추가했던 raw-content 관련 백엔드
+    코드(`raw_text`/`raw()`/`_functions_raw`/`functions_raw()`/두 GET 엔드포인트/관련 테스트
+    `test_dbc_and_function_script_raw_endpoints`)와 프론트 `api.getDbcRaw`/
+    `getFunctionScriptRaw`, `loadLayout`의 File 재구성·자동 업로드 로직을 전부 제거했다.
+    최종 구현: `saveLayout`은 현재 로드된 DBC/Function Script의 **파일명만**
+    (`dbc.filename`, `canStore.status.test_runner.functions.filename`)
+    `{filename}` 형태로 레이아웃 JSON에 저장(로드 안 돼 있으면 생략). `loadLayout`은 위젯
+    페이지·CAN 설정을 복원한 뒤, 저장된 `dbc.filename`/`functionScript.filename`이 **현재
+    로드돼 있는** DBC/Function Script 파일명과 다르거나 없으면
+    `레이아웃 "…" 불러옴 — DBC(sample.dbc) 파일이 로드되어 있지 않습니다. 직접 업로드하세요.`
+    형태의 에러를 배너로 표시한다(자동 업로드 시도 없음 — 각자 자기 로컬 파일을 직접
+    업로드해야 함). `SavedFile` 타입도 `{filename, content}` → `{filename}`으로 단순화.
+    검증: 백엔드 108→107개 테스트(raw 엔드포인트 테스트 제거) 통과, `npm run build` 통과.
+    브라우저에서 DBC 업로드 후 저장 → 저장된 JSON 파일에 `content` 없이 `filename`만
+    있음을 직접 확인 → 백엔드 완전 재시작(DBC 미로드로 리셋) 후 그 레이아웃을 불러와
+    정확히 `DBC(sample.dbc) 파일이 로드되어 있지 않습니다` 배너가 뜨는 것을 확인, DBC를
+    다시 업로드한 뒤 같은 레이아웃을 불러오면 `loadLayout`이 정상 실행(레이아웃 이름이
+    올바르게 갱신)됨을 확인.
 33. CAN 설정 저장/불러오기, 그래프 순서 변경, Y축 정수화, Random 범위 지정 (2026-07-15,
     사용자 승인 완료 — 4개 모듈 개발 완료):
     - **CAN 설정값 저장/불러오기** (`frontend/src/App.tsx`): `iface`/`channel`/`bitrate`/`fd`/

@@ -16,3 +16,6 @@ scipy>=1.14         # WAV read/write, FFT/cross-correlation for comparison
 numpy>=1.26
 librosa>=0.10        # MFCC feature extraction for waveform comparison
 scikit-learn>=1.4    # cosine similarity for MFCC comparison
+
+# samples/xlsx_to_script.py: CAN_Test_Script_Editor xlsx -> test runner JSON
+openpyxl>=3.1

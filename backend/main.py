@@ -499,6 +499,11 @@ async def testrunner_upload_script(file: UploadFile):
         raise HTTPException(status_code=400, detail=f"시나리오 JSON 파싱 오류: {exc}")
 
 
+@app.get("/api/testrunner/script/raw")
+def testrunner_script_raw():
+    return test_runner_service.script_raw() or {"loaded": False}
+
+
 @app.post("/api/testrunner/logfile/upload")
 async def testrunner_upload_logfile(file: UploadFile):
     suffix = Path(file.filename or "").suffix.lower()

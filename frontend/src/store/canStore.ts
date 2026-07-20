@@ -6,17 +6,39 @@
 // (fps is user-configurable, 10..60).
 
 import { useSyncExternalStore } from 'react';
-import type { BackendStatus, DbcSummary, FrameEntry, RxFrame } from '../types';
+import { api } from '../api/client';
+import type {
+  BackendStatus,
+  DbcMessage,
+  DbcSignal,
+  DbcSummary,
+  FrameEntry,
+  RxFrame,
+  TestRunnerEvent,
+} from '../types';
 
 const FPS_KEY = 'can-sim.ui-fps';
 const RX_NODE_KEY = 'can-sim.rx-node';
 const TRACE_WINDOW_S = 60; // keep the last minute of raw frames for pause/scroll
 const TRACE_CAP = 30000; // hard memory cap for the trace buffer
 const HISTORY_CAP = 10000; // points kept per watched signal (graph widgets)
+const ACTIVITY_CAP = 300; // lines kept in the widget/test-runner activity log
+const TESTRUNNER_POLL_MS = 400; // matches TestRunnerBox's own poll cadence
 
 export interface HistoryPoint {
   ts: number; // raw backend timestamp (seconds)
   value: number;
+}
+
+export interface ActivityEntry {
+  ts: number; // epoch ms
+  text: string;
+}
+
+/** Shared with TestRunnerBox.tsx, which renders the same events in its own
+ * per-run log panel -- kept here so both views format a step identically. */
+export function formatTestRunnerEvent(ev: TestRunnerEvent): string {
+  return ev.msg ?? `[${ev.type ?? '?'}] ${ev.message ?? ''} ${ev.signal ?? ''} → ${ev.status ?? ''}`.trim();
 }
 
 class CanStore {
@@ -35,6 +57,19 @@ class CanStore {
   status: BackendStatus | null = null;
   wsConnected = false;
 
+  // Widget/test-runner activity log (see TextDisplay widget).
+  activityLog: ActivityEntry[] = [];
+  private dbcMessages: DbcMessage[] = [];
+  // "Message.Signal" -> last logged display value, so a Periodic signal only
+  // logs a new line when its value actually changes (the backend otherwise
+  // keeps silently re-transmitting the same value every cycle in the
+  // background, with no further widget interaction to hook a log call into).
+  private lastPeriodicValue = new Map<string, string>();
+  // how many of the test runner's self._events we've already turned into
+  // activity lines -- events is reset to [] server-side on every new run, so
+  // a shrink means a new run started and we should treat all of it as new.
+  private lastTestRunnerEventCount = 0;
+
   version = 0;
   private listeners = new Set<() => void>();
   private dirty = false;
@@ -47,6 +82,7 @@ class CanStore {
     this.fps = saved >= 10 && saved <= 60 ? saved : 30;
     this.rxNode = localStorage.getItem(RX_NODE_KEY) ?? '';
     requestAnimationFrame(this.tick);
+    setInterval(this.pollTestRunnerEvents, TESTRUNNER_POLL_MS);
   }
 
   getFps() {
@@ -77,6 +113,7 @@ class CanStore {
    * enum/VAL_ signals numerically (the backend decodes them to a string
    * label for display, e.g. "On"/"Off"). Call whenever the loaded DBC changes. */
   setDbc(dbc: DbcSummary) {
+    this.dbcMessages = dbc.messages ?? [];
     this.choiceReverse.clear();
     for (const m of dbc.messages ?? []) {
       for (const s of m.signals) {
@@ -87,6 +124,93 @@ class CanStore {
       }
     }
   }
+
+  private findDbcSignal(message: string, signal: string): DbcSignal | undefined {
+    return this.dbcMessages.find((m) => m.name === message)?.signals.find((s) => s.name === signal);
+  }
+
+  private formatSignalValue(sig: DbcSignal | undefined, physical: number | string): string {
+    if (typeof physical === 'string') return physical;
+    const label = sig?.choices?.[physical];
+    if (label !== undefined) return label;
+    const num = Number.isInteger(physical) ? String(physical) : String(parseFloat(physical.toFixed(3)));
+    return sig?.unit ? `${num} ${sig.unit}` : num;
+  }
+
+  private pushActivity(text: string, ts = Date.now()) {
+    this.activityLog.push({ ts, text });
+    if (this.activityLog.length > ACTIVITY_CAP) {
+      this.activityLog.splice(0, this.activityLog.length - ACTIVITY_CAP);
+    }
+    this.markDirty();
+  }
+
+  /** Log a widget-driven CAN signal send, subject to the two display rules
+   * from Requirement.md: a Periodic signal only logs when its value actually
+   * changed, and an Event signal never logs an "invalid" send. The latter is
+   * mostly already guaranteed by the caller -- this app's widgets only ever
+   * request an explicit invalid send (kind: 'invalid') for Periodic signals
+   * in the first place (see usePeriodicInvalidToggle) -- this check just
+   * makes that invariant explicit instead of accidental. */
+  private logSignalSend(
+    message: string,
+    signal: string,
+    display: string,
+    sendType: string | undefined,
+    kind: 'valid' | 'invalid',
+  ) {
+    if (sendType === 'event' && kind === 'invalid') return;
+    const key = `${message}.${signal}`;
+    if (sendType === 'periodic') {
+      if (this.lastPeriodicValue.get(key) === display) return;
+      this.lastPeriodicValue.set(key, display);
+    }
+    this.pushActivity(`${message}.${signal} = ${display}`);
+  }
+
+  // ---- wrapped send entry points ----------------------------------------
+  // Widgets call these instead of api.txSignal/sendGenerated/sendInvalid
+  // directly, so every CAN signal a widget sends passes through one place
+  // for the activity log (see displays.tsx's TextDisplay).
+
+  async sendSignal(message: string, values: Record<string, number | string>) {
+    const result = await api.txSignal(message, values);
+    for (const [signal, value] of Object.entries(values)) {
+      const sig = this.findDbcSignal(message, signal);
+      this.logSignalSend(message, signal, this.formatSignalValue(sig, value), sig?.send_type, 'valid');
+    }
+    return result;
+  }
+
+  async sendGenerated(message: string, signal: string) {
+    const result = await api.sendGenerated(message, signal);
+    const sig = this.findDbcSignal(message, signal);
+    const physical = sig ? result.raw_value * sig.scale + sig.offset : result.raw_value;
+    this.logSignalSend(message, signal, this.formatSignalValue(sig, physical), result.send_type, 'valid');
+    return result;
+  }
+
+  async sendInvalid(message: string, signal: string) {
+    const result = await api.sendInvalid(message, signal);
+    this.logSignalSend(message, signal, 'INVALID', result.send_type, 'invalid');
+    return result;
+  }
+
+  private pollTestRunnerEvents = () => {
+    api
+      .testRunnerStatus()
+      .then((s) => {
+        const events = s.events;
+        // a shorter list than what we've already consumed means a new run
+        // reset the backend's log (see TestRunnerService.start()) -- treat
+        // everything currently present as new.
+        if (events.length < this.lastTestRunnerEventCount) this.lastTestRunnerEventCount = 0;
+        const fresh = events.slice(this.lastTestRunnerEventCount);
+        this.lastTestRunnerEventCount = events.length;
+        for (const ev of fresh) this.pushActivity(formatTestRunnerEvent(ev), ev.ts * 1000);
+      })
+      .catch(() => {});
+  };
 
   /** Start recording a time series for "Message.Signal" (ref-counted). */
   watchSignal(key: string) {

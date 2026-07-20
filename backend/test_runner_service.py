@@ -172,6 +172,7 @@ class TestRunnerService:
         self._lock = threading.RLock()
         self._cases: list[Case] = []
         self._script_name: Optional[str] = None
+        self._script_raw: Optional[str] = None
         self._functions: list[Case] = []
         self._functions_name: Optional[str] = None
         self._functions_raw: Optional[str] = None
@@ -193,9 +194,19 @@ class TestRunnerService:
         with self._lock:
             self._cases = cases
             self._script_name = filename
+            self._script_raw = text
             self._events = []
             self._results = []
         return self.summary()
+
+    def script_raw(self) -> Optional[dict]:
+        """Currently-loaded scenario script's original source text and
+        filename, so a saved layout can bundle it and a later load can
+        restore it. None if no scenario script is loaded."""
+        with self._lock:
+            if self._script_raw is None:
+                return None
+            return {"filename": self._script_name, "content": self._script_raw}
 
     def load_functions(self, text: str, filename: str) -> dict:
         raw = json.loads(text)
@@ -348,7 +359,10 @@ class TestRunnerService:
         try:
             if t in ("CANReq", "CANEv"):
                 self._send_can(b)
-                self._log(case=case_num, type=t, message=b.get("Message"), status="Sent")
+                self._log(
+                    case=case_num, type=t, message=b.get("Message"), signal=self._signal_value_desc(b),
+                    status="Sent",
+                )
                 return True
             if t == "delay":
                 self._stop_event.wait(timeout=b["ms"] / 1000.0)
@@ -384,6 +398,14 @@ class TestRunnerService:
         signal = message.get_signal_by_name(signal_name)
         raw = int(hex_str, 16)
         return raw * float(signal.scale) + float(signal.offset)
+
+    @staticmethod
+    def _signal_value_desc(block: dict) -> str:
+        """"Signal=Value" (or comma-joined for a multi-signal "Signals"
+        block), for the activity log -- see CANReq/CANEv in _run_leaf."""
+        if "Signals" in block:
+            return ", ".join(f"{s['Signal']}={s['Value']}" for s in block["Signals"])
+        return f"{block['Signal']}={block['Value']}"
 
     def _send_can(self, block: dict) -> None:
         message_name = block["Message"]

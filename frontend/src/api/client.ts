@@ -79,9 +79,15 @@ export const api = {
     step?: number,
   ) => post('/api/tx/signal/generator', { message_name, signal_name, mode, range_min, range_max, step }),
   sendGenerated: (message_name: string, signal_name: string) =>
-    post('/api/tx/signal/generate', { message_name, signal_name }),
+    post<{ sent: boolean; raw_value: number; send_type: 'event' | 'periodic' }>(
+      '/api/tx/signal/generate',
+      { message_name, signal_name },
+    ),
   sendInvalid: (message_name: string, signal_name: string) =>
-    post('/api/tx/signal/invalid', { message_name, signal_name }),
+    post<{ sent: boolean; raw_value: number; send_type: 'event' | 'periodic' }>(
+      '/api/tx/signal/invalid',
+      { message_name, signal_name },
+    ),
 
   isotpSend: (
     tx_id: number,
@@ -96,6 +102,8 @@ export const api = {
   replayStop: () => post('/api/replay/stop'),
 
   uploadTestScript: (file: File) => upload('/api/testrunner/upload', file),
+  getTestScriptRaw: () =>
+    request<{ filename: string; content: string } | { loaded: false }>('/api/testrunner/script/raw'),
   uploadTestLogfile: (file: File) => upload('/api/testrunner/logfile/upload', file),
   uploadTestGolden: (file: File) => upload('/api/testrunner/golden/upload', file),
   testRunnerStart: () => post('/api/testrunner/start'),

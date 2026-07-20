@@ -16,7 +16,7 @@
 import { useEffect, useState } from 'react';
 import { api } from '../api/client';
 import { findSignal, useApp } from '../store/appContext';
-import { useCanVersion } from '../store/canStore';
+import { canStore, useCanVersion } from '../store/canStore';
 import type { WidgetConfig } from '../types';
 
 export function RandomButtonWidget({ config }: { config: WidgetConfig }) {
@@ -48,13 +48,13 @@ export function RandomButtonWidget({ config }: { config: WidgetConfig }) {
     try {
       const next = isPeriodic ? pending : 'generate';
       if (next === 'invalid') {
-        await api.sendInvalid(binding.message, binding.signal);
+        await canStore.sendInvalid(binding.message, binding.signal);
       } else {
         if (isPeriodic) {
           // re-register: send_invalid() cleared it the last time we toggled
           await api.setValueGenerator(binding.message, binding.signal, mode, rangeMin, rangeMax, step);
         }
-        await api.sendGenerated(binding.message, binding.signal);
+        await canStore.sendGenerated(binding.message, binding.signal);
       }
       if (isPeriodic) {
         setLastSent(next);

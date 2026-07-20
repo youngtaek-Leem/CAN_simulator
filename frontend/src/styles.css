@@ -953,25 +953,20 @@ td.empty {
 .text-display {
   display: flex;
   flex-direction: column;
-  align-items: center;
-  justify-content: center;
   height: 100%;
-  gap: 4px;
+  overflow-y: auto;
+  padding: 4px 8px;
 }
 
-.text-display-label {
-  color: var(--text-dim);
+.text-display-line {
+  padding: 2px 0;
   font-size: 11px;
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-all;
 }
 
-.text-display-value {
-  font-size: 26px;
-  font-weight: 700;
-  font-family: 'SF Mono', Consolas, monospace;
-}
-
-.text-display-value .unit {
-  font-size: 14px;
+.text-display-time {
   color: var(--text-dim);
 }
 
@@ -1237,6 +1232,8 @@ td.empty {
 
 .testrunner-results,
 .testrunner-log-list {
+  flex: 1;
+  min-height: 0;
   overflow-y: auto;
   padding: 4px 8px;
 }

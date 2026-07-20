@@ -8,7 +8,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { api } from '../api/client';
-import { canStore, useCanVersion } from '../store/canStore';
+import { canStore, formatTestRunnerEvent, useCanVersion } from '../store/canStore';
 import type { TestRunnerStatus, WidgetConfig } from '../types';
 
 const POLL_MS = 400;
@@ -18,12 +18,19 @@ export function TestRunnerBox(_: { config: WidgetConfig }) {
   const scriptInput = useRef<HTMLInputElement>(null);
   const logInput = useRef<HTMLInputElement>(null);
   const goldenInput = useRef<HTMLInputElement>(null);
+  const logListRef = useRef<HTMLDivElement>(null);
   const [error, setError] = useState<string | null>(null);
   const [detail, setDetail] = useState<TestRunnerStatus | null>(null);
   const summary = canStore.status?.test_runner;
   const running = summary?.running ?? false;
   const power = canStore.status?.power;
   const audio = canStore.status?.audio;
+
+  // Auto-scroll to the newest log line, same as the TextDisplay widget.
+  useEffect(() => {
+    const el = logListRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [detail?.events.length]);
 
   // Poll the full event/result log while the widget is mounted -- the
   // lightweight summary in the general WS status broadcast doesn't carry it
@@ -175,10 +182,10 @@ export function TestRunnerBox(_: { config: WidgetConfig }) {
         </div>
         <div className="testrunner-log">
           <div className="testrunner-section-title">실행 로그</div>
-          <div className="testrunner-log-list">
+          <div className="testrunner-log-list" ref={logListRef}>
             {detail?.events.map((ev, i) => (
               <div key={i} className="testrunner-log-line mono">
-                {ev.msg ?? `[${ev.type}] ${ev.message ?? ''} ${ev.signal ?? ''} → ${ev.status ?? ''}`}
+                {formatTestRunnerEvent(ev)}
               </div>
             ))}
           </div>

@@ -1,9 +1,9 @@
-// Display widgets: CAN message grid and bound-signal text display.
+// Display widgets: CAN message grid and the widget/test-runner activity log.
 // Both read from canStore and re-render only on the throttled version tick.
 
 import { Fragment, useEffect, useRef, useState } from 'react';
 import { canStore, useCanVersion } from '../store/canStore';
-import { findSignal, useApp } from '../store/appContext';
+import { useApp } from '../store/appContext';
 import type { DbcSummary, FrameEntry, RxFrame, WidgetConfig } from '../types';
 
 const fmtId = (id: number) => `0x${id.toString(16).toUpperCase().padStart(3, '0')}`;
@@ -262,27 +262,38 @@ function TraceView({ rows, live }: { rows: RxFrame[]; live: boolean }) {
   );
 }
 
-export function TextDisplay({ config }: { config: WidgetConfig }) {
+const fmtClock = (ts: number) => {
+  const d = new Date(ts);
+  const hh = String(d.getHours()).padStart(2, '0');
+  const mm = String(d.getMinutes()).padStart(2, '0');
+  const ss = String(d.getSeconds()).padStart(2, '0');
+  const ms = String(d.getMilliseconds()).padStart(3, '0');
+  return `${hh}:${mm}:${ss}.${ms}`;
+};
+
+/** Live log of widget-triggered CAN sends and test-runner events (see
+ * canStore's sendSignal/sendGenerated/sendInvalid wrappers and
+ * pollTestRunnerEvents) -- newest at the bottom, auto-scrolling, so it reads
+ * like a console. No longer a single-signal value readout -- see the CAN
+ * 신호 그래프 / CAN 메시지 표시창 widgets for that. */
+export function TextDisplay(_: { config: WidgetConfig }) {
   useCanVersion();
-  const { dbc } = useApp();
-  const bound = findSignal(dbc, config.binding);
-  const value = config.binding
-    ? canStore.signals.get(`${config.binding.message}.${config.binding.signal}`)
-    : undefined;
+  const bodyRef = useRef<HTMLDivElement>(null);
+  const entries = canStore.activityLog;
+
+  useEffect(() => {
+    const el = bodyRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [entries.length]);
+
   return (
-    <div className="text-display">
-      {!config.binding && <span className="hint">신호를 할당하세요 (편집 모드 → ⚙)</span>}
-      {config.binding && (
-        <>
-          <div className="text-display-label">
-            {config.binding.message}.{config.binding.signal}
-          </div>
-          <div className="text-display-value">
-            {value !== undefined ? String(value) : '—'}
-            {bound?.signal.unit ? <span className="unit"> {bound.signal.unit}</span> : null}
-          </div>
-        </>
-      )}
+    <div className="text-display" ref={bodyRef}>
+      {entries.length === 0 && <div className="hint">아직 발생한 이벤트가 없습니다</div>}
+      {entries.map((e, i) => (
+        <div className="text-display-line mono" key={i}>
+          <span className="text-display-time">{fmtClock(e.ts)}</span> {e.text}
+        </div>
+      ))}
     </div>
   );
 }

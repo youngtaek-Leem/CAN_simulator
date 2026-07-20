@@ -20,6 +20,23 @@ backend/testrunner_results/
 samples/AMP_FD_260501.dbc
 samples/AMP_HS_260201.dbc
 
+# Derived from the proprietary AMP_FD/AMP_HS DBCs above (real OEM signal/
+# message names, or the DBC's full VAL_ table re-exported to xlsx) -- same
+# reason as the DBCs themselves, not for the public repo.
+samples/CAN_Test_Script_Editor_Rev01.xlsx
+samples/CAN_Test_Script_Editor_Rev01.json
+samples/test_script_Rev01.json
+samples/func_script_Rev01.json
+/Temp_req.json
+
+# Saved layouts can embed a loaded DBC's full text (see POST
+# /api/layouts/{name}) -- default2/3 were saved against the proprietary
+# AMP_FD DBC above and must stay local-only. default.json/default1.json are
+# tracked on purpose: they hold no embedded DBC content (filename reference
+# only) -- be careful not to re-save them while a proprietary DBC is loaded.
+backend/layouts/default2.json
+backend/layouts/default3.json
+
 # Legacy Automation/ dump (proprietary OEM DBCs, Vector vxlapi DLLs, large
 # .blf CAN logs, draft scripts) -- kept local only as reference material for
 # the test-runner port (see Requirement.md "Automation 시나리오 러너 통합

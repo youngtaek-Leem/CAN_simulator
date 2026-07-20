@@ -118,7 +118,7 @@ export const WIDGET_REGISTRY: Record<WidgetType, WidgetMeta> = {
   textDisplay: {
     label: '텍스트 표시창',
     component: TextDisplay,
-    defaultSize: { w: 3, h: 2, minW: 2, minH: 1 },
+    defaultSize: { w: 5, h: 4, minW: 2, minH: 2 },
   },
 
 };

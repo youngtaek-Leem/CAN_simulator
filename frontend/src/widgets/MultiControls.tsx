@@ -44,7 +44,7 @@ export function MultiButtonWidget({ config }: { config: WidgetConfig }) {
   const send = async (cell: MultiCell) => {
     if (!cell.binding?.signal) return;
     try {
-      await api.txSignal(cell.binding.message, { [cell.binding.signal]: cell.value ?? 1 });
+      await canStore.sendSignal(cell.binding.message, { [cell.binding.signal]: cell.value ?? 1 });
       setError(null);
     } catch (e) {
       setError((e as Error).message);
@@ -61,7 +61,7 @@ export function MultiButtonWidget({ config }: { config: WidgetConfig }) {
     const next = pending[i] ?? 'valid';
     if (next === 'invalid') {
       try {
-        await api.sendInvalid(cell.binding.message, cell.binding.signal);
+        await canStore.sendInvalid(cell.binding.message, cell.binding.signal);
         setError(null);
       } catch (e) {
         setError((e as Error).message);
@@ -141,7 +141,7 @@ export function MultiCheckboxWidget({ config }: { config: WidgetConfig }) {
     if (!cell.binding?.signal) return;
     const value = checked ? (cell.onValue ?? 1) : (cell.offValue ?? 0);
     try {
-      await api.txSignal(cell.binding.message, { [cell.binding.signal]: value });
+      await canStore.sendSignal(cell.binding.message, { [cell.binding.signal]: value });
       setError(null);
     } catch (e) {
       setError((e as Error).message);
@@ -217,7 +217,7 @@ export function MultiDropdownWidget({ config }: { config: WidgetConfig }) {
     setSelected((s) => ({ ...s, [i]: raw }));
     if (!cell.binding?.signal || raw === '') return;
     try {
-      await api.txSignal(cell.binding.message, { [cell.binding.signal]: Number(raw) });
+      await canStore.sendSignal(cell.binding.message, { [cell.binding.signal]: Number(raw) });
       setError(null);
     } catch (e) {
       setError((e as Error).message);
@@ -303,7 +303,7 @@ export function MultiSliderWidget({ config }: { config: WidgetConfig }) {
   const send = async (cell: MultiCell, v: number) => {
     if (!cell.binding?.signal) return;
     try {
-      await api.txSignal(cell.binding.message, { [cell.binding.signal]: v });
+      await canStore.sendSignal(cell.binding.message, { [cell.binding.signal]: v });
       setError(null);
     } catch (e) {
       setError((e as Error).message);
@@ -501,7 +501,7 @@ export function RandomMultiButtonWidget({ config }: { config: WidgetConfig }) {
     try {
       const next = isPeriodic ? (pending[i] ?? 'generate') : 'generate';
       if (next === 'invalid') {
-        await api.sendInvalid(cell.binding.message, cell.binding.signal);
+        await canStore.sendInvalid(cell.binding.message, cell.binding.signal);
       } else {
         if (isPeriodic) {
           await api.setValueGenerator(
@@ -513,7 +513,7 @@ export function RandomMultiButtonWidget({ config }: { config: WidgetConfig }) {
             cell.step,
           );
         }
-        await api.sendGenerated(cell.binding.message, cell.binding.signal);
+        await canStore.sendGenerated(cell.binding.message, cell.binding.signal);
       }
       if (isPeriodic) {
         setLastSent((s) => ({ ...s, [i]: next }));

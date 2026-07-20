@@ -54,6 +54,7 @@ interface SavedLayout {
   pages: Page[];
   dbc?: SavedFile;
   functionScript?: SavedFile;
+  scenarioScript?: SavedFile;
   canConfig?: CanConfig;
 }
 
@@ -214,17 +215,24 @@ export default function App() {
 
   const saveLayout = async () => {
     try {
-      const [dbcRaw, funcRaw] = await Promise.all([
+      const [dbcRaw, funcRaw, scriptRaw] = await Promise.all([
         api.getDbcRaw().catch(() => null),
         api.getFunctionScriptRaw().catch(() => null),
+        api.getTestScriptRaw().catch(() => null),
       ]);
       const body: SavedLayout = { pages, canConfig };
       if (dbcRaw && 'content' in dbcRaw) body.dbc = dbcRaw;
       if (funcRaw && 'content' in funcRaw) body.functionScript = funcRaw;
+      if (scriptRaw && 'content' in scriptRaw) body.scenarioScript = scriptRaw;
       await api.saveLayout(layoutName, body);
       const r = await api.listLayouts();
       setLayoutList(r.layouts);
-      notify(`레이아웃 "${layoutName}" 저장됨${body.dbc ? ' (DBC 포함)' : ''}${body.functionScript ? ' (Function Script 포함)' : ''}`);
+      const parts = [
+        body.dbc ? 'DBC' : null,
+        body.functionScript ? 'Function Script' : null,
+        body.scenarioScript ? 'Test Sequence' : null,
+      ].filter(Boolean);
+      notify(`레이아웃 "${layoutName}" 저장됨${parts.length > 0 ? ` (${parts.join(', ')} 포함)` : ''}`);
     } catch (e) {
       notify(`저장 실패: ${(e as Error).message}`);
     }
@@ -251,6 +259,17 @@ export default function App() {
           notify(`Function Script 복원 실패: ${(e as Error).message}`);
         }
       }
+      if (saved.scenarioScript?.content) {
+        try {
+          await api.uploadTestScript(
+            new File([saved.scenarioScript.content], saved.scenarioScript.filename, {
+              type: 'application/json',
+            }),
+          );
+        } catch (e) {
+          notify(`Test Sequence 복원 실패: ${(e as Error).message}`);
+        }
+      }
       refreshDbc();
       // CAN 설정값만 복원하고 실제 연결은 자동으로 하지 않는다 -- 연결은 사용자가
       // "연결" 버튼으로 직접 트리거해야 하는 부수효과 있는 동작이다.
@@ -269,6 +288,20 @@ export default function App() {
     } catch (e) {
       notify(`불러오기 실패: ${(e as Error).message}`);
     }
+  };
+
+  // 편집 환경(페이지/위젯/CAN 설정)만 빈 상태로 초기화한다 -- 업로드된
+  // DBC/Function Script/Test Sequence는 별도 파일이므로 건드리지 않는다.
+  const newFile = () => {
+    if (!window.confirm('현재 편집 화면을 초기화하고 새로 시작할까요? 저장하지 않은 변경사항은 사라집니다.')) {
+      return;
+    }
+    setPages([makePage('p1', 'Page 1')]);
+    setActivePageId('p1');
+    setActiveId(null);
+    setLayoutName('');
+    setCanConfig(DEFAULT_CAN_CONFIG);
+    notify('새 편집 화면으로 초기화되었습니다');
   };
 
   // auto-arrange: tile (바둑판) keeps sizes and packs rows left→right,
@@ -335,6 +368,7 @@ export default function App() {
           layoutName={layoutName}
           setLayoutName={setLayoutName}
           layoutList={layoutList}
+          newFile={newFile}
           saveLayout={saveLayout}
           loadLayout={loadLayout}
           openSettings={() => setShowSettings(true)}
@@ -475,6 +509,7 @@ interface TopBarProps {
   layoutName: string;
   setLayoutName: (v: string) => void;
   layoutList: string[];
+  newFile: () => void;
   saveLayout: () => void;
   loadLayout: (name: string) => void;
   openSettings: () => void;
@@ -728,8 +763,16 @@ function TopBar(props: TopBarProps) {
                 <button className="small-btn" onClick={props.saveLayout}>
                   저장
                 </button>
-                <select value="" onChange={(e) => e.target.value && props.loadLayout(e.target.value)}>
+                <select
+                  value=""
+                  onChange={(e) => {
+                    const v = e.target.value;
+                    if (v === '__new__') props.newFile();
+                    else if (v) props.loadLayout(v);
+                  }}
+                >
                   <option value="">불러오기…</option>
+                  <option value="__new__">새 파일</option>
                   {props.layoutList.map((n) => (
                     <option key={n} value={n}>
                       {n}
