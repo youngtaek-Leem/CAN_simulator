@@ -25,6 +25,23 @@ loop bodies are collected on a stack and only nested into a "loop" step once
 the matching "]" row closes them. This also makes nested loops work, even
 though this template's own dropdown doesn't offer nesting.
 
+CANMsgS/CANMsgE rows are a similar flat bracket pair, marking a run of
+CANReq/CANEv rows that all target the same CAN message and must be sent as
+one frame with multiple signals -- e.g.:
+    CANMsgS
+    CANReq | ... | CLU_AMP_01_200ms | Signal | Warn_Sound_ETC    | Value | 0x01
+    CANReq | ... | CLU_AMP_01_200ms | Signal | Warn_Sound_TikTok | Value | 0x02
+    CANMsgE
+becomes a single step:
+    {"type": "CANReq", "Message": "CLU_AMP_01_200ms", "Signals": [
+        {"Signal": "Warn_Sound_ETC", "Value": "0x01"},
+        {"Signal": "Warn_Sound_TikTok", "Value": "0x02"}
+    ]}
+All rows in the block must share the same step type (CANReq or CANEv -- not
+CANResp, which has no "Signals" equivalent in the backend) and the same
+Message; a mismatch is an error. Groups don't nest inside loops or each
+other.
+
 Note: the ID row's repeat count must be written as "Cycle" (capital C) to
 match backend/test_runner_service.py's case-boundary parser -- the sheet's
 own auto-label for that column is lowercase "cycle", so this is corrected
@@ -42,13 +59,17 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from typing import Optional
 
 import openpyxl
 
 HEADER_MARKER = "Step 종류 선택"  # column B of the header row in the Script sheet
 STEP_TYPES = {"ID", "Power", "delay", "CANReq", "CANEv", "CANResp", "Audio", "loop"}
 CAN_TYPES = {"CANReq", "CANEv", "CANResp"}
+GROUPABLE_CAN_TYPES = {"CANReq", "CANEv"}  # CANResp has no "Signals" equivalent
 LOOP_END = "]"
+MSG_GROUP_START = "CANMsgS"
+MSG_GROUP_END = "CANMsgE"
 
 
 class ScriptError(ValueError):
@@ -100,10 +121,56 @@ def convert(ws) -> list[dict]:
     # that a matching "]" row pops back into a nested {"type": "loop", ...} step.
     stack: list[dict] = [{"cycle": None, "start_row": None, "steps": []}]
 
+    # Set while between a CANMsgS row and its matching CANMsgE row; collects
+    # the member CANReq/CANEv rows into one merged Signals step (see the
+    # module docstring). None outside a group.
+    msg_group: Optional[dict] = None
+
     for r in range(header_row + 1, ws.max_row + 1):
         b = ws.cell(row=r, column=2).value
         if b is None:
             continue  # blank separator row
+
+        if b == MSG_GROUP_START:
+            if msg_group is not None:
+                raise ScriptError(f"{r}행: 'CANMsgS'가 중첩되었습니다 (이미 {msg_group['start_row']}행에서 시작됨)")
+            msg_group = {"type": None, "message": None, "signals": [], "start_row": r}
+            continue
+
+        if b == MSG_GROUP_END:
+            if msg_group is None:
+                raise ScriptError(f"{r}행: 대응하는 'CANMsgS' 시작 없이 'CANMsgE'가 나타났습니다")
+            if not msg_group["signals"]:
+                raise ScriptError(f"{msg_group['start_row']}행: 'CANMsgS'~'CANMsgE' 사이에 CAN 신호가 없습니다")
+            stack[-1]["steps"].append(
+                {"type": msg_group["type"], "Message": msg_group["message"], "Signals": msg_group["signals"]}
+            )
+            msg_group = None
+            continue
+
+        if msg_group is not None:
+            if b not in GROUPABLE_CAN_TYPES:
+                raise ScriptError(
+                    f"{r}행: 'CANMsgS'~'CANMsgE' 안에는 CANReq/CANEv만 넣을 수 있습니다 (받은 값: '{b}')"
+                )
+            message = _require(ws.cell(row=r, column=4).value, r, "D열(Message)")
+            signal = _require(ws.cell(row=r, column=6).value, r, "F열(Signal)")
+            value = _require(ws.cell(row=r, column=8).value, r, "H열(Value)")
+            if msg_group["message"] is None:
+                msg_group["type"] = b
+                msg_group["message"] = str(message)
+            elif b != msg_group["type"]:
+                raise ScriptError(
+                    f"{r}행: 그룹 내 스텝 종류가 일치하지 않습니다 "
+                    f"('{msg_group['start_row']}행 그룹은 '{msg_group['type']}', 이 행은 '{b}')"
+                )
+            elif str(message) != msg_group["message"]:
+                raise ScriptError(
+                    f"{r}행: 그룹 내 Message가 일치하지 않습니다 "
+                    f"('{msg_group['start_row']}행 그룹은 '{msg_group['message']}', 이 행은 '{message}')"
+                )
+            msg_group["signals"].append({"Signal": str(signal), "Value": str(value)})
+            continue
 
         if b == LOOP_END:
             if len(stack) == 1:
@@ -125,6 +192,8 @@ def convert(ws) -> list[dict]:
         h = ws.cell(row=r, column=8).value
         stack[-1]["steps"].append(_build_step(r, b, d, f, h))
 
+    if msg_group is not None:
+        raise ScriptError(f"{msg_group['start_row']}행: 닫히지 않은 'CANMsgS'가 있습니다")
     if len(stack) != 1:
         unclosed = ", ".join(f"{frame['start_row']}행" for frame in stack[1:])
         raise ScriptError(f"닫히지 않은 loop가 있습니다 (시작 행: {unclosed})")
