@@ -596,6 +596,21 @@ function TopBar(props: TopBarProps) {
     }
   };
 
+  const recording = canStore.status?.log?.recording ?? false;
+  const toggleLogging = async () => {
+    try {
+      if (recording) {
+        const r = await api.logStop();
+        props.notify(`로깅 중지 — ${r.filename} (${r.count}프레임)`);
+      } else {
+        const r = await api.logStart();
+        props.notify(`로깅 시작 — ${r.filename}`);
+      }
+    } catch (e) {
+      props.notify((e as Error).message);
+    }
+  };
+
   return (
     <header className="topbar">
       <span className="logo">CAN Simulator</span>
@@ -614,6 +629,14 @@ function TopBar(props: TopBarProps) {
         onClick={toggleEnableMsg}
       >
         {periodicOn ? '■ Enable Msg' : '▶ Enable Msg'}
+      </button>
+      <button
+        className={`small-btn ${recording ? 'danger' : 'primary'}`}
+        disabled={props.editMode || !connected}
+        title="현재 CAN 버스 트래픽을 .blf 파일로 기록 시작/중지"
+        onClick={toggleLogging}
+      >
+        {recording ? '■ 로깅' : '▶ 로깅'}
       </button>
 
       <span className="group">

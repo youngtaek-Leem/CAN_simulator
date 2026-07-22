@@ -14,6 +14,7 @@ frontend/node_modules/
 # Runtime data (not source)
 backend/uploads/
 backend/testrunner_results/
+backend/can_logs/
 
 # Real vehicle/OEM DBC files (proprietary, not for the public repo) —
 # samples/sample.dbc stays tracked, it's a small synthetic file used by tests.

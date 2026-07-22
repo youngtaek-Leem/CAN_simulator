@@ -25,6 +25,7 @@ import isotp_service
 from audio_service import AudioService
 from can_manager import CanManager
 from dbc_service import DbcService
+from log_service import LogService
 from power_supply_service import PowerSupplyService
 from replay_service import ReplayService
 from test_runner_service import TestRunnerService
@@ -53,12 +54,14 @@ TESTRUNNER_LOG_DIR = BASE_DIR / "uploads" / "testrunner_logs"
 TESTRUNNER_RESULT_DIR = BASE_DIR / "testrunner_results"
 TESTRUNNER_AUDIO_DIR = BASE_DIR / "uploads" / "testrunner_audio"
 TESTRUNNER_GOLDEN_DIR = BASE_DIR / "uploads" / "testrunner_golden"
+CAN_LOG_DIR = BASE_DIR / "can_logs"
 FRONTEND_DIST = BASE_DIR.parent / "frontend" / "dist"
 
 can_manager = CanManager()
 dbc_service = DbcService()
 tx_scheduler = TxScheduler(can_manager, dbc_service)
 replay_service = ReplayService(can_manager)
+log_service = LogService(can_manager, CAN_LOG_DIR)
 power_supply_service = PowerSupplyService()
 audio_service = AudioService(TESTRUNNER_AUDIO_DIR, TESTRUNNER_GOLDEN_DIR)
 test_runner_service = TestRunnerService(
@@ -92,6 +95,7 @@ async def lifespan(app: FastAPI):
     broadcaster.cancel()
     test_runner_service.stop()
     replay_service.stop()
+    log_service.stop()
     tx_scheduler.shutdown()
     can_manager.disconnect()
     power_supply_service.disconnect()
@@ -188,6 +192,7 @@ def _status() -> dict:
         "test_runner": test_runner_service.summary(),
         "power": power_supply_service.info(),
         "audio": audio_service.info(),
+        "log": log_service.status(),
     }
 
 
@@ -235,6 +240,10 @@ class ConnectRequest(BaseModel):
 
 @app.post("/api/connect")
 def connect(req: ConnectRequest):
+    # a fresh connect tears down the old notifier internally (see
+    # CanManager.connect -> self.disconnect()), which would silently orphan
+    # an in-progress recording's file handle -- flush and close it first.
+    log_service.stop()
     try:
         return can_manager.connect(
             req.interface,
@@ -252,10 +261,26 @@ def connect(req: ConnectRequest):
 def disconnect():
     test_runner_service.stop()
     replay_service.stop()
+    log_service.stop()
     tx_scheduler.stop()
     tx_scheduler.stop_auto()
     can_manager.disconnect()
     return _status()
+
+
+@app.post("/api/log/start")
+def log_start():
+    if not can_manager.connected:
+        raise HTTPException(status_code=400, detail="CAN bus is not connected")
+    try:
+        return log_service.start()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/api/log/stop")
+def log_stop():
+    return log_service.stop()
 
 
 class SettingsRequest(BaseModel):

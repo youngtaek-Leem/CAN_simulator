@@ -86,6 +86,14 @@ export interface BackendStatus {
   test_runner: TestRunnerSummary;
   power: PowerStatus;
   audio: AudioStatus;
+  log: LogStatus;
+}
+
+export interface LogStatus {
+  recording: boolean;
+  filename: string | null;
+  count: number;
+  duration_s: number;
 }
 
 export interface PowerStatus {

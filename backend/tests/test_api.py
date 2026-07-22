@@ -470,3 +470,23 @@ def test_signal_invalid_send_api():
         assert r.status_code == 200
         assert r.json() == {"sent": True, "raw_value": 0xFFFF, "send_type": "periodic"}
         client.post("/api/disconnect")
+
+
+def test_log_start_stop_api():
+    with make_client() as client:
+        r = client.post("/api/log/start")
+        assert r.status_code == 400  # not connected yet
+
+        client.post("/api/connect", json={"interface": "virtual", "channel": "t_api_log"})
+        r = client.post("/api/log/start")
+        assert r.status_code == 200
+        assert r.json()["recording"] is True
+        assert r.json()["filename"].endswith(".blf")
+
+        assert client.get("/api/status").json()["log"]["recording"] is True
+
+        r = client.post("/api/log/stop")
+        assert r.status_code == 200
+        assert r.json()["recording"] is False
+
+        client.post("/api/disconnect")

@@ -57,6 +57,9 @@ export const api = {
   disconnect: () => post('/api/disconnect'),
   updateSettings: (ws_flush_ms: number) => post('/api/settings', { ws_flush_ms }),
 
+  logStart: () => post<import('../types').LogStatus>('/api/log/start'),
+  logStop: () => post<import('../types').LogStatus>('/api/log/stop'),
+
   uploadDbc: (file: File) => upload('/api/dbc/upload', file),
   getDbc: () => request('/api/dbc'),
   getDbcRaw: () => request<{ filename: string; content: string } | { loaded: false }>('/api/dbc/raw'),
