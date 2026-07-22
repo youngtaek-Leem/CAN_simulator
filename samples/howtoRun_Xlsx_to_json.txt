@@ -1,0 +1,1 @@
+backend/.venv/bin/python samples/xlsx_to_script.py samples/CAN_Test_Script_Editor_Rev01.xlsx

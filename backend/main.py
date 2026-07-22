@@ -10,6 +10,7 @@ Run:  uvicorn main:app --host 127.0.0.1 --port 8000
 
 import asyncio
 import json
+import logging
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -28,6 +29,22 @@ from power_supply_service import PowerSupplyService
 from replay_service import ReplayService
 from test_runner_service import TestRunnerService
 from tx_scheduler import TxScheduler
+
+
+class _SuppressNoisyAccessLog(logging.Filter):
+    """The frontend polls /api/testrunner/status every 400ms while the app
+    is open (see canStore.ts / TestRunnerBox.tsx), which floods the terminal
+    with access-log lines that carry no diagnostic value. Drop just that
+    path; every other request still logs normally."""
+
+    _SUPPRESSED_PATHS = ("/api/testrunner/status",)
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        path = record.args[2] if record.args and len(record.args) > 2 else ""
+        return not any(path.startswith(p) for p in self._SUPPRESSED_PATHS)
+
+
+logging.getLogger("uvicorn.access").addFilter(_SuppressNoisyAccessLog())
 
 BASE_DIR = Path(__file__).resolve().parent
 UPLOAD_DIR = BASE_DIR / "uploads"
@@ -489,14 +506,46 @@ def replay_stop():
 @app.post("/api/testrunner/upload")
 async def testrunner_upload_script(file: UploadFile):
     raw = await file.read()
+    filename = file.filename or "script.json"
+    suffix = Path(filename).suffix.lower()
+
+    if suffix == ".xlsx":
+        # Excel -> JSON 변환 (samples/xlsx_to_script.py 참고). 백엔드에서
+        # openpyxl로 워크북을 읽고 xlsx_to_script.convert()로 steps를 만든 뒤
+        # JSON 문자열로 직렬화하여 기존 test_runner_service.load() 파이프라인으로 전달.
+        import io
+
+        import openpyxl
+
+        from xlsx_to_script import ScriptError, convert
+
+        try:
+            wb = openpyxl.load_workbook(io.BytesIO(raw), data_only=True)
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"Excel 파일을 열 수 없습니다: {exc}")
+        sheet_name = "Script"
+        if sheet_name not in wb.sheetnames:
+            raise HTTPException(
+                status_code=400,
+                detail=f"시트 '{sheet_name}'를 찾을 수 없습니다 (시트 목록: {', '.join(wb.sheetnames)})",
+            )
+        try:
+            steps = convert(wb[sheet_name])
+        except ScriptError as exc:
+            raise HTTPException(status_code=400, detail=f"Excel 변환 오류: {exc}")
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail=f"Excel 파싱 오류: {exc}")
+        text = json.dumps(steps, ensure_ascii=False, indent=2)
+    else:
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            text = raw.decode("cp1252", errors="replace")
+
     try:
-        text = raw.decode("utf-8")
-    except UnicodeDecodeError:
-        text = raw.decode("cp1252", errors="replace")
-    try:
-        return test_runner_service.load(text, file.filename or "script.json")
+        return test_runner_service.load(text, filename)
     except Exception as exc:
-        raise HTTPException(status_code=400, detail=f"시나리오 JSON 파싱 오류: {exc}")
+        raise HTTPException(status_code=400, detail=f"시나리오 파싱 오류: {exc}")
 
 
 @app.get("/api/testrunner/script/raw")

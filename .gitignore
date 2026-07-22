@@ -27,6 +27,8 @@ samples/CAN_Test_Script_Editor_Rev01.xlsx
 samples/CAN_Test_Script_Editor_Rev01.json
 samples/test_script_Rev01.json
 samples/func_script_Rev01.json
+samples/TestScript_Excel/
+samples/TestScript_Excel09.zip
 /Temp_req.json
 
 # Saved layouts can embed a loaded DBC's full text (see POST

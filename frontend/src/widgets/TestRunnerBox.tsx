@@ -104,12 +104,12 @@ export function TestRunnerBox(_: { config: WidgetConfig }) {
     <div className="testrunner-box">
       <div className="testrunner-toolbar">
         <button className="small-btn" onClick={() => scriptInput.current?.click()}>
-          시나리오 JSON 열기
+          시나리오 파일 열기 (JSON/Excel)
         </button>
         <input
           ref={scriptInput}
           type="file"
-          accept=".json"
+          accept=".json,.xlsx"
           hidden
           onChange={(e) => e.target.files?.[0] && uploadScript(e.target.files[0])}
         />
