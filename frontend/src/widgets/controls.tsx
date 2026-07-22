@@ -1,9 +1,9 @@
-// Control widgets that send a bound DBC signal: button, checkbox,
-// dropdown and slider. Sending goes through POST /api/tx/signal, where the
-// backend applies the Event(valid → 30ms → invalid) / Periodic rule.
+// Control widgets that send a bound DBC signal: button, checkbox, dropdown,
+// slider and manual value entry. Sending goes through POST /api/tx/signal,
+// where the backend applies the Event(valid → 30ms → invalid) / Periodic rule.
 
-import { useRef, useState } from 'react';
-import { findSignal, signalBitMax, useApp } from '../store/appContext';
+import { useEffect, useRef, useState } from 'react';
+import { findSignal, signalBitMax, signalRawBounds, useApp } from '../store/appContext';
 import { canStore } from '../store/canStore';
 import type { WidgetConfig } from '../types';
 
@@ -169,9 +169,20 @@ export function SliderWidget({ config }: { config: WidgetConfig }) {
     config.options.max ?? bound?.signal.maximum ?? (bound ? signalBitMax(bound.signal) : 100),
   );
   const step = Number(config.options.step ?? 1);
-  const [value, setValue] = useState(min);
-  const valueRef = useRef(min);
+  const defaultValue = Math.min(max, Math.max(min, Number(config.options.default ?? min)));
+  const [value, setValue] = useState(defaultValue);
+  const valueRef = useRef(defaultValue);
   const lastSent = useRef(0);
+
+  // Re-apply the configured default whenever it (or min/max, which it's
+  // clamped into) changes in the config modal -- otherwise a slider that's
+  // already on screen would only pick up a new default on the next full
+  // page load, which reads as "the setting didn't do anything."
+  useEffect(() => {
+    setValue(defaultValue);
+    valueRef.current = defaultValue;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [defaultValue]);
 
   const onChange = (v: number) => {
     valueRef.current = v;
@@ -245,6 +256,82 @@ export function SliderWidget({ config }: { config: WidgetConfig }) {
         onPointerUp={flush}
         onKeyDown={onKeyDown}
       />
+      {error && <span className="error">{error}</span>}
+    </div>
+  );
+}
+
+/** "0x1A" / "0b00011010" / "26" -> 26 (raw, unscaled). null if unparseable. */
+export function parseFlexibleInt(input: string): number | null {
+  const s = input.trim();
+  if (/^0[xX][0-9a-fA-F]+$/.test(s)) return parseInt(s.slice(2), 16);
+  if (/^0[bB][01]+$/.test(s)) return parseInt(s.slice(2), 2);
+  if (/^-?\d+$/.test(s)) return parseInt(s, 10);
+  return null;
+}
+
+/** Assign a single CAN signal and type its raw value directly (hex/binary/
+ * decimal), then send with the same Event/Periodic rule as every other
+ * control widget: Event sends the value then auto-invalidates 30ms later,
+ * Periodic keeps resending the value at the signal's cycle time. */
+export function ManualValueWidget({ config }: { config: WidgetConfig }) {
+  const { dbc } = useApp();
+  const bound = findSignal(dbc, config.binding);
+  const defaultText = String(config.options.default ?? '');
+  const [text, setText] = useState(defaultText);
+  const { send, error, setError } = useSendSignal(config);
+
+  // Re-apply the configured default whenever it changes in the config modal
+  // -- same reasoning as SliderWidget's equivalent effect: otherwise a
+  // widget already on screen wouldn't pick up a new default until reload.
+  useEffect(() => {
+    setText(defaultText);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [defaultText]);
+
+  const submit = async () => {
+    if (!bound) {
+      setError('신호 미할당');
+      return;
+    }
+    const raw = parseFlexibleInt(text);
+    if (raw === null) {
+      setError('잘못된 값 (0x1A, 0b00011010, 26 형식만 지원)');
+      return;
+    }
+    const { min, max } = signalRawBounds(bound.signal);
+    if (raw < min || raw > max) {
+      setError(`범위 초과 (raw ${min} ~ ${max})`);
+      return;
+    }
+    await send(raw * bound.signal.scale + bound.signal.offset);
+  };
+
+  return (
+    <div className="control-widget manual-value-widget">
+      <div className="slider-header">
+        <span>{config.binding?.signal ?? '신호 미할당'}</span>
+        {bound && (
+          <span className="hint mono">
+            raw {signalRawBounds(bound.signal).min}~{signalRawBounds(bound.signal).max}
+          </span>
+        )}
+      </div>
+      <div className="manual-value-row">
+        <input
+          className="mono"
+          value={text}
+          placeholder="0x1A / 0b00011010 / 26"
+          disabled={!config.binding?.signal}
+          onChange={(e) => setText(e.target.value)}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') void submit();
+          }}
+        />
+        <button className="small-btn primary" disabled={!config.binding?.signal} onClick={submit}>
+          전송
+        </button>
+      </div>
       {error && <span className="error">{error}</span>}
     </div>
   );

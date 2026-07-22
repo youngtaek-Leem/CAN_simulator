@@ -48,8 +48,8 @@ export function IsoTpBox({ config }: { config: WidgetConfig }) {
   const [result, setResult] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const txId = opts.txId ?? '';
-  const fcId = opts.fcId ?? '';
+  const txId = opts.txId ?? '783';
+  const fcId = opts.fcId ?? '78B';
   const dataHex = opts.dataHex ?? '';
   const isExtended = opts.isExtended ?? false;
   const fcTimeoutMs = opts.fcTimeoutMs ?? 1000;

@@ -581,6 +581,21 @@ function TopBar(props: TopBarProps) {
     }
   };
 
+  const periodicOn = (canStore.status?.tx.auto_entries.length ?? 0) > 0;
+  const toggleEnableMsg = async () => {
+    try {
+      if (periodicOn) {
+        await api.txAutoStop();
+        props.notify('Periodic 메시지 주기 송신 중지');
+      } else {
+        const r = await api.enableAllPeriodic(canStore.getRxNode());
+        props.notify(`Periodic 메시지 ${r.armed.length}개 주기 송신 시작`);
+      }
+    } catch (e) {
+      props.notify((e as Error).message);
+    }
+  };
+
   return (
     <header className="topbar">
       <span className="logo">CAN Simulator</span>
@@ -591,6 +606,14 @@ function TopBar(props: TopBarProps) {
         onClick={toggleRun}
       >
         {running ? '■ Stop' : '▶ Start'}
+      </button>
+      <button
+        className={`small-btn ${periodicOn ? 'danger' : 'primary'}`}
+        disabled={props.editMode || !running || !props.dbc.loaded}
+        title="DBC의 Periodic Tx 메시지 전체를 각자의 cycle time으로 주기 송신 시작/중지 (기본값으로 시작, 이후 위젯에서 보낸 값으로 계속 전송)"
+        onClick={toggleEnableMsg}
+      >
+        {periodicOn ? '■ Enable Msg' : '▶ Enable Msg'}
       </button>
 
       <span className="group">

@@ -43,7 +43,11 @@ export interface RxFrame {
   data: string; // hex
   fd: boolean;
   brs: boolean; // bitrate switch (CAN-FD data phase)
-  decoded?: { name: string; signals: Record<string, number | string> };
+  decoded?: {
+    name: string;
+    signals: Record<string, number | string>;
+    valid_signals: string[]; // signal names whose raw value isn't the bit-max "invalid" pattern
+  };
 }
 
 export interface FrameEntry extends RxFrame {
@@ -143,17 +147,20 @@ export interface TestRunnerStatus extends TestRunnerSummary {
 
 export type WidgetType =
   | 'canMessageDisplay'
+  | 'rxSignalDisplay'
   | 'textDisplay'
   | 'button'
   | 'checkbox'
   | 'dropdown'
   | 'slider'
+  | 'manualValue'
   | 'txBox'
   | 'replayBox'
   | 'multiButton'
   | 'multiCheckbox'
   | 'multiDropdown'
   | 'multiSlider'
+  | 'multiManualValue'
   | 'isotpTx'
   | 'signalGraph'
   | 'testRunner'
@@ -183,6 +190,8 @@ export interface MultiCell {
   sliderMin?: number; // multiSlider: physical (scaled) minimum
   sliderMax?: number; // multiSlider: physical (scaled) maximum
   sliderStep?: number; // multiSlider: physical (scaled) step
+  sliderDefault?: number; // multiSlider: physical (scaled) initial position
+  inputDefault?: string; // multiInputBox: initial text (hex/binary/decimal)
 }
 
 export interface WidgetConfig {

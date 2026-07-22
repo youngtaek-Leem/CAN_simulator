@@ -633,6 +633,16 @@ td.empty {
   justify-content: space-between;
 }
 
+.manual-value-row {
+  display: flex;
+  gap: 6px;
+}
+
+.manual-value-row input {
+  flex: 1;
+  min-width: 0;
+}
+
 /* ---- multi-button / multi-checkbox grid widgets ---- */
 
 .multi-widget {
@@ -700,6 +710,25 @@ td.empty {
 
 .multi-cell-slider .slider-header {
   font-size: 11px;
+}
+
+.multi-cell-input {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 2px;
+  height: 100%;
+  padding: 0 20px 4px 4px;
+  font-size: 12px;
+  overflow: hidden;
+}
+
+.multi-cell-input .slider-header {
+  font-size: 11px;
+}
+
+.multi-cell-input .manual-value-row input {
+  min-width: 0;
 }
 
 .multi-cell-edit {

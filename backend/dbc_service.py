@@ -154,6 +154,12 @@ class DbcService:
         signal = next(s for s in message.signals if s.name == signal_name)
         return self._signal_send_type(message, signal)
 
+    def message_send_type(self, message_name: str) -> str:
+        """Message-level Periodic/Event classification (the [TAG] comment
+        rule), ignoring any per-signal overrides -- used to pick which
+        messages the "Enable Msg" bulk action arms for periodic auto-resend."""
+        return _message_send_type(self.get_message(message_name))
+
     def encode_with_values(self, message_name: str, values: dict[str, Any]) -> bytes:
         """Encode a frame applying `values` (scaled) over the stored state.
 
@@ -228,6 +234,7 @@ class DbcService:
             return None
         try:
             decoded = message.decode(data, decode_choices=True)
+            raw = message.decode(data, decode_choices=False, scaling=False)
         except Exception:
             return None
         return {
@@ -236,6 +243,13 @@ class DbcService:
                 k: (str(v) if isinstance(v, NamedSignalValue) else v)
                 for k, v in decoded.items()
             },
+            # Signals whose raw value is NOT the bit-max "invalid" pattern --
+            # used by the RX-only "수신 CAN 신호 표시창" widget, which shows a
+            # signal's value only while it's valid (see PERIODIC_TAGS / the
+            # Event 30ms-later-invalid rule this mirrors on the RX side).
+            "valid_signals": [
+                s.name for s in message.signals if raw.get(s.name) != _invalid_raw(s)
+            ],
         }
 
     def decode_raw(self, frame_id: int, data: bytes) -> Optional[dict[str, int]]:

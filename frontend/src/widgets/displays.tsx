@@ -3,7 +3,7 @@
 
 import { Fragment, useEffect, useRef, useState } from 'react';
 import { canStore, useCanVersion } from '../store/canStore';
-import { useApp } from '../store/appContext';
+import { groupedMessages, useApp } from '../store/appContext';
 import type { DbcSummary, FrameEntry, RxFrame, WidgetConfig } from '../types';
 
 const fmtId = (id: number) => `0x${id.toString(16).toUpperCase().padStart(3, '0')}`;
@@ -11,6 +11,87 @@ const fmtData = (hex: string) => hex.toUpperCase().replace(/(..)/g, '$1 ').trim(
 const fmtTime = (ts: number) => canStore.relMs(ts).toFixed(0);
 
 export function CanMessageDisplay({ config }: { config: WidgetConfig }) {
+  return <MessageDisplayCore config={config} />;
+}
+
+interface SignalRow {
+  ts: number;
+  message: string;
+  signal: string;
+  value: number | string;
+  unit: string | null;
+}
+
+/** "수신 CAN 신호 표시창": a flat, per-signal (not per-message) live table of
+ * the AMP TX signals -- i.e. signals belonging to messages the simulator
+ * itself transmits (groupedMessages' "tx" set, relative to the configured
+ * RX node / real DUT), showing only currently-valid values. Unlike
+ * CanMessageDisplay, there's no message-row-with-expandable-detail: each row
+ * IS a signal. */
+export function RxSignalDisplay({ config: _config }: { config: WidgetConfig }) {
+  useCanVersion();
+  const { dbc } = useApp();
+  const txNames = new Set(groupedMessages(dbc, canStore.getRxNode()).tx.map((m) => m.name));
+
+  const rows: SignalRow[] = [];
+  for (const f of canStore.frames.values()) {
+    if (!f.decoded || !txNames.has(f.decoded.name)) continue;
+    const message = dbc.messages?.find((m) => m.name === f.decoded!.name);
+    for (const signalName of f.decoded.valid_signals) {
+      rows.push({
+        ts: f.ts,
+        message: f.decoded.name,
+        signal: signalName,
+        value: f.decoded.signals[signalName],
+        unit: message?.signals.find((s) => s.name === signalName)?.unit ?? null,
+      });
+    }
+  }
+  rows.sort((a, b) => a.message.localeCompare(b.message) || a.signal.localeCompare(b.signal));
+
+  return (
+    <div className="msg-display">
+      <div className="msg-toolbar">
+        <span className="hint">{rows.length}개 신호</span>
+        <span className="spacer" />
+        <button className="small-btn" onClick={() => canStore.clearFrames()}>
+          Clear
+        </button>
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th>Time(ms)</th>
+            <th>Message</th>
+            <th>Signal</th>
+            <th>Value</th>
+            <th>Unit</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((r) => (
+            <tr key={`${r.message}.${r.signal}`}>
+              <td>{fmtTime(r.ts)}</td>
+              <td>{r.message}</td>
+              <td>{r.signal}</td>
+              <td className="mono">{String(r.value)}</td>
+              <td>{r.unit || ''}</td>
+            </tr>
+          ))}
+          {rows.length === 0 && (
+            <tr>
+              <td colSpan={5} className="empty">
+                표시할 AMP TX 신호가 없습니다
+              </td>
+            </tr>
+          )}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function MessageDisplayCore({ config }: { config: WidgetConfig }) {
   useCanVersion();
   const { dbc, updateWidget } = useApp();
   const mode = (config.options.viewMode as 'fixed' | 'trace') ?? 'fixed';

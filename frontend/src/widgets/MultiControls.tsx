@@ -9,6 +9,7 @@ import { createPortal } from 'react-dom';
 import { api } from '../api/client';
 import { findSignal, signalBitMax, signalRawBounds, useApp } from '../store/appContext';
 import { canStore, useCanVersion } from '../store/canStore';
+import { parseFlexibleInt } from './controls';
 import { SignalPicker } from './MessageOptions';
 import type { MultiCell, WidgetConfig } from '../types';
 
@@ -334,7 +335,8 @@ export function MultiSliderWidget({ config }: { config: WidgetConfig }) {
           const cell = cells[i] ?? {};
           const bound = findSignal(dbc, cell.binding);
           const { min, max, step } = range(cell);
-          const value = values[i] ?? min;
+          const defaultValue = Math.min(max, Math.max(min, cell.sliderDefault ?? min));
+          const value = values[i] ?? defaultValue;
           return (
             <div className="multi-cell multi-cell-slider" key={i}>
               <div className="slider-header">
@@ -371,6 +373,112 @@ export function MultiSliderWidget({ config }: { config: WidgetConfig }) {
       {editingIndex !== null && (
         <CellEditModal
           kind="slider"
+          cell={cells[editingIndex] ?? {}}
+          onSave={(patch) => {
+            updateCell(editingIndex, patch);
+            setEditingIndex(null);
+          }}
+          onClose={() => setEditingIndex(null)}
+        />
+      )}
+    </div>
+  );
+}
+
+// Grid of manual-value-entry cells, each independently bound to its own
+// signal -- same raw hex/binary/decimal input + Event/Periodic send rule as
+// the single ManualValueWidget (입력 박스), per-cell state.
+export function MultiManualValueWidget({ config }: { config: WidgetConfig }) {
+  const { editMode, dbc } = useApp();
+  const { rows, cols, cells } = getGrid(config);
+  const updateCell = useCellUpdater(config);
+  const [editingIndex, setEditingIndex] = useState<number | null>(null);
+  const [texts, setTexts] = useState<Record<number, string>>({});
+  const [errors, setErrors] = useState<Record<number, string>>({});
+
+  const textFor = (i: number, cell: MultiCell) => texts[i] ?? cell.inputDefault ?? '';
+
+  const submit = async (i: number, cell: MultiCell) => {
+    const bound = findSignal(dbc, cell.binding);
+    if (!cell.binding?.signal || !bound) {
+      setErrors((e) => ({ ...e, [i]: '신호 미할당' }));
+      return;
+    }
+    const raw = parseFlexibleInt(textFor(i, cell));
+    if (raw === null) {
+      setErrors((e) => ({ ...e, [i]: '잘못된 값 (0x1A, 0b00011010, 26 형식만 지원)' }));
+      return;
+    }
+    const { min, max } = signalRawBounds(bound.signal);
+    if (raw < min || raw > max) {
+      setErrors((e) => ({ ...e, [i]: `범위 초과 (raw ${min} ~ ${max})` }));
+      return;
+    }
+    try {
+      await canStore.sendSignal(cell.binding.message, {
+        [cell.binding.signal]: raw * bound.signal.scale + bound.signal.offset,
+      });
+      setErrors((e) => ({ ...e, [i]: '' }));
+    } catch (err) {
+      setErrors((e) => ({ ...e, [i]: (err as Error).message }));
+    }
+  };
+
+  return (
+    <div className="multi-widget control-widget">
+      <div
+        className="multi-grid"
+        style={{ gridTemplateColumns: `repeat(${cols}, 1fr)`, gridTemplateRows: `repeat(${rows}, 1fr)` }}
+      >
+        {Array.from({ length: rows * cols }, (_, i) => {
+          const cell = cells[i] ?? {};
+          const bound = findSignal(dbc, cell.binding);
+          return (
+            <div className="multi-cell multi-cell-input" key={i}>
+              <div className="slider-header">
+                <span>{cell.label || cell.binding?.signal || `#${i + 1}`}</span>
+                {bound && (
+                  <span className="hint mono">
+                    raw {signalRawBounds(bound.signal).min}~{signalRawBounds(bound.signal).max}
+                  </span>
+                )}
+              </div>
+              <div className="manual-value-row">
+                <input
+                  className="mono"
+                  value={textFor(i, cell)}
+                  placeholder="0x1A / 0b0110 / 26"
+                  disabled={!cell.binding?.signal}
+                  onChange={(e) => setTexts((t) => ({ ...t, [i]: e.target.value }))}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') void submit(i, cell);
+                  }}
+                />
+                <button
+                  className="small-btn primary"
+                  disabled={!cell.binding?.signal}
+                  onClick={() => submit(i, cell)}
+                >
+                  전송
+                </button>
+              </div>
+              {errors[i] && <span className="error">{errors[i]}</span>}
+              {editMode && (
+                <button
+                  className="icon-btn multi-cell-edit"
+                  title="셀 설정"
+                  onClick={() => setEditingIndex(i)}
+                >
+                  ⚙
+                </button>
+              )}
+            </div>
+          );
+        })}
+      </div>
+      {editingIndex !== null && (
+        <CellEditModal
+          kind="input"
           cell={cells[editingIndex] ?? {}}
           onSave={(patch) => {
             updateCell(editingIndex, patch);
@@ -595,7 +703,7 @@ function CellEditModal({
   onSave,
   onClose,
 }: {
-  kind: 'button' | 'checkbox' | 'function' | 'random' | 'dropdown' | 'slider';
+  kind: 'button' | 'checkbox' | 'function' | 'random' | 'dropdown' | 'slider' | 'input';
   cell: MultiCell;
   onSave: (patch: MultiCell) => void;
   onClose: () => void;
@@ -610,6 +718,7 @@ function CellEditModal({
     random: 'Random 버튼',
     dropdown: '드롭다운',
     slider: '슬라이더',
+    input: '입력 박스',
   }[kind];
 
   return createPortal(
@@ -710,7 +819,26 @@ function CellEditModal({
                 onChange={(e) => setDraft({ ...draft, sliderStep: Number(e.target.value) })}
               />
             </label>
+            <label>
+              기본값
+              <input
+                type="number"
+                value={String(draft.sliderDefault ?? draft.sliderMin ?? bound?.signal.minimum ?? 0)}
+                onChange={(e) => setDraft({ ...draft, sliderDefault: Number(e.target.value) })}
+              />
+            </label>
           </div>
+        )}
+        {kind === 'input' && (
+          <label>
+            기본값 (hex/binary/decimal, 비우면 빈 칸)
+            <input
+              className="mono"
+              value={draft.inputDefault ?? ''}
+              placeholder="0x1A / 0b00011010 / 26"
+              onChange={(e) => setDraft({ ...draft, inputDefault: e.target.value })}
+            />
+          </label>
         )}
         {kind === 'random' && (
           <>

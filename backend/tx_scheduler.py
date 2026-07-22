@@ -274,6 +274,43 @@ class TxScheduler:
             else:
                 entry.period_ms = period
 
+    def enable_all_periodic(self, rx_node: str = "") -> dict:
+        """"Enable Msg" button: arm auto-periodic resend for every
+        Periodic-tagged message in the loaded DBC. Each is sent once
+        immediately with its current signal state (all-zero/default unless a
+        widget has already touched it), then keeps resending at its own
+        cycle time via the normal auto-entry mechanism -- a later widget
+        send for the same message just updates the persisted state that the
+        auto-resend already reads from (see _upsert_auto / encode_current).
+
+        rx_node, when given, excludes messages sent by that DBC node -- the
+        real DUT on the bus, whose own periodic messages must not be
+        duplicated by the simulator (mirrors the frontend's TX/RX message
+        grouping in appContext.ts's groupedMessages).
+
+        A message that fails its initial send (e.g. an FD message while
+        connected to a classic-CAN bus) is reported in "failed" and left
+        unarmed, rather than aborting the whole batch or auto-resending a
+        frame that can never actually go out."""
+        if not self._dbc.loaded:
+            raise RuntimeError("no DBC loaded")
+        armed = []
+        failed = []
+        for message in self._dbc.db.messages:
+            if rx_node and rx_node in message.senders:
+                continue
+            if self._dbc.message_send_type(message.name) != "periodic":
+                continue
+            try:
+                data = self._dbc.encode_current(message.name)
+                self._send_frame(message, data)
+            except Exception as exc:
+                failed.append({"message_name": message.name, "reason": str(exc)})
+                continue
+            self._upsert_auto(message)
+            armed.append(message.name)
+        return {"armed": armed, "failed": failed, **self.status()}
+
     def stop_auto(self, message_name: Optional[str] = None) -> dict:
         with self._lock:
             if message_name is None:

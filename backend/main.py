@@ -359,6 +359,23 @@ def tx_signal(req: SignalSendRequest):
         raise HTTPException(status_code=400, detail=str(exc))
 
 
+class EnablePeriodicRequest(BaseModel):
+    rx_node: str = ""
+
+
+@app.post("/api/tx/periodic/enable_all")
+def tx_periodic_enable_all(req: EnablePeriodicRequest):
+    _require_running()
+    if not can_manager.connected:
+        raise HTTPException(status_code=400, detail="CAN bus is not connected")
+    if not dbc_service.loaded:
+        raise HTTPException(status_code=400, detail="no DBC loaded")
+    try:
+        return tx_scheduler.enable_all_periodic(req.rx_node)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
 class AutoStopRequest(BaseModel):
     message_name: str | None = None
 

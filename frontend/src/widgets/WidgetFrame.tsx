@@ -10,7 +10,7 @@ import { canStore } from '../store/canStore';
 import { SignalPicker } from './MessageOptions';
 import type { DbcSignal, WidgetConfig } from '../types';
 
-const BINDABLE = new Set(['button', 'checkbox', 'dropdown', 'slider', 'randomButton']);
+const BINDABLE = new Set(['button', 'checkbox', 'dropdown', 'slider', 'randomButton', 'manualValue']);
 
 const clamp = (v: number, min: number, max: number) => Math.min(max, Math.max(min, v));
 
@@ -271,7 +271,8 @@ function ConfigModal({ config, onClose }: { config: WidgetConfig; onClose: () =>
         {(config.type === 'multiButton' ||
           config.type === 'multiCheckbox' ||
           config.type === 'multiDropdown' ||
-          config.type === 'multiSlider') && (
+          config.type === 'multiSlider' ||
+          config.type === 'multiManualValue') && (
           <div className="row-2">
             <label>
               가로 개수(열)
@@ -323,7 +324,26 @@ function ConfigModal({ config, onClose }: { config: WidgetConfig; onClose: () =>
                 onChange={(e) => setOption('step', Number(e.target.value))}
               />
             </label>
+            <label>
+              기본값
+              <input
+                type="number"
+                value={String(draft.options.default ?? draft.options.min ?? bound?.signal.minimum ?? 0)}
+                onChange={(e) => setOption('default', Number(e.target.value))}
+              />
+            </label>
           </div>
+        )}
+        {config.type === 'manualValue' && (
+          <label>
+            기본값 (hex/binary/decimal, 비우면 빈 칸)
+            <input
+              className="mono"
+              value={String(draft.options.default ?? '')}
+              placeholder="0x1A / 0b00011010 / 26"
+              onChange={(e) => setOption('default', e.target.value)}
+            />
+          </label>
         )}
 
         <div className="modal-buttons">

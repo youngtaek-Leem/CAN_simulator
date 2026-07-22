@@ -1,11 +1,12 @@
 import type { ComponentType } from 'react';
 import type { WidgetConfig, WidgetType } from '../types';
-import { CanMessageDisplay, TextDisplay } from './displays';
-import { ButtonWidget, CheckboxWidget, DropdownWidget, SliderWidget } from './controls';
+import { CanMessageDisplay, RxSignalDisplay, TextDisplay } from './displays';
+import { ButtonWidget, CheckboxWidget, DropdownWidget, ManualValueWidget, SliderWidget } from './controls';
 import {
   MultiButtonWidget,
   MultiCheckboxWidget,
   MultiDropdownWidget,
+  MultiManualValueWidget,
   MultiSliderWidget,
   FunctionMultiButtonWidget,
   RandomMultiButtonWidget,
@@ -45,6 +46,11 @@ export const WIDGET_REGISTRY: Record<WidgetType, WidgetMeta> = {
     component: SliderWidget,
     defaultSize: { w: 4, h: 2, minW: 2, minH: 1 },
   },
+  manualValue: {
+    label: '입력 박스',
+    component: ManualValueWidget,
+    defaultSize: { w: 4, h: 2, minW: 2, minH: 1 },
+  },
   functionButton: {
     label: 'Function 버튼',
     component: FunctionButtonWidget,
@@ -73,6 +79,11 @@ export const WIDGET_REGISTRY: Record<WidgetType, WidgetMeta> = {
   multiSlider: {
     label: '멀티 슬라이더',
     component: MultiSliderWidget,
+    defaultSize: { w: 6, h: 4, minW: 1, minH: 2 },
+  },
+  multiManualValue: {
+    label: '멀티 입력 박스',
+    component: MultiManualValueWidget,
     defaultSize: { w: 6, h: 4, minW: 1, minH: 2 },
   },
   functionMultiButton: {
@@ -113,6 +124,11 @@ export const WIDGET_REGISTRY: Record<WidgetType, WidgetMeta> = {
   canMessageDisplay: {
     label: 'CAN 메시지 표시창',
     component: CanMessageDisplay,
+    defaultSize: { w: 6, h: 5, minW: 3, minH: 2 },
+  },
+  rxSignalDisplay: {
+    label: '수신 CAN 신호 표시창',
+    component: RxSignalDisplay,
     defaultSize: { w: 6, h: 5, minW: 3, minH: 2 },
   },
   textDisplay: {
