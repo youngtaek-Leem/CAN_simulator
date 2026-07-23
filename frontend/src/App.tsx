@@ -391,7 +391,7 @@ export default function App() {
             <GridLayout
               width={width}
               layout={effectiveLayout}
-              gridConfig={{ cols: 12, rowHeight: 60, margin: [8, 8] }}
+              gridConfig={{ cols: 24, rowHeight: 20, margin: [8, 8] }}
               compactor={freeCompactor}
               dragConfig={{ enabled: true, handle: '.drag-handle' }}
               resizeConfig={{ enabled: true, handles: ['se', 'e', 's'] }}
