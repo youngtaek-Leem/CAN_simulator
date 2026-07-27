@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<root>
+	<firmware name="MCU_signature_full.hex" hash_type="sha256" digest="1e916253a6a7dad936a8d1c5c069586953f22aa3bbe228e5955d04688997826a">
+		<section>0x00000000--0x00117BFF</section>
+		<section>0x00118000--0x00185BFF</section>
+	</firmware>
+</root>

@@ -18,7 +18,7 @@ export interface DbcSignal {
 export interface DbcMessage {
   name: string;
   frame_id: number;
-  senders: string[]; // DBC node(s) that transmit this message
+  senders: string[];
   is_extended: boolean;
   is_fd: boolean;
   length: number;
@@ -40,13 +40,13 @@ export interface RxFrame {
   id: number;
   ext: boolean;
   dlc: number;
-  data: string; // hex
+  data: string;
   fd: boolean;
-  brs: boolean; // bitrate switch (CAN-FD data phase)
+  brs: boolean;
   decoded?: {
     name: string;
     signals: Record<string, number | string>;
-    valid_signals: string[]; // signal names whose raw value isn't the bit-max "invalid" pattern
+    valid_signals: string[];
   };
 }
 
@@ -153,9 +153,79 @@ export interface TestRunnerStatus extends TestRunnerSummary {
   results: TestRunnerResult[];
 }
 
+export interface UdsProgress {
+  current_step: string;
+  total_blocks: number;
+  current_block: number;
+  percent: number;
+  phase: string;
+}
+
+export interface UdsCommInfo {
+  request_id: number;
+  response_id: number;
+}
+
+export interface UdsDownloadStatus {
+  state: string;
+  running: boolean;
+  procedure_loaded: boolean;
+  xml_filename: string | null;
+  binary_loaded: boolean;
+  binary_filename: string | null;
+  binary_size: number;
+  progress: UdsProgress;
+  events: UdsEvent[];
+  error: string | null;
+  comm_info: UdsCommInfo | null;
+}
+
+export interface UdsEvent {
+  ts: number;
+  level?: string;
+  service?: string;
+  msg?: string;
+}
+
+export interface UdsStepInfo {
+  rule: string;
+  phase: string;
+  service: string;
+  params: Record<string, string>;
+  sub_steps: UdsSubStep[];
+}
+
+export interface UdsSubStep {
+  service: string;
+  params: Record<string, string>;
+}
+
+export interface UdsSlotStatus {
+  slot_index: number;
+  success: boolean;
+  error?: string;
+  status?: UdsDownloadStatus;
+}
+
+export const SERVICE_DISPLAY_NAMES: Record<string, string> = {
+  startCommunication: 'CAN 통신 시작',
+  stopCommunication: 'CAN 통신 종료',
+  diagnosticSessionControl: '진단 세션 전환',
+  securityAccess: '보안 액세스',
+  routineControl: '루틴 제어',
+  requestDownload: '다운로드 요청',
+  transferData: '데이터 전송',
+  requestTransferExit: '전송 종료 요청',
+  ecuReset: 'ECU 리셋',
+  controlDTCSetting: 'DTC 설정 제어',
+  communicationControl: '통신 제어',
+  readDataByIdentifier: 'DID 읽기',
+  completeDecision: '완료 판정',
+};
+
 export type WidgetType =
-  | 'canMessageDisplay'
   | 'rxSignalDisplay'
+  | 'canMessageDisplay'
   | 'textDisplay'
   | 'button'
   | 'checkbox'
@@ -175,31 +245,30 @@ export type WidgetType =
   | 'functionButton'
   | 'randomButton'
   | 'functionMultiButton'
-  | 'randomMultiButton';
+  | 'randomMultiButton'
+  | 'udsSwdl';
 
 export interface SignalBinding {
   message: string;
   signal: string;
 }
 
-// One cell of a multiButton / multiCheckbox / functionMultiButton /
-// randomMultiButton grid widget.
 export interface MultiCell {
   binding?: SignalBinding;
   label?: string;
-  value?: number; // button: value to send on click
-  onValue?: number; // checkbox: value to send when checked
-  offValue?: number; // checkbox: value to send when unchecked
-  funcName?: string; // functionMultiButton: FUNC name to trigger on click
-  mode?: 'random' | 'range'; // randomMultiButton: value generation mode
-  rangeMin?: number; // randomMultiButton range mode: raw min
-  rangeMax?: number; // randomMultiButton range mode: raw max
-  step?: number; // randomMultiButton range mode: raw step
-  sliderMin?: number; // multiSlider: physical (scaled) minimum
-  sliderMax?: number; // multiSlider: physical (scaled) maximum
-  sliderStep?: number; // multiSlider: physical (scaled) step
-  sliderDefault?: number; // multiSlider: physical (scaled) initial position
-  inputDefault?: string; // multiInputBox: initial text (hex/binary/decimal)
+  value?: number;
+  onValue?: number;
+  offValue?: number;
+  funcName?: string;
+  mode?: 'random' | 'range';
+  rangeMin?: number;
+  rangeMax?: number;
+  step?: number;
+  sliderMin?: number;
+  sliderMax?: number;
+  sliderStep?: number;
+  sliderDefault?: number;
+  inputDefault?: string;
 }
 
 export interface WidgetConfig {
@@ -207,8 +276,6 @@ export interface WidgetConfig {
   type: WidgetType;
   title: string;
   binding?: SignalBinding;
-  // widget-specific options (button send value, checkbox on/off values,
-  // slider min/max/step, ...)
   options: Record<string, unknown>;
 }
 
@@ -217,8 +284,8 @@ export interface TxRow {
   idHex: string;
   periodMs: number;
   dataHex: string;
-  messageName: string | null; // when set, payload comes from DBC signal state
+  messageName: string | null;
   enabled: boolean;
-  isFd: boolean; // raw-ID rows only; DBC-linked rows use the message's own FD flag
+  isFd: boolean;
   bitrateSwitch: boolean;
 }

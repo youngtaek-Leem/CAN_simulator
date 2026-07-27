@@ -18,6 +18,7 @@ import { GraphWidget } from './GraphWidget';
 import { TestRunnerBox } from './TestRunnerBox';
 import { FunctionButtonWidget } from './FunctionButtonWidget';
 import { RandomButtonWidget } from './RandomButtonWidget';
+import UdsSwdlWidget from './UdsSwdlWidget';
 
 interface WidgetMeta {
   label: string;
@@ -136,5 +137,9 @@ export const WIDGET_REGISTRY: Record<WidgetType, WidgetMeta> = {
     component: TextDisplay,
     defaultSize: { w: 5, h: 4, minW: 2, minH: 2 },
   },
-
+  udsSwdl: {
+    label: 'CAN-SWDL',
+    component: UdsSwdlWidget,
+    defaultSize: { w: 8, h: 6, minW: 4, minH: 3 },
+  },
 };

@@ -14,6 +14,7 @@ import logging
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Optional
 
 from fastapi import FastAPI, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -30,6 +31,7 @@ from power_supply_service import PowerSupplyService
 from replay_service import ReplayService
 from test_runner_service import TestRunnerService
 from tx_scheduler import TxScheduler
+from uds_download_manager import MultiUdsDownloadManager
 
 
 class _SuppressNoisyAccessLog(logging.Filter):
@@ -73,6 +75,12 @@ test_runner_service = TestRunnerService(
     TESTRUNNER_RESULT_DIR,
     power_service=power_supply_service,
     audio_service=audio_service,
+)
+
+uds_download_manager = MultiUdsDownloadManager(
+    can_manager,
+    isotp_service.send,
+    isotp_service.receive,
 )
 
 settings = {"ws_flush_ms": 30}
@@ -190,6 +198,7 @@ def _status() -> dict:
         # fetched on demand via GET /api/testrunner/status, not broadcast
         # to every client every 0.5s.
         "test_runner": test_runner_service.summary(),
+        "uds": uds_download_manager.all_status(),
         "power": power_supply_service.info(),
         "audio": audio_service.info(),
         "log": log_service.status(),
@@ -661,6 +670,120 @@ def testrunner_start_function(req: FunctionStartRequest):
         return test_runner_service.start_function(req.name)
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+
+
+# ---- UDS Software Download (CAN-SWDL) -----------------------------------
+
+
+UDS_UPLOAD_DIR = BASE_DIR / "uploads" / "udswdl"
+
+
+class UdsSwdlXmlUploadRequest(BaseModel):
+    slot_index: int = 0
+
+
+@app.post("/api/udswdl/xml/upload")
+async def udswdl_xml_upload(file: UploadFile, slot_index: int = 0):
+    """Load an XML procedure file into a slot (0/1/2)."""
+    UDS_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    suffix = Path(file.filename or "").suffix.lower()
+    if suffix != ".xml":
+        raise HTTPException(status_code=400, detail="only .xml files are supported")
+    dest = UDS_UPLOAD_DIR / (file.filename or "procedure.xml")
+    content = await file.read()
+    dest.write_bytes(content)
+    try:
+        manager = uds_download_manager.get_manager(slot_index)
+        return {"slot": slot_index, "status": manager.load_xml(str(dest))}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"XML 파싱 오류: {exc}")
+
+
+class UdsSwdlBinUploadRequest(BaseModel):
+    slot_index: int = 0
+
+
+@app.post("/api/udswdl/binary/upload")
+async def udswdl_binary_upload(file: UploadFile, slot_index: int = 0):
+    """Load a BIN file into a UDS slot (0/1/2)."""
+    UDS_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    suffix = Path(file.filename or "").suffix.lower()
+    if suffix != ".bin":
+        raise HTTPException(status_code=400, detail="only .bin files are supported")
+    dest = UDS_UPLOAD_DIR / (file.filename or "firmware.bin")
+    content = await file.read()
+    dest.write_bytes(content)
+    try:
+        manager = uds_download_manager.get_manager(slot_index)
+        manager.load_binary(str(dest))
+        return {"slot": slot_index, "status": manager.status()}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"BIN 파일 로드 오류: {exc}")
+
+
+class UdsSwdlStartRequest(BaseModel):
+    slot_indices: list[int] = [0, 1, 2]
+    selected_steps: list[str] = []
+    modified_params: dict[str, dict[str, str]] = {}
+    global_stmin_tx: Optional[int] = None
+
+
+@app.post("/api/udswdl/start")
+def udswdl_start(req: UdsSwdlStartRequest):
+    """Start UDS software download on specified slots (sequential)."""
+    if not can_manager.connected:
+        raise HTTPException(status_code=400, detail="CAN bus is not connected")
+    try:
+        # Apply global stmin_tx override to all managers before starting
+        if req.global_stmin_tx is not None:
+            for idx in range(uds_download_manager.NUM_SLOTS):
+                mgr = uds_download_manager.get_manager(idx)
+                mgr._global_stmin_tx = req.global_stmin_tx
+        return uds_download_manager.start_all(
+            req.slot_indices,
+            selected_steps=req.selected_steps or None,
+            modified_params=req.modified_params or None,
+        )
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/api/udswdl/stop")
+def udswdl_stop(slot_index: int = 0):
+    """Stop UDS download on a specific slot."""
+    manager = uds_download_manager.get_manager(slot_index)
+    return manager.stop()
+
+
+class UdsSwdlParamRequest(BaseModel):
+    slot_index: int = 0
+    step_service: str
+    params: dict[str, str]
+
+
+@app.put("/api/udswdl/step_params")
+def udswdl_set_params(req: UdsSwdlParamRequest):
+    """Update parameters for a specific step on a specific slot."""
+    manager = uds_download_manager.get_manager(req.slot_index)
+    for key, value in req.params.items():
+        manager.set_param(req.step_service, key, value)
+    return manager.status()
+
+
+@app.get("/api/udswdl/status")
+def udswdl_status():
+    """Get UDS download status for all slots."""
+    return uds_download_manager.all_status()
+
+
+@app.get("/api/udswdl/steps")
+def udswdl_steps(slot_index: int = 0):
+    """Get parsed procedure steps for a specific slot."""
+    manager = uds_download_manager.get_manager(slot_index)
+    steps = manager.get_procedure_steps()
+    if steps is None:
+        raise HTTPException(status_code=400, detail="XML이 로드되지 않았습니다")
+    return steps
 
 
 # ---- Power supply (Phase 2) ------------------------------------------------

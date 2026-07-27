@@ -1,0 +1,165 @@
+<!-- edited with XMLSpy v2016 rel. 2 sp1 (x64) (http://www.altova.com) by ChanghyunLee (GIT) -->
+<xfrm:root xmlns:build="http://gitauto.com/build/" xmlns:information="http://gitauto.com/information/" xmlns:xfrm="http://gitauto.com/xfrm/" xfrm:version="2.2.4.2" build:version="2307N01">
+	<xfrm:document version="2.2">
+		<xfrm:instance>
+			<information:vehicleInfo model="RS4PE" system="AMP"/>
+			<information:specInfo updateStandard="0x01"/>
+			<information:swTypeInfo ucm="0x00" bootloader="0x00" swType="0x10" executionType="0x20"/>
+			<information:packageInfo gate="0x10" isEnableOTA="0x01" updateType="0x30" redundancy="0x20"/>
+			<information:commInfo network="0x02" requestId="0x00000783" responseId="0x0000078B" dataBitRate="1" sourceIP="" destinationIP="" sourcePort="" destinationPort="" p6Time="1950"/>
+			<information:romInfo>C:\Users\yleem\OneDrive - HARMAN\Documents\Develope\Python\H-OTA_Package_Generation\rs4peadv_0x17\03_sffs_swdl.bin</information:romInfo>
+			<information:versionInfo dbVersion="26.05.01">
+				<partNumber target="96370T4BB0"/>
+				<unit target="03">
+					<swVersion source="***" target="2671"/>
+				</unit>
+			</information:versionInfo>
+		</xfrm:instance>
+		<xfrm:processing-rule>
+			<xfrm:rule-preparation>
+				<xfrm:startCommunication>
+					<xfrm:configuration background_stminTx="0x01" stminTx="0x0A" p2CanServerMax="50" p2StarCanServerMax="5000" NRC78Repetitiontimeout="300"/>
+				</xfrm:startCommunication>
+				<xfrm:diagnosticSessionControl background_diagnosticSessionType="0x03" diagnosticSessionType="0x02">
+					<xfrm:tx/>
+					<xfrm:rx/>
+				</xfrm:diagnosticSessionControl>
+				<xfrm:securityAccess algorithm="0x00">
+					<xfrm:requestSeed accessMode="0x11">
+						<xfrm:tx/>
+						<xfrm:rx/>
+					</xfrm:requestSeed>
+					<xfrm:sendKey accessMode="0x12">
+						<xfrm:tx/>
+						<xfrm:rx/>
+					</xfrm:sendKey>
+				</xfrm:securityAccess>
+			</xfrm:rule-preparation>
+			<xfrm:rule-unit>
+				<xfrm:routineControl routineControlType="0x01" routineIdentifier="0xFF00" routineControlOptionRecord="0xF1B3">
+					<xfrm:tx/>
+					<xfrm:rx/>
+				</xfrm:routineControl>
+				<xfrm:requestDownload dataFormatIdentifier="0x0A" addressAndLengthFormatIdentifier="0x44" memoryAddress="0x00000000" memorySize="0x00520508">
+					<xfrm:tx/>
+					<xfrm:rx/>
+				</xfrm:requestDownload>
+				<xfrm:transferData maxNumberOfBlockLength="0x0C02" seekAddress="0x0200" writeSize="0x00520508">
+					<xfrm:tx/>
+					<xfrm:rx/>
+				</xfrm:transferData>
+				<xfrm:requestTransferExit>
+					<xfrm:tx/>
+					<xfrm:rx/>
+				</xfrm:requestTransferExit>
+				<xfrm:routineControl routineControlType="0x01" routineIdentifier="0x0200">
+					<xfrm:tx/>
+					<xfrm:rx/>
+				</xfrm:routineControl>
+			</xfrm:rule-unit>
+			<xfrm:rule-complete>
+				<xfrm:diagnosticSessionControl diagnosticSessionType="0x01" skipTask="0x21">
+					<xfrm:tx/>
+					<xfrm:rx/>
+				</xfrm:diagnosticSessionControl>
+				<xfrm:stopCommunication/>
+			</xfrm:rule-complete>
+		</xfrm:processing-rule>
+		<xfrm:activate-rule>
+			<xfrm:rule-preparation>
+				<xfrm:startCommunication>
+					<xfrm:configuration stminTx="0x0A" p2CanServerMax="50" p2StarCanServerMax="5000" NRC78Repetitiontimeout="300"/>
+				</xfrm:startCommunication>
+				<xfrm:securityAccess algorithm="0x00" skipTask="0x31">
+					<xfrm:requestSeed accessMode="0x11">
+						<xfrm:tx/>
+						<xfrm:rx/>
+					</xfrm:requestSeed>
+					<xfrm:sendKey accessMode="0x12">
+						<xfrm:tx/>
+						<xfrm:rx/>
+					</xfrm:sendKey>
+				</xfrm:securityAccess>
+			</xfrm:rule-preparation>
+			<xfrm:rule-unit>
+			</xfrm:rule-unit>
+			<xfrm:rule-complete>
+				<xfrm:routineControl routineControlType="0x01" routineIdentifier="0xFF01">
+					<xfrm:tx/>
+					<xfrm:rx/>
+				</xfrm:routineControl>
+				<xfrm:ecuReset resetMode="0x01" resetTimeout="60">
+					<xfrm:tx/>
+					<xfrm:rx/>
+				</xfrm:ecuReset>
+				<xfrm:diagnosticSessionControl diagnosticSessionType="0x03">
+					<xfrm:tx/>
+					<xfrm:rx/>
+				</xfrm:diagnosticSessionControl>
+				<xfrm:controlDTCSetting dtcSettingType="0x02" confirmPositiveResponse="no">
+					<xfrm:tx/>
+					<xfrm:rx/>
+				</xfrm:controlDTCSetting>
+				<xfrm:communicationControl controlType="0x03" communicationType="0x03" confirmPositiveResponse="no">
+					<xfrm:tx/>
+					<xfrm:rx/>
+				</xfrm:communicationControl>
+				<xfrm:stopCommunication/>
+			</xfrm:rule-complete>
+		</xfrm:activate-rule>
+		<xfrm:versionChecking-rule>
+			<xfrm:rule-preparation>
+				<xfrm:startCommunication>
+					<xfrm:configuration stminTx="0x0A" p2CanServerMax="50" p2StarCanServerMax="5000" NRC78Repetitiontimeout="300"/>
+				</xfrm:startCommunication>
+				<xfrm:completeDecision>
+					<xfrm:readDataByIdentifier dataIdentifier="0xF187" startPos="3" endPos="12" display="ascii">
+						<xfrm:tx/>
+						<xfrm:rx/>
+					</xfrm:readDataByIdentifier>
+				</xfrm:completeDecision>
+			</xfrm:rule-preparation>
+			<xfrm:rule-unit>
+				<xfrm:completeDecision>
+					<xfrm:readDataByIdentifier dataIdentifier="0xF1B3" startPos="3" endPos="" display="ascii">
+						<xfrm:tx/>
+						<xfrm:rx/>
+					</xfrm:readDataByIdentifier>
+				</xfrm:completeDecision>
+			</xfrm:rule-unit>
+			<xfrm:rule-complete>
+				<xfrm:stopCommunication/>
+			</xfrm:rule-complete>
+		</xfrm:versionChecking-rule>
+		<xfrm:error-rule task="0x20|0x30|0x40|0x70|0x80">
+			<xfrm:rule-preparation>
+				<xfrm:startCommunication>
+					<xfrm:configuration stminTx="0x0A" p2CanServerMax="50" p2StarCanServerMax="5000" NRC78Repetitiontimeout="300"/>
+				</xfrm:startCommunication>
+				<xfrm:ecuReset resetMode="0x01" resetTimeout="60">
+					<xfrm:tx/>
+					<xfrm:rx/>
+				</xfrm:ecuReset>
+			</xfrm:rule-preparation>
+			<xfrm:rule-unit>
+			</xfrm:rule-unit>
+			<xfrm:rule-complete>
+				<xfrm:diagnosticSessionControl diagnosticSessionType="0x03">
+					<xfrm:tx/>
+					<xfrm:rx/>
+				</xfrm:diagnosticSessionControl>
+				<xfrm:controlDTCSetting dtcSettingType="0x02" confirmPositiveResponse="no">
+					<xfrm:tx/>
+					<xfrm:rx/>
+				</xfrm:controlDTCSetting>
+				<xfrm:communicationControl controlType="0x03" communicationType="0x03" confirmPositiveResponse="no">
+					<xfrm:tx/>
+					<xfrm:rx/>
+				</xfrm:communicationControl>
+				<xfrm:stopCommunication/>
+			</xfrm:rule-complete>
+		</xfrm:error-rule>
+	</xfrm:document>
+	<xfrm:whatsNew comment="Release Note">
+	</xfrm:whatsNew>
+</xfrm:root>

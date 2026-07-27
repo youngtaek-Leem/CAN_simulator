@@ -120,6 +120,21 @@ export const api = {
     request<{ filename: string; content: string } | { loaded: false }>('/api/testrunner/functions/raw'),
   functionStart: (name: string) => post('/api/testrunner/functions/start', { name }),
 
+  // UDS Software Download (CAN-SWDL) — Multi-slot
+  udsUploadXml: (file: File, slotIndex: number = 0) => upload<{ slot: number; status: import('../types').UdsDownloadStatus }>('/api/udswdl/xml/upload?slot_index=' + slotIndex, file),
+  udsUploadBinary: (file: File, slotIndex: number = 0) => upload<{ slot: number; status: import('../types').UdsDownloadStatus }>('/api/udswdl/binary/upload?slot_index=' + slotIndex, file),
+  udsStart: (slotIndices: number[] = [0, 1, 2], selectedSteps: string[] = [], modifiedParams?: Record<string, Record<string, string>>, globalStminTx?: number) =>
+    post<any[]>('/api/udswdl/start', { slot_indices: slotIndices, selected_steps: selectedSteps, modified_params: modifiedParams, global_stmin_tx: globalStminTx }),
+  udsStop: (slotIndex: number = 0) => post<import('../types').UdsDownloadStatus>('/api/udswdl/stop?slot_index=' + slotIndex),
+  udsStatus: () => request<import('../types').UdsDownloadStatus[]>('/api/udswdl/status'),
+  udsSteps: (slotIndex: number = 0) => request<import('../types').UdsStepInfo[]>('/api/udswdl/steps?slot_index=' + slotIndex),
+  udsSetParams: (slotIndex: number, stepService: string, params: Record<string, string>) =>
+    request<import('../types').UdsDownloadStatus>('/api/udswdl/step_params', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ slot_index: slotIndex, step_service: stepService, params }),
+    }),
+
   powerConnect: () => post<import('../types').PowerStatus>('/api/power/connect'),
   powerDisconnect: () => post<import('../types').PowerStatus>('/api/power/disconnect'),
   audioDevices: () => request<import('../types').AudioStatus>('/api/audio/devices'),
