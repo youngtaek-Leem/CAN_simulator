@@ -19,6 +19,7 @@ import { TestRunnerBox } from './TestRunnerBox';
 import { FunctionButtonWidget } from './FunctionButtonWidget';
 import { RandomButtonWidget } from './RandomButtonWidget';
 import UdsSwdlWidget from './UdsSwdlWidget';
+import OtaTesterWidget from './OtaTesterWidget';
 
 interface WidgetMeta {
   label: string;
@@ -140,6 +141,11 @@ export const WIDGET_REGISTRY: Record<WidgetType, WidgetMeta> = {
   udsSwdl: {
     label: 'CAN-SWDL',
     component: UdsSwdlWidget,
+    defaultSize: { w: 8, h: 6, minW: 4, minH: 3 },
+  },
+  otaTester: {
+    label: 'OTA Tester',
+    component: OtaTesterWidget,
     defaultSize: { w: 8, h: 6, minW: 4, minH: 3 },
   },
 };

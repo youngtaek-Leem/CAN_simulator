@@ -1,335 +1,403 @@
-"""UDS (ISO 14229) protocol core.
+"""
+UDS (Unified Diagnostic Services) core module.
 
-Provides PDU builders and response parsers for the UDS services needed
-for software download over CAN:
+Provides PDU builders for UDS request messages and response parsers.
+All builders return bytearray objects ready for ISO-TP transmission.
 
-- DiagnosticSessionControl  (0x10)
-- ECUReset                  (0x11)
-- SecurityAccess            (0x27)
-- RoutineControl            (0x31)
-- RequestDownload           (0x34)
-- TransferData              (0x36)
-- RequestTransferExit       (0x37)
-
-Also integrates the ASK (Authentication Seed & Key) client for SecurityAccess.
-On macOS/Linux the ASK function returns a mock key; on Windows it uses the
-HKMC AdvancedSeedKey DLL via reference/ask_client.py.
+Supported services:
+  - 0x10 DiagnosticSessionControl
+  - 0x11 EcuReset
+  - 0x22 ReadDataByIdentifier
+  - 0x27 SecurityAccess
+  - 0x28 CommunicationControl
+  - 0x31 RoutineControl
+  - 0x34 RequestDownload
+  - 0x36 TransferData
+  - 0x37 RequestTransferExit
+  - 0x3E TesterPresent
+  - 0x85 ControlDTCSetting
 """
 
-import platform
-from typing import Optional
+from __future__ import annotations
 
-# UDS Service IDs
-SID_SESSION_CONTROL = 0x10
-SID_ECU_RESET = 0x11
-SID_SECURITY_ACCESS = 0x27
-SID_ROUTINE_CONTROL = 0x31
-SID_REQUEST_DOWNLOAD = 0x34
-SID_TRANSFER_DATA = 0x36
-SID_REQUEST_TRANSFER_EXIT = 0x37
+from typing import Optional, Tuple
 
-# Positive Response SID (SID + 0x40)
-PR_SID_MASK = 0x40
 
-# Negative Response
-SID_NEGATIVE_RESPONSE = 0x7F
+# ---------------------------------------------------------------------------
+# Session type constants
+# ---------------------------------------------------------------------------
 
-# Negative Response Codes (NRC)
-NRC_GENERAL_REJECT = 0x10
-NRC_SERVICE_NOT_SUPPORTED = 0x11
-NRC_SUBFUNCTION_NOT_SUPPORTED = 0x12
-NRC_INCORRECT_MESSAGE_LENGTH = 0x13
-NRC_CONDITIONS_NOT_CORRECT = 0x22
-NRC_REQUEST_SEQUENCE_ERROR = 0x24
-NRC_REQUEST_OUT_OF_RANGE = 0x31
-NRC_SECURITY_ACCESS_DENIED = 0x33
-NRC_UPLOAD_DOWNLOAD_NOT_ACCEPTED = 0x70
-NRC_TRANSFER_DATA_SUSPENDED = 0x71
-NRC_GENERAL_PROGRAMMING_FAILURE = 0x72
-NRC_WRONG_BLOCK_SEQUENCE_COUNTER = 0x73
-NRC_RESPONSE_PENDING = 0x78
-
-# Session types
 SESSION_DEFAULT = 0x01
 SESSION_PROGRAMMING = 0x02
 SESSION_EXTENDED = 0x03
 
-# Security access modes
-SECURITY_REQUEST_SEED = 0x11
-SECURITY_SEND_KEY = 0x12
+# ---------------------------------------------------------------------------
+# Routine control type constants
+# ---------------------------------------------------------------------------
 
-# Routine control types
 ROUTINE_START = 0x01
 ROUTINE_STOP = 0x02
 ROUTINE_REQUEST_RESULTS = 0x03
 
-# ECU reset types
+# ---------------------------------------------------------------------------
+# ECU reset mode constants
+# ---------------------------------------------------------------------------
+
 RESET_HARD = 0x01
 RESET_KEY_OFF_ON = 0x02
 RESET_SOFT = 0x03
-RESET_ENABLE_RAPID_POWER_SHUTDOWN = 0x04
-RESET_DISABLE_RAPID_POWER_SHUTDOWN = 0x05
+
+# ---------------------------------------------------------------------------
+# Security access constants
+# ---------------------------------------------------------------------------
+
+SECURITY_REQUEST_SEED = 0x01
+SECURITY_SEND_KEY = 0x02
+
+# ---------------------------------------------------------------------------
+# Dummy key generation (override with .dll or custom logic)
+# ---------------------------------------------------------------------------
+
+
+def generate_key(seed: bytes) -> bytearray:
+    """Generate a dummy key (zero key) for security access.
+    
+    In production, replace with real key-generation logic (e.g. DLL call).
+    """
+    return bytearray(b'\x00' * 8)
+
+
+# ---------------------------------------------------------------------------
+# Exception class
+# ---------------------------------------------------------------------------
 
 
 class UdsError(Exception):
-    """UDS protocol error with NRC."""
-    def __init__(self, message: str, nrc: Optional[int] = None):
+    """UDS error with optional NRC code."""
+
+    def __init__(self, message: str, nrc: int = 0) -> None:
         super().__init__(message)
         self.nrc = nrc
 
 
 # ---------------------------------------------------------------------------
-# PDU Builders
+# CAN ID helpers
 # ---------------------------------------------------------------------------
 
-
-def build_session_control(session_type: int) -> bytes:
-    """Build DiagnosticSessionControl request."""
-    return bytes([SID_SESSION_CONTROL, session_type])
+CAN_EXT_FLAG = 0x80000000
+PADDING_BYTE = 0xCC
 
 
-def build_ecu_reset(reset_type: int) -> bytes:
-    """Build ECUReset request."""
-    return bytes([SID_ECU_RESET, reset_type])
+def ext_id(raw_id: int) -> int:
+    """Return an extended CAN ID (29-bit) suitable for isotp_service."""
+    if raw_id > 0x1FFFFFFF:
+        raise ValueError(f"CAN ID too large: 0x{raw_id:08X}")
+    return raw_id
 
 
-def build_seed_request(access_mode: int = SECURITY_REQUEST_SEED) -> bytes:
-    """Build SecurityAccess request for seed."""
-    return bytes([SID_SECURITY_ACCESS, access_mode])
+# ---------------------------------------------------------------------------
+# ISO-TP addressing helpers
+# ---------------------------------------------------------------------------
+
+def phys_req(base_id: int) -> int:
+    """Return physical request CAN ID (TA=PHYS)."""
+    return ext_id(base_id)
 
 
-def build_send_key(access_mode: int, key: bytes) -> bytes:
-    """Build SecurityAccess request to send key."""
-    return bytes([SID_SECURITY_ACCESS, access_mode]) + key
+def func_req(base_id: int) -> int:
+    """Return functional request CAN ID (TA=FUNC)."""
+    return ext_id(base_id | 0x100)
 
+
+# ---------------------------------------------------------------------------
+# TesterPresent helper
+# ---------------------------------------------------------------------------
+
+def build_tester_present(suppress_pos_rsp: bool = False) -> bytearray:
+    """UDS TesterPresent (0x3E)."""
+    subfunc = 0x80 if suppress_pos_rsp else 0x00
+    return bytearray([0x3E, subfunc])
+
+
+# ---------------------------------------------------------------------------
+# Service 0x10 - DiagnosticSessionControl
+# ---------------------------------------------------------------------------
+
+VALID_SESSIONS = {0x01, 0x02, 0x03, 0x7F}
+
+
+def build_diagnostic_session(session_type: int) -> bytearray:
+    """UDS DiagnosticSessionControl (0x10)."""
+    if session_type not in VALID_SESSIONS:
+        raise ValueError(
+            f"Invalid session_type: 0x{session_type:02X}. "
+            f"Must be one of {VALID_SESSIONS}"
+        )
+    return bytearray([0x10, session_type])
+
+
+# ---------------------------------------------------------------------------
+# Service 0x22 - ReadDataByIdentifier
+# ---------------------------------------------------------------------------
+
+def build_read_data_by_id(did: int) -> bytearray:
+    """Build UDS ReadDataByIdentifier request (0x22)."""
+    did = int(did)
+    return bytearray([0x22, (did >> 8) & 0xFF, did & 0xFF])
+
+
+# ---------------------------------------------------------------------------
+# Service 0x27 - SecurityAccess
+# ---------------------------------------------------------------------------
+
+def build_security_access_request_seed() -> bytearray:
+    """Request seed (level 01)."""
+    return bytearray([0x27, 0x01])
+
+
+def build_security_access_send_key(key: bytes) -> bytearray:
+    """Send key (level 02)."""
+    if len(key) != 8:
+        raise ValueError(f"Key must be 8 bytes, got {len(key)}")
+    result = bytearray([0x27, 0x02])
+    result.extend(key)
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Service 0x28 - CommunicationControl
+# ---------------------------------------------------------------------------
+
+def build_communication_control(
+    control_type: int, communication_type: int
+) -> bytearray:
+    """UDS CommunicationControl (0x28)."""
+    return bytearray([0x28, control_type, communication_type])
+
+
+# ---------------------------------------------------------------------------
+# Service 0x31 - RoutineControl
+# ---------------------------------------------------------------------------
 
 def build_routine_control(
-    control_type: int,
-    routine_id: int,
-    option_record: bytes = b"",
-) -> bytes:
-    """Build RoutineControl request.
+    routine_control_type: int,
+    routine_identifier: int,
+    option_record: Optional[bytes] = None,
+) -> bytearray:
+    """UDS RoutineControl (0x31)."""
+    result = bytearray(
+        [0x31, routine_control_type,
+         (routine_identifier >> 8) & 0xFF,
+         routine_identifier & 0xFF]
+    )
+    if option_record:
+        result.extend(option_record)
+    return result
 
-    Parameters
-    ----------
-    control_type : int
-        0x01 = start, 0x02 = stop, 0x03 = request results
-    routine_id : int
-        2-byte routine identifier
-    option_record : bytes
-        Optional additional data
-    """
-    return bytes([SID_ROUTINE_CONTROL, control_type, (routine_id >> 8) & 0xFF, routine_id & 0xFF]) + option_record
 
+# ---------------------------------------------------------------------------
+# Service 0x34 - RequestDownload
+# ---------------------------------------------------------------------------
 
 def build_request_download(
     data_format_identifier: int,
-    addr_length_format: int,
+    address_and_length_format_identifier: int,
     memory_address: int,
     memory_size: int,
-) -> bytes:
-    """Build RequestDownload request.
+) -> bytearray:
+    """UDS RequestDownload (0x34)."""
+    addr_len = (address_and_length_format_identifier >> 4) & 0xF
+    size_len = address_and_length_format_identifier & 0xF
 
-    Parameters
-    ----------
-    data_format_identifier : int
-        DFI byte (e.g. 0x00 = no compression, no encryption)
-    addr_length_format : int
-        ALFI byte: upper nibble = address bytes, lower nibble = size bytes
-    memory_address : int
-        Start address for download
-    memory_size : int
-        Number of bytes to download
-    """
-    addr_bytes = (addr_length_format >> 4) & 0x0F
-    size_bytes = addr_length_format & 0x0F
-
-    pdu = bytes([SID_REQUEST_DOWNLOAD, data_format_identifier, addr_length_format])
-    pdu += memory_address.to_bytes(addr_bytes, 'big')
-    pdu += memory_size.to_bytes(size_bytes, 'big')
-    return pdu
-
-
-def build_transfer_data(block_sequence_number: int, data: bytes) -> bytes:
-    """Build TransferData request."""
-    return bytes([SID_TRANSFER_DATA, block_sequence_number]) + data
-
-
-def build_transfer_exit() -> bytes:
-    """Build RequestTransferExit request."""
-    return bytes([SID_REQUEST_TRANSFER_EXIT])
+    result = bytearray([0x34, data_format_identifier,
+                         address_and_length_format_identifier])
+    result.extend(memory_address.to_bytes(addr_len, 'big'))
+    result.extend(memory_size.to_bytes(size_len, 'big'))
+    return result
 
 
 # ---------------------------------------------------------------------------
-# Response Parsers
+# Service 0x36 - TransferData
 # ---------------------------------------------------------------------------
 
-
-def parse_response(data: bytes) -> dict:
-    """Parse a UDS response.
-
-    Returns
-    -------
-    dict with keys:
-        - sid: the response SID (request SID + 0x40)
-        - positive: True if positive response
-        - nrc: negative response code (if positive=False)
-        - data: remaining payload bytes after SID
-    """
-    if not data:
-        raise UdsError("빈 응답 데이터")
-
-    sid = data[0]
-
-    if sid == SID_NEGATIVE_RESPONSE:
-        if len(data) < 3:
-            raise UdsError("Negative Response 데이터 길이 부족")
-        request_sid = data[1]
-        nrc = data[2]
-        return {
-            "sid": request_sid,
-            "positive": False,
-            "nrc": nrc,
-            "data": data[3:],
-        }
-
-    # Positive response: SID + 0x40
-    request_sid = sid & ~PR_SID_MASK if (sid & PR_SID_MASK) else sid
-    return {
-        "sid": request_sid,
-        "positive": True,
-        "nrc": None,
-        "data": data[1:],
-    }
-
-
-def parse_seed_response(data: bytes) -> bytes:
-    """Extract seed bytes from a SecurityAccess positive response."""
-    result = parse_response(data)
-    if not result["positive"]:
-        raise UdsError(f"Seed 요청 실패 (NRC=0x{result['nrc']:02X})", result["nrc"])
-    # Response: SID+0x40, accessMode, seed...
-    if len(result["data"]) < 1:
-        raise UdsError("Seed 응답에 seed 데이터 없음")
-    return result["data"][1:]  # skip accessMode byte
-
-
-def parse_request_download_response(data: bytes) -> dict:
-    """Parse RequestDownload positive response.
-
-    Returns
-    -------
-    dict with:
-        - max_length: maximum number of bytes per TransferData block
-    """
-    result = parse_response(data)
-    if not result["positive"]:
-        raise UdsError(f"RequestDownload 실패 (NRC=0x{result['nrc']:02X})", result["nrc"])
-    if len(result["data"]) < 2:
-        raise UdsError("RequestDownload 응답 데이터 길이 부족")
-    len_format = result["data"][0]
-    max_length_bytes = len_format & 0x0F
-    if max_length_bytes == 0:
-        max_length = 0  # no limit
-    elif len(result["data"]) < 1 + max_length_bytes:
-        raise UdsError("RequestDownload 응답에 maxLength 데이터 부족")
-    else:
-        max_length = int.from_bytes(result["data"][1:1 + max_length_bytes], 'big')
-    return {"max_length": max_length}
+def build_transfer_data(
+    block_sequence_number: int, data_block: bytes
+) -> bytearray:
+    """UDS TransferData (0x36)."""
+    result = bytearray([0x36, block_sequence_number & 0xFF])
+    result.extend(data_block)
+    return result
 
 
 # ---------------------------------------------------------------------------
-# ASK (SeedKey) Integration
+# Service 0x37 - RequestTransferExit
 # ---------------------------------------------------------------------------
 
-
-def generate_key(seed: bytes) -> bytes:
-    """Generate a key from a seed using the platform-appropriate method.
-
-    On Windows: uses the HKMC AdvancedSeedKey DLL via reference/ask_client.py.
-    On macOS/Linux: returns a mock key (all zeros) for development/testing.
-
-    Parameters
-    ----------
-    seed : bytes
-        8-byte seed from the ECU
-
-    Returns
-    -------
-    bytes
-        8-byte key
-    """
-    if platform.system() == "Windows":
-        try:
-            from reference.ask_client import AdvancedSeedKeyClient
-            client = AdvancedSeedKeyClient()
-            return client.generate_key(seed)
-        except Exception as exc:
-            raise UdsError(f"ASK KeyGenerate 실패: {exc}")
-    else:
-        # macOS/Linux: mock key for development
-        import logging
-        logger = logging.getLogger(__name__)
-        logger.warning("macOS/Linux: Mock key(zero-filled) 사용 중. 실제 ECU 보안 액세스는 Windows DLL에서만 가능합니다.")
-        return b"\x00" * 8
+def build_request_transfer_exit() -> bytearray:
+    """UDS RequestTransferExit (0x37)."""
+    return bytearray([0x37])
 
 
 # ---------------------------------------------------------------------------
-# Convenience: send UDS request and receive response via ISO-TP
+# Service 0x11 - EcuReset
 # ---------------------------------------------------------------------------
 
+def build_ecu_reset(reset_mode: int) -> bytearray:
+    """UDS EcuReset (0x11)."""
+    return bytearray([0x11, reset_mode])
 
-def send_and_receive(
-    isotp_send_fn,
-    isotp_receive_fn,
-    tx_id: int,
-    rx_id: int,
-    request: bytes,
-    timeout_s: float = 1.0,
-    fc_id: Optional[int] = None,
-    is_extended_id: bool = False,
-) -> dict:
-    """Send a UDS request via ISO-TP and receive the response.
 
-    Parameters
-    ----------
-    isotp_send_fn : callable
-        Function to send ISO-TP data (signature: send(tx_id, fc_id, data, ...))
-    isotp_receive_fn : callable
-        Function to receive ISO-TP data (signature: receive(rx_id, tx_id, ...))
-    tx_id : int
-        CAN ID to send request on
-    rx_id : int
-        CAN ID to receive response on
-    request : bytes
-        UDS request PDU
-    timeout_s : float
-        Response timeout
-    fc_id : int, optional
-        Flow Control ID (defaults to rx_id if not given)
-    is_extended_id : bool
-        Whether to use 29-bit extended IDs
+# ---------------------------------------------------------------------------
+# Service 0x85 - ControlDTCSetting
+# ---------------------------------------------------------------------------
 
-    Returns
-    -------
-    dict
-        Parsed UDS response
-    """
-    if fc_id is None:
-        fc_id = rx_id
+def build_control_dtc_setting(dtc_setting_type: int) -> bytearray:
+    """UDS ControlDTCSetting (0x85)."""
+    return bytearray([0x85, dtc_setting_type])
 
-    # Send request
-    isotp_send_fn(
-        tx_id, fc_id, request,
-        is_extended_id=is_extended_id,
-        fc_timeout_s=timeout_s,
-    )
 
-    # Receive response
-    response = isotp_receive_fn(
-        rx_id, tx_id,
-        timeout_s=timeout_s,
-        is_extended_id=is_extended_id,
-    )
+# ---------------------------------------------------------------------------
+# Negative Response (NR) helpers
+# ---------------------------------------------------------------------------
 
-    return parse_response(response)
+NR_CODES = {
+    0x10: "generalReject",
+    0x11: "serviceNotSupported",
+    0x12: "subFunctionNotSupported",
+    0x13: "incorrectMessageLengthOrInvalidFormat",
+    0x22: "conditionsNotCorrect",
+    0x24: "requestSequenceError",
+    0x31: "requestOutOfRange",
+    0x33: "securityAccessDenied",
+    0x35: "invalidKey",
+    0x36: "exceedNumberOfAttempts",
+    0x37: "requiredTimeDelayNotExpired",
+    0x78: "requestCorrectlyReceivedResponsePending",
+    0x7F: "serviceNotSupportedInActiveSession",
+    0x85: "dtcSettingTypeNotSupported",
+}
+
+
+def is_positive_response(response: bytes, service_id: int) -> bool:
+    """Check if response is a positive UDS response."""
+    if not response:
+        return False
+    return response[0] == (service_id + 0x40)
+
+
+def parse_negative_response(response: bytes) -> Tuple[int, str]:
+    """Parse a negative response (0x7F), returning (nrc, description)."""
+    if len(response) < 3 or response[0] != 0x7F:
+        return 0, "not_negative"
+    nrc = response[2]
+    return nrc, NR_CODES.get(nrc, f"unknown (0x{nrc:02X})")
+
+
+def is_response_pending(response: bytes) -> bool:
+    """Check if response is Negative Response 0x78 (responsePending)."""
+    if len(response) < 3 or response[0] != 0x7F:
+        return False
+    return response[2] == 0x78
+
+
+def parse_did_response(response: bytes) -> bytes:
+    """Extract data payload from ReadDataByIdentifier positive response."""
+    if not response or response[0] != 0x62:
+        return b""
+    return response[3:] if len(response) > 3 else b""
+
+
+# ---------------------------------------------------------------------------
+# Response data parsing
+# ---------------------------------------------------------------------------
+
+def parse_security_access_seed(response: bytes) -> bytes:
+    """Extract seed from SecurityAccess positive response."""
+    if len(response) < 10 or response[0] != 0x67:
+        return b""
+    return response[2:10]
+
+
+def parse_routine_control_response(response: bytes) -> bytes:
+    """Extract data from RoutineControl response."""
+    if not response or response[0] != 0x71:
+        return b""
+    return response[4:] if len(response) > 4 else b""
+
+
+# ---------------------------------------------------------------------------
+# Timing constants (defaults, overridden by project folder or user params)
+# ---------------------------------------------------------------------------
+
+DEFAULT_TIMING = {
+    "p2can_server_max": 50,
+    "p2_star_can_server_max": 5000,
+    "st_min_tx": 0x0A,
+    "nrc78_repetition_timeout": 300,
+    "p6_time": 1950,
+}
+
+
+# ---------------------------------------------------------------------------
+# Request sending utility
+# ---------------------------------------------------------------------------
+
+def _to_hex_string(data: bytes) -> str:
+    """Format bytes as hex string (no spaces)."""
+    return data.hex().upper()
+
+
+# ---------------------------------------------------------------------------
+# Compatibility aliases for uds_download_manager.py
+# ---------------------------------------------------------------------------
+
+# Session control alias
+build_session_control = build_diagnostic_session
+
+# Security access aliases
+build_seed_request = build_security_access_request_seed
+
+
+def build_send_key(access_mode: int, key: bytes) -> bytearray:
+    """Send key with access mode byte (e.g. 0x12)."""
+    if len(key) != 8:
+        raise ValueError(f"Key must be 8 bytes, got {len(key)}")
+    result = bytearray([0x27, access_mode, *key])
+    return result
+
+
+# Transfer exit alias
+build_transfer_exit = build_request_transfer_exit
+
+
+def parse_response(response: bytes) -> dict:
+    """Parse a UDS response, returning a dict with 'positive', 'sid', 'nrc', 'data'."""
+    result: dict = {"positive": False, "sid": 0, "nrc": 0, "data": b""}
+    if not response:
+        return result
+
+    byte0 = response[0]
+    if byte0 == 0x7F and len(response) >= 3:
+        result["positive"] = False
+        result["sid"] = response[1] if len(response) > 1 else 0
+        result["nrc"] = response[2] if len(response) > 2 else 0
+        return result
+
+    result["positive"] = True
+    result["data"] = response
+    return result
+
+
+def parse_request_download_response(response: bytes) -> dict:
+    """Parse RequestDownload positive response payload."""
+    info = {"length_format": 0, "max_length": 0}
+    if len(response) >= 2 and response[0] == 0x74:
+        lfi = response[1] & 0x0F
+        if lfi == 0:
+            lfi = 2
+        start = 2
+        end = start + lfi
+        if end <= len(response):
+            info["length_format"] = lfi
+            info["max_length"] = int.from_bytes(response[start:end], byteorder="big")
+    return info

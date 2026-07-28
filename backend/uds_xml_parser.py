@@ -250,6 +250,76 @@ def parse_xml(path: str) -> UdsProcedure:
     return proc
 
 
+def parse_test_rule_xml(path: str) -> list[dict]:
+    """Parse a new-format xfrm:test-rule XML file (from GITAuto reference tool).
+    
+    Structure: xfrm:test-rule → xfrm:rule (single flat list, no phases).
+    Each step has optional confirmPositiveResponse / localSTMinTx attributes.
+    
+    Parameters
+    ----------
+    path : str
+        Path to the XML file
+
+    Returns
+    -------
+    list[dict]
+        Flat list of steps, each with:
+          - service: str (e.g. "diagnosticSessionControl", "securityAccess", ...)
+          - params: dict (XML attributes)
+          - sub_steps: list[dict]
+          - binary_path: str | None (from test-rule level attribute)
+    """
+    tree = ET.parse(path)
+    root = tree.getroot()
+
+    # Handle xfrm:root wrapper — GITAuto exports are always inside xfrm:root
+    root_elem = root
+    if root.tag.endswith('root'):
+        root_elem = root.find("xfrm:test-rule", NS)
+        if root_elem is None:
+            root_elem = root.find("test-rule")
+        if root_elem is None:
+            raise ValueError(f"{path}: xfrm:test-rule 요소를 찾을 수 없습니다")
+
+    # Get binary path from test-rule attribute
+    binary_path = root_elem.get("binaryPath", None)
+
+    # Find xfrm:rule element directly under xfrm:test-rule
+    rule_elem_prompt = root_elem.find("xfrm:rule", NS)
+    if rule_elem_prompt is None:
+        rule_elem_prompt = root_elem.find("rule")
+    
+    if rule_elem_prompt is None:
+        raise ValueError(f"{path}: xfrm:rule 요소를 찾을 수 없습니다")
+    
+    # Get root level attributes
+    comment = rule_elem_prompt.get("comment", "")
+    func_tp = rule_elem_prompt.get("funcTP", "")
+    
+    steps = []
+    for child in rule_elem_prompt:
+        step_info = _parse_step(child)
+        
+        # Convert fxrm:UdsStep to the dict for OTA tester
+        step_dict = {
+            "service": step_info.service,
+            "params": step_info.params,
+            "sub_steps": [
+                {"service": s.service, "params": s.params}
+                for s in step_info.sub_steps
+            ],
+            "binary_path": binary_path,
+            # When confirmPositiveResponse="no", the tester expects a negative
+            # response (0x7F) instead of a positive response.
+            "confirm_positive_response": step_info.params.pop("confirmPositiveResponse", "yes") == "yes",
+            "local_stmin_tx": _int_hex(step_info.params.pop("localSTMinTx", "0")) if "localSTMinTx" in step_info.params else None,
+        }
+        steps.append(step_dict)
+    
+    return steps
+
+
 def get_step_params(steps: list[UdsStep], service_name: str) -> list[dict]:
     """Find all steps with the given service name and return their params.
 

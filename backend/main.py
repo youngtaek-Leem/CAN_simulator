@@ -32,6 +32,7 @@ from replay_service import ReplayService
 from test_runner_service import TestRunnerService
 from tx_scheduler import TxScheduler
 from uds_download_manager import MultiUdsDownloadManager
+from ota_tester_download_manager import OtaTesterDownloadManager
 
 
 class _SuppressNoisyAccessLog(logging.Filter):
@@ -78,6 +79,12 @@ test_runner_service = TestRunnerService(
 )
 
 uds_download_manager = MultiUdsDownloadManager(
+    can_manager,
+    isotp_service.send,
+    isotp_service.receive,
+)
+
+ota_tester_manager = OtaTesterDownloadManager(
     can_manager,
     isotp_service.send,
     isotp_service.receive,
@@ -199,6 +206,7 @@ def _status() -> dict:
         # to every client every 0.5s.
         "test_runner": test_runner_service.summary(),
         "uds": uds_download_manager.all_status(),
+        "ota_tester": ota_tester_manager.status(),
         "power": power_supply_service.info(),
         "audio": audio_service.info(),
         "log": log_service.status(),
@@ -873,6 +881,57 @@ def delete_layout(name: str):
     if path.exists():
         path.unlink()
     return {"deleted": name}
+
+
+# ---- OTA Tester (GITAuto test-rule XML) ----------------------------------
+
+
+OTA_TESTER_UPLOAD_DIR = BASE_DIR / "uploads" / "ota_tester"
+
+
+@app.get("/api/ota_tester/status")
+def ota_tester_status():
+    """Get OTA Tester status."""
+    return ota_tester_manager.status()
+
+
+@app.post("/api/ota_tester/load_xml")
+async def ota_tester_load_xml(file: UploadFile):
+    """Load a GITAuto test-rule XML file."""
+    OTA_TESTER_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    suffix = Path(file.filename or "").suffix.lower()
+    if suffix != ".xml":
+        raise HTTPException(status_code=400, detail="only .xml files are supported")
+    dest = OTA_TESTER_UPLOAD_DIR / (file.filename or "test_rule.xml")
+    content = await file.read()
+    dest.write_bytes(content)
+    try:
+        return ota_tester_manager.load_xml(str(dest), file.filename)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"XML 파싱 오류: {exc}")
+
+
+class OtaTesterStartRequest(BaseModel):
+    request_id: int
+    response_id: int
+
+
+@app.post("/api/ota_tester/start")
+def ota_tester_start(req: OtaTesterStartRequest):
+    """Start OTA Tester procedure."""
+    _require_running()
+    if not can_manager.connected:
+        raise HTTPException(status_code=400, detail="CAN bus is not connected")
+    try:
+        return ota_tester_manager.start(req.request_id, req.response_id)
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/api/ota_tester/stop")
+def ota_tester_stop():
+    """Stop OTA Tester procedure."""
+    return ota_tester_manager.stop()
 
 
 # ---- Frontend static files (production build) ----------------------------

@@ -84,6 +84,7 @@ export interface BackendStatus {
   settings: { ws_flush_ms: number };
   run: { running: boolean };
   test_runner: TestRunnerSummary;
+  ota_tester: OtaTesterStatus;
   power: PowerStatus;
   audio: AudioStatus;
   log: LogStatus;
@@ -207,6 +208,46 @@ export interface UdsSlotStatus {
   status?: UdsDownloadStatus;
 }
 
+// ---- OTA Tester types (new GITAuto test-rule XML format) ----
+
+export interface OtaTesterStep {
+  service: string;
+  params: Record<string, string>;
+  sub_steps: OtaTesterSubStep[];
+  binary_path: string | null;
+  timing?: Record<string, number>;
+}
+
+export interface OtaTesterSubStep {
+  service: string;
+  params: Record<string, string>;
+}
+
+export interface OtaTesterStatus {
+  state: string;
+  running: boolean;
+  procedure_loaded: boolean;
+  xml_filename: string | null;
+  total_steps: number;
+  current_step_index: number;
+  current_step_name: string | null;
+  events: UdsEvent[];
+  error: string | null;
+}
+
+export interface OtaTesterResultItem {
+  service: string;
+  step_no: number;
+  step_index: number;
+  success: boolean;
+  description: string;
+}
+
+export interface OtaTesterResult {
+  total_steps: number;
+  results: OtaTesterResultItem[];
+}
+
 export const SERVICE_DISPLAY_NAMES: Record<string, string> = {
   startCommunication: 'CAN 통신 시작',
   stopCommunication: 'CAN 통신 종료',
@@ -246,7 +287,8 @@ export type WidgetType =
   | 'randomButton'
   | 'functionMultiButton'
   | 'randomMultiButton'
-  | 'udsSwdl';
+  | 'udsSwdl'
+  | 'otaTester';
 
 export interface SignalBinding {
   message: string;

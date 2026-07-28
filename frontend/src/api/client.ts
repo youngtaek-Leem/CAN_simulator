@@ -147,4 +147,11 @@ export const api = {
     post(`/api/layouts/${encodeURIComponent(name)}`, body),
   deleteLayout: (name: string) =>
     request(`/api/layouts/${encodeURIComponent(name)}`, { method: 'DELETE' }),
+
+  // OTA Tester
+  otaTesterStatus: () => request<import('../types').OtaTesterStatus>('/api/ota_tester/status'),
+  otaTesterLoadXml: (file: File) => upload('/api/ota_tester/load_xml', file),
+  otaTesterStart: (request_id: number, response_id: number) =>
+    post('/api/ota_tester/start', { request_id, response_id }),
+  otaTesterStop: () => post('/api/ota_tester/stop'),
 };
