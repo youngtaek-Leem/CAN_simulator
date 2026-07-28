@@ -83,6 +83,12 @@
             "message": "CLU_AMP_01_200ms",
             "signal": "Warn_Sound_FCW"
           }
+        },
+        {
+          "id": "w1783607000001",
+          "type": "otaTester",
+          "title": "OTA Tester",
+          "options": {}
         }
       ],
       "layout": [
@@ -150,6 +156,17 @@
           "minW": 2,
           "minH": 1,
           "moved": true,
+          "static": false
+        },
+        {
+          "i": "w1783600000001",
+          "x": 0,
+          "y": 8,
+          "w": 8,
+          "h": 6,
+          "minW": 4,
+          "minH": 3,
+          "moved": false,
           "static": false
         }
       ]
