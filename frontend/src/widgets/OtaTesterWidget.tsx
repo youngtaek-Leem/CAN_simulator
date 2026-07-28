@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { api } from '../api/client';
-import type { OtaTesterStatus, UdsEvent } from '../types';
+import type { OtaTesterStatus } from '../types';
 import { SERVICE_DISPLAY_NAMES } from '../types';
 
 interface Props {
@@ -187,7 +187,7 @@ export default function OtaTesterWidget({ config: _config }: Props) {
       )}
 
       {/* Progress bar */}
-      {st?.total_steps > 0 && (
+      {st && st.total_steps > 0 && (
         <div style={{ fontSize: 12 }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 4 }}>
             <span>Step {Math.min(st.current_step_index + 1, st.total_steps)}/{st.total_steps}</span>
