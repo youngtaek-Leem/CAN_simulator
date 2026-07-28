@@ -516,7 +516,7 @@ class UdsDownloadManager:
             # Session type params live on the parent step, not on sub-steps
             session_type_str = step_params.get("diagnosticSessionType", "0x01")
             bg_session_type_str = step_params.get("background_diagnosticSessionType", None)
-            timeout_s = self._procedure.p2_can_server_time_max / 1000.0 if self._procedure else 0.05
+            timeout_s = self._procedure.p2_can_server_max / 1000.0 if self._procedure else 0.05
 
             if selected_session_type is not None:
                 # User selected a specific session type — only send that one
