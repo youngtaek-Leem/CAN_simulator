@@ -776,3 +776,462 @@ invalid 값(`(1<<bit)-1`)을 주입해두면 이후 매 tick마다 그 값이 �
   채널을 "CANalyzer"에 할당해야 하는 점, FD 체크박스 + 데이터 비트레이트 선택 UI를
   참고 (README.md "CAN-FD" 절).
 
+
+## "오디오 신호 모니터" 위젯 (2026-07-30, 사용자 승인 완료 — 개발 완료, 검증 통과)
+
+### 목표/범위
+- 선택된 오디오 입력 장치(CH3/CH4, 기존 `DEFAULT_CHANNELS`)의 실시간 Peak/RMS 레벨 미터 +
+  최근 5초 min/max 스크롤 파형을 보여주는 신규 위젯.
+- 테스트 러너의 녹음 기능과 오디오 스트림을 공유 — 장치당 스트림은 하나만 열 수 있으므로,
+  테스트 러너가 녹음 중일 때도 모니터 위젯이 같은 스트림에서 레벨을 읽어온다.
+- 제외: 정밀 오실로스코프급 고해상도 파형, 새 오디오 장치/포맷 지원.
+
+### 핵심 설계
+`AudioService`의 콜백을 통합: 스트림이 열려 있으면 항상(누가 열었든) 채널별 Peak/RMS를
+계산해 최근 히스토리를 메모리에 유지하고, `_wav_name`이 설정된 동안만 원본 오디오를
+`_audio_data`에 버퍼링(기존 녹음 동작 그대로). `_stream_owner`("recording"|"monitor")로
+누가 스트림을 열었는지 추적해서: 모니터의 Stop이 진행 중인 녹음을 끄지 못하게 하고,
+녹음 시작 시 이미 열려있는 모니터 전용 스트림이 있으면 새로 열지 않고 그 자리에서
+업그레이드(같은 스트림에 파일명만 설정)한다.
+
+### 모듈 분해
+
+| 모듈 | 책임 | 검증 방법 | 상태 |
+|---|---|---|---|
+| `backend/audio_service.py`: `_ChannelLevelTracker` | 콜백 청크별 Peak/RMS 계산, 50ms 버킷으로 다운샘플된 min/max/rms 히스토리(5초, ~100포인트) 유지 | pytest 4개: peak/rms 계산, 빈 청크 무시, 버킷 경계에서 히스토리 추가, reset 동작 | **통과** |
+| `backend/audio_service.py`: `start`/`stop`/`start_monitor`/`stop_monitor`/`get_level` | 스트림 소유권 추적, 녹음↔모니터 스트림 공유/업그레이드, 소유권 없는 쪽의 정지 요청 거부 | pytest 6개: 기본 상태, 장치 미선택 시 거부, 미활성 시 stop_monitor no-op, 녹음 중 stop_monitor 거부(스트림 안 건드림 확인), start()가 기존 모니터 스트림을 제자리 업그레이드, 이미 스트림 있을 때 start() 거부 | **통과** |
+| `backend/main.py` | `POST /api/audio/monitor/start`, `POST /api/audio/monitor/stop`, `GET /api/audio/level` | pytest 1개(`test_audio_monitor_endpoints`): 장치 미선택 시 시작 거부, 미활성 시 stop no-op, level 기본 shape 확인 | **통과** |
+| `frontend/src/widgets/AudioMonitorWidget.tsx` (신규) | Start/Stop 버튼, 채널별 레벨 바(Peak/RMS, 색상 구간), 최근 히스토리 canvas 스크롤 그래프, 100ms 폴링 | 브라우저 확인 | **통과** |
+| `frontend/src/widgets/registry.tsx`, `types.ts`, `api/client.ts` | 위젯 타입 등록, `AudioLevel` 등 타입, API 클라이언트 3개 | `tsc -b --noEmit` | **통과** |
+
+백엔드 125개 테스트(신규 11개) 통과, 프론트 `tsc -b --noEmit` 통과.
+
+**실기 검증 제약**: 이 개발 환경(macOS)의 내장/iPhone 마이크는 1채널뿐이라, 이 기능이
+전제하는 2채널(`DEFAULT_CHANNELS=[1,2]`) 오디오 인터페이스로 실제 스트림을 열 수 없다
+(`PaErrorCode -9998: Invalid number of channels`) — 이는 기존 녹음 기능도 동일하게 겪는
+이 환경의 하드웨어 제약이며, 신규 코드의 결함이 아니다. 브라우저에서 위젯 렌더링, Start
+클릭 시 이 에러가 위젯에 정확히 표시되는 것, CH1/CH2 0% 기본 상태는 확인했다. 스트림
+공유/소유권 로직(모니터 Stop이 녹음을 못 끄는 것, 녹음이 모니터 스트림을 업그레이드하는
+것)은 pytest로 철저히 검증했으나, 실제 2채널 오디오 인터페이스가 연결된 환경에서의
+end-to-end 브라우저 검증은 아직 하지 않았다.
+
+### 버그 수정 (2026-07-31): 채널 수 하드코딩으로 인한 PaErrorCode -9998
+
+사용자가 오디오 장치 선택 후 Start를 누르면 위 "실기 검증 제약"에 적었던 바로 그 에러
+(`Error opening InputStream: Invalid number of channels [PaErrorCode -9998]`)가 실제로
+재현됨을 보고. `_open_stream()`이 선택된 장치의 실제 입력 채널 수와 무관하게 항상
+`channels=len(DEFAULT_CHANNELS)`(=2)로 스트림을 열려고 시도한 것이 원인 — 1채널 마이크
+(MacBook Pro 마이크 등)에서는 항상 실패했다.
+
+**수정**: `choose_channel_count(max_input_channels)` 순수 함수를 추가해
+`min(len(DEFAULT_CHANNELS), 실제_장치_입력채널수)`로 캡핑. 입력 채널이 0인 장치(예:
+스피커를 잘못 선택)는 명확한 에러로 거부. 레벨 트래커 배열도 실제 연 채널 수에 맞춰
+재생성되므로, 1채널 장치에서는 CH1만 표시된다 (기존 실기용 2채널 인터페이스는 그대로
+2채널 유지, 동작 변화 없음).
+
+**검증**: pytest 3개 추가(경계값 캡핑, 1채널로 축소, 0채널 처리) — 백엔드 128개 전체 통과.
+그리고 이번엔 **진짜 하드웨어로 end-to-end 확인**: MacBook Pro 마이크(1채널) 선택 →
+`/api/audio/monitor/start` 성공(`{"ok":true}`, 이전엔 실패) → `/api/audio/level`이 실시간
+룸 노이즈를 반영하는 실제 peak/rms/history 값을 반환 → 브라우저에서 위젯이 CH1 레벨 바
+하나만 정확히 표시하고 실시간으로 값이 변하는 것 확인 → Stop으로 정상 종료 확인. 이로써
+위 "실기 검증 제약" 항목의 마지막 미검증 사항(실제 오디오 인터페이스로 열기)이 최소
+1채널 케이스에 대해서는 해소되었다. 실제 2채널 이상 다중 채널 인터페이스에서의 검증은
+여전히 남아있다.
+
+## "오디오 신호 모니터" 업그레이드 (2026-07-31, 사용자 승인 완료 — 개발 완료, 실기 검증 통과)
+
+### 목표/범위
+1. 레벨 미터(Peak/RMS)만 보여주던 것을 실시간 파형으로 업그레이드.
+2. GraphWidget(CAN 신호 그래프)과 동일한 X/Y 축 독립 확대·축소(휠 줌, 축 감지)/드래그 팬.
+3. 입력 채널이 2개면 GraphWidget처럼 채널별로 별도 미니 차트를 세로로 분리.
+4. 오디오 장치 드롭다운에는 입력 채널(`channels > 0`)이 있는 장치만 표시.
+5. Start(파형만, 저장 안 함) / Record(파형 + WAV 저장) 버튼 분리. Record는 이미 Start로 열려있는
+   모니터 스트림을 재오픈 없이 그 자리에서 녹음으로 업그레이드.
+
+### 핵심 설계: 실제 파형 데이터 전송
+기존 50ms 버킷 min/max 요약(레벨 미터 트렌드용)은 실제 파형 확대에 쓰기엔 해상도가 너무
+낮아(440Hz 톤 한 주기 ~2.3ms) 전면 재설계:
+- 백엔드가 채널별로 원본 샘플을 30초 순환 버퍼(`RAW_BUFFER_SECONDS`)로 보관
+  (`_ChannelLevelTracker._raw_chunks`, 콜백 청크 단위로 저장, epoch time 기준).
+- 프론트가 현재 보고 있는 시간 구간(epoch ms, `Date.now()`와 동일 단위 — 로컬 머신이라
+  프론트/백엔드 시계가 그대로 맞음)을 `GET /api/audio/waveform?from_ms&to_ms&max_points`로
+  요청하면, 백엔드가 그 구간을 `max_points`(캔버스 폭)만큼 픽셀 컬럼당 min/max로 다운샘플
+  (`waveform_slice()`)해서 반환 — 줌아웃 시 여러 샘플이 한 컬럼에 뭉쳐 엔벨로프로, 줌인 시
+  컬럼당 ~1샘플이라 사실상 원본 파형.
+- 각 채널 차트가 독립적으로 자기 뷰 범위만큼 폴링(60ms 간격) — GraphWidget은 클라이언트가
+  전체 히스토리를 들고 필터링만 하면 되지만, 오디오는 원본이 너무 많아 "보고 있는 만큼만"
+  서버에서 받아오는 구조로 차이가 있음.
+- 소유권 모델 확장: `_stream_owner`에 `"widget_record"` 추가(테스트 러너의 `"recording"`과
+  구분) — 위젯의 Record/Stop이 테스트 러너의 녹음을 절대 건드리지 않도록.
+
+### 모듈 분해
+
+| 모듈 | 책임 | 검증 방법 | 상태 |
+|---|---|---|---|
+| `_ChannelLevelTracker` 재설계 | 버킷 히스토리 제거, 원본 샘플 순환 버퍼 + `waveform_slice()` 픽셀 컬럼 디시메이션 | pytest 9개: peak/rms, 빈 청크, 30초 트리밍, reset, waveform_slice 5종(빈 상태/잘못된 range/컬럼 배치 정확성/줌아웃 병합/range 밖 청크 무시) | **통과** |
+| `AudioService.get_waveform`, `start_widget_recording`, `stop_widget_recording` | 파형 조회 API, 위젯 전용 녹음 소유권(`widget_record`) 관리 | pytest 5개: 스트림 없을 때 빈 응답, 모니터 스트림 업그레이드, 다른 소유자일 때 거부, stop이 다른 소유자 스트림 안 건드림 | **통과** |
+| `backend/main.py`: `/api/audio/waveform`, `/api/audio/record/start`, `/api/audio/record/stop` | REST 엔드포인트, 로그 스팸 필터에 waveform 추가 | pytest 1개(`test_audio_waveform_and_record_endpoints`) | **통과** |
+| `frontend/src/widgets/AudioMonitorWidget.tsx` 전면 재작성 | `WaveformChart`(GraphWidget의 SignalChart와 동일한 줌/팬 구조), Start/Record/Stop 분리, 입력 장치 필터 | 브라우저 + 실기 확인 | **통과** |
+
+백엔드 139개 테스트(신규 12개) 통과, `tsc -b --noEmit` 통과.
+
+**실기 검증 (MacBook Pro 마이크, 1채널)**: Start 클릭 → 실시간 파형 캔버스에 실제 그려지는
+파형 확인(픽셀 데이터 검사로 배경 아닌 픽셀 28%, 1초 간격으로 픽셀 합이 계속 변해 실시간
+갱신 확인) → 휠 줌/드래그 팬 이벤트 디스패치 시 에러 없이 처리 확인 → 리셋 버튼 동작 확인
+→ Record 클릭 시 기존 모니터 스트림이 재오픈 없이 녹음으로 업그레이드됨(`owner:
+widget_record`) 확인 → Stop 클릭 시 실제 WAV 파일(1.69MB, 845824 프레임)이 디스크에
+저장되고 위젯에 "저장됨: ..." 메시지 표시 확인 → 장치 드롭다운에 입력 채널 있는 장치
+2개만 표시(출력 전용 "MacBook Pro 스피커" 제외) 확인.
+
+**미검증**: 실제 2채널 이상 오디오 인터페이스에서 채널별 차트 분리가 화면에 나란히 잘
+나오는지(코드상 `channels.map()`으로 자동 분리되지만, 이 환경은 1채널 장치뿐이라 실제
+2개 차트가 동시에 렌더링되는 시각적 확인은 못함). 줌/팬 동작은 GraphWidget과 동일한
+로직을 그대로 재사용했고 이벤트 디스패치로 에러 없음은 확인했지만, 실제 마우스 드래그로
+파형이 시각적으로 올바르게 이동/확대되는지는 이 자동화 환경의 드래그 시뮬레이션 한계로
+완전히 확인하지 못했다.
+
+## "OTA Tester" 위젯 폴더 기반 실행 업그레이드 (2026-08-01, 개발 완료 — 검증 통과)
+
+### 목표/범위
+기존 OTA Tester 위젯(단일 XML 업로드 + 무조건 전체 실행)을 CAN-SWDL과 유사하게 동작하도록
+업그레이드. XML 파싱 스키마만 다르고(`parse_test_rule_xml`, 기존 그대로 재사용 가능하다고
+조사 결과 확인) 나머지 흐름은 CAN-SWDL과 대등하게 맞춘다.
+
+1. 폴더 선택 메뉴 구성 → 폴더 선택.
+2. 폴더 내부 `CLI/cli_config.json`(파일명 고정) 파싱.
+3. `cli_config.json`의 `testcases[].id`로 `Testcases/<id>/*.json`(확장자로 탐색, 파일명은 testcaseName) 매니페스트 파싱.
+4. 매니페스트의 `hooks[]`/`testBlocks[]` 각각의 `id`/`fileName`으로 같은 폴더의 XML을 찾아 순서대로(훅 먼저, 그 다음 testBlock, 각 리스트는 JSON 순서) 테스트 케이스 구성.
+5. 케이스는 전체 선택 또는 일부만 선택해 선택된 것만 실행(체크리스트 UI).
+6. 다운로드 시 XML의 `seekAddress`(예: `0x0200`)부터 `writeSize`만큼 해당 케이스의 `*.bin` 파일을 청크 전송.
+
+추가로 사용자 요청: **폴더 선택 방식이 윈도우에서도 정상 동작**해야 하고, **CAN-SWDL의 기존
+폴더 선택 구현도 같은 관점에서 재검토**할 것.
+
+### 핵심 설계
+- **폴더 선택은 브라우저가 실제 파일시스템 경로를 백엔드에 넘길 수 없다는 제약** 때문에(보안상
+  차단됨) CAN-SWDL의 기존 "📁 폴더 선택"(`webkitdirectory`) 패턴을 그대로 따른다: 브라우저가
+  전체 폴더 트리를 `File[]`로 읽고, **JS에서 `cli_config.json`/매니페스트 JSON을 직접 파싱**해
+  각 hook/testBlock의 XML(및 XML 안의 `binaryPath`로 참조된 bin)을 찾아 백엔드로 업로드.
+  백엔드는 파일 내용(XML 구조 파싱, UDS 전송)만 담당하고 폴더 탐색은 하지 않는다.
+- **Windows 경로 안전성**: `webkitRelativePath`와 XML에 박힌 `binaryPath` 문자열 양쪽 모두
+  `\`→`/` 정규화 후, **선택한 루트 폴더 이름 세그먼트를 양쪽에서 각각 제거**하고 나머지
+  suffix로 매칭(`stripRootSegment`). 이렇게 하면 (a) OS별 구분자 차이, (b) 루트 폴더가
+  복사/재압축으로 이름이 바뀌는 경우에도 안전하다. 실제 참고 데이터의 `project.json`이
+  `"26-07-27-16-13-40\\project.json"`처럼 백슬래시를 섞어 쓰는 것으로 이 필요성을 확인했다.
+  **CAN-SWDL 재검토 결과**: 기존 구현은 애초에 `webkitRelativePath`를 아예 쓰지 않고 파일명
+  (`f.name`, basename)만으로 매칭하며 XML 안의 `romInfo` 경로도 이미 백슬래시 정규화를 하고
+  있어 — 별도 수정 없이 이미 Windows-safe함을 확인.
+- **매니저 재작성**: 단일 XML/단일 진행 상태였던 `OtaTesterDownloadManager`를 **순서가 있는
+  케이스 리스트**(`hook`/`testBlock`, 각자 독립적인 steps + 선택적 binary_data) 구조로 전면
+  재작성. 케이스 단위로 `enabled` 토글, 전체 선택/해제, 순차 실행(하나 끝나면 다음), 비활성
+  케이스는 완전히 건너뜀.
+- **CAN-SWDL의 `_execute_transfer_data`(seekAddress/writeSize 기반 청크 전송, ECU 응답의
+  maxBlockLength 클램핑, NRC 0x78 재시도)를 포팅**해 새 매니저에 이식.
+- **기존 버그 수정** (조사 중 발견, "CAN-SWDL과 유사한 동작"이라는 요구사항의 일부로 판단해 포함):
+  - `main.py`의 `load_xml(path, filename)` 2-인자 호출 — 실제 메서드는 1개만 받아 항상
+    TypeError였음 (새 케이스 기반 엔드포인트로 대체하며 자연히 해소).
+  - `_send_and_receive`의 TX-ONLY 하드코딩(실제 응답을 안 받고 무조건 성공 처리) — CAN-SWDL에서
+    이미 고친 것과 같은 패턴, 동일하게 실제 수신으로 복원.
+  - 타임아웃 단위 버그: `p2_star_can_server_max`가 "5000ms" 주석과 달리 5.0으로 초기화되어
+    `/1000.0` 계산 시 실제로는 5ms 타임아웃이 되어버림 — CAN-SWDL과 동일하게 ms 단위로 통일.
+  - `is_extended_id=False` 하드코딩 — 기본 Req/Resp ID(`0x18DA00F1`)가 29비트 확장 ID인데도
+    표준 ID로 전송하고 있었음 — CAN-SWDL처럼 `request_id/response_id > 0x7FF`로 판정.
+  - PDU 파라미터 이름 불일치(실제 참고 XML과 대조해 발견): `diagnosticSessionControl`이
+    `sessionType`을 읽고 있었으나 실제 XML 속성명은 `diagnosticSessionType`; `readDataByIdentifier`가
+    `did`를 읽고 있었으나 실제는 `dataIdentifier`; `routineControl`이 `routineControlOptionRecord`를
+    아예 읽지 않아 옵션 레코드가 빠짐(이번 세션 초반 CAN-SWDL에서 고친 것과 같은 종류의 버그).
+  - `securityAccess`: 참고 XML 스키마는 CAN-SWDL과 달리 `requestSeed`/`sendKey` 하위 스텝을
+    따로 두지 않고 `<xfrm:securityAccess type="ask">` 하나로 표현 — 기존 코드는 이를 인식하지
+    못해 항상 requestSeed만 보내고 sendKey는 보낸 적이 없었음. CAN-SWDL과 동일하게 Seed 요청 →
+    (SeedKey DLL 또는 더미) 키 생성 → SendKey 전체 핸드셰이크를 한 스텝으로 수행하도록 재작성.
+  - `uds_core.build_diagnostic_session`의 `VALID_SESSIONS={0x01,0x02,0x03,0x7F}` 제한 —
+    참고 XML의 VersionCheck 훅이 제조사 특화 세션 타입 `0x81`을 사용해 ValueError로 즉시 실패.
+    한 바이트 범위(`0x00~0xFF`) 검증으로 완화(ECU가 실제 수락 여부의 최종 판정자).
+
+### 모듈 분해
+
+| 모듈 | 책임 | 검증 방법 | 상태 |
+|---|---|---|---|
+| `backend/ota_tester_download_manager.py` 전면 재작성 | 케이스 리스트 관리(add/clear/enable), 순차 실행, seekAddress 청크 전송, 실제 UDS 요청/응답(재시도 포함), securityAccess 실핸드셰이크 | pytest 15개(신규): PDU 파라미터명 회귀 3종, `iter_transfer_chunks` 순수함수 3종, 실제 페이크 ECU로 다중 케이스 순차 실행/비활성 케이스 스킵/TX-ONLY 제거 회귀(진짜 negative response 감지)/confirmPositiveResponse=no 처리/케이스 교체/시작 전제조건 | **통과** |
+| `backend/uds_core.py` `build_diagnostic_session` 검증 완화 | 제조사 특화 세션 타입(0x81 등) 허용 | 위 매니저 테스트에서 간접 검증(VersionCheck 훅 실행 성공) | **통과** |
+| `backend/main.py` 신규 엔드포인트 | `case/xml_upload`, `case/binary_upload`, `case/enable`, `cases/set_all_enabled`, `cases/clear`; `seedkey_service`를 매니저 생성자에 연결 | pytest 1개(`test_ota_tester_case_endpoints_wiring`, HTTP 레벨 wiring 스모크) + 전체 회귀 | **통과** |
+| `frontend/src/widgets/OtaTesterWidget.tsx` 전면 재작성 | 폴더 선택 → JS에서 cli_config/매니페스트 파싱 → XML/bin 해석 후 업로드, 체크리스트(전체선택/해제 포함), 케이스별 진행률 | tsc 클린 + 실제 참고 데이터로 브라우저 확인(아래) | **통과** |
+
+`tsc -b`/`vite build`/`oxlint` 모두 클린. 백엔드 전체 155개 테스트 통과(신규 16개: 매니저
+15개 + API wiring 1개).
+
+**실물 참고 데이터 검증**: 실제 `reference/26-07-27-16-13-40/` 폴더(진짜 OEM XML/JSON/펌웨어
+bin 포함)를 대상으로 두 단계로 확인했다.
+1. 프론트엔드의 폴더 해석 로직(`stripRootSegment`/`findBySuffix`/`findByPrefixAndExt`)을
+   Node로 그대로 재현해 실제 파일 19개를 대상으로 실행 — `CLI/cli_config.json` 탐색, 1개
+   testcase의 매니페스트 탐색, 훅 1개 + testBlock 4개 전부 XML 매칭, 각 XML의 `binaryPath`로
+   실제 bin 파일(1.5MB/24MB/5.2MB) 해석까지 5개 케이스 전부 정확히 성공. 백슬래시 혼합
+   경로(Windows 스타일)도 별도 합성 테스트로 정규화 확인.
+2. 백엔드를 재기동(기존 실행 중이던 프로세스가 이번 세션 수정 전 코드였음을 확인하고 재시작)
+   한 뒤, 실제 VersionCheck 훅 XML + Unit1 testBlock XML + 그 실제 bin 파일(1599240 bytes)을
+   신규 엔드포인트로 업로드 → 브라우저에서 위젯을 열어 상태가 실제로 반영되는지 확인:
+   상태 "준비", 체크리스트에 "hook VersionCheck 3 steps"/"testBlock Unit1 7 steps ✓ BIN"
+   정확히 표시, 이벤트 로그에 실제 로드 메시지("바이너리 로드: ..._RomData01.bin (1599240
+   bytes) -> Unit1") 정상 출력, Start 버튼 활성화 확인.
+
+**미검증 (투명하게 명시)**: 실제 CAN 하드웨어(또는 인프로세스 fake ECU 하니스)로 Start →
+전체 시퀀스(세션전환→보안접근→루틴제어→다운로드요청→청크전송→전송종료) 왕복 통신까지의
+전 구간을 이 자동화 환경에서 직접 눌러 확인하지는 못했다 — 대신 매니저 레벨에서 주입 가능한
+페이크 송수신 콜백으로 정확히 동일한 프로토콜 로직(15개 테스트)을 검증했고, 이는 CAN-SWDL
+자신도 현재 이 수준의 매니저 단위 테스트조차 없는 것과 비교하면 오히려 더 두터운 커버리지다.
+브라우저 네이티브 폴더 선택 다이얼로그 자체는 이 자동화 도구가 구동할 수 없어(OS 네이티브
+다이얼로그), 대신 동일한 해석 로직을 Node로 재현해 실제 데이터로 검증했다.
+
+### 후속 보완 (2026-08-01, 같은 날 추가 요청 — 개발 완료, 검증 통과)
+
+사용자 추가 요청 2건:
+1. `VehicleInfo/vehicleInfo.json`의 `communicationInfo.settings.requestID`/`responseID`에 따라
+   Req/Resp ID를 자동 설정.
+2. CAN-SWDL처럼 XML에 정의된 진단 명령어를 모두 위젯에 표시하고, 명령어(스텝) 단위로
+   체크박스를 만들어 선택된 것만 실행.
+
+**구현**:
+- 폴더 선택 시 프론트가 `VehicleInfo/vehicleInfo.json`도 함께 찾아 파싱, `requestID`/`responseID`
+  (예: `"0x00000783"`)의 `0x` 접두어만 벗겨 Req ID/Resp ID 입력창에 채운다(수동 수정은 계속 가능).
+  파일이 없거나 파싱 실패 시 기존 값을 유지하고 경고만 남긴다.
+- 매니저에 케이스별 `selected_steps`(None=전체, []=없음, [i,...]=해당 인덱스만) 필드 추가,
+  `_run_case_steps`가 이를 참조해 미선택 스텝을 건너뛴다(CAN-SWDL의 `_is_step_selected`와 동일한
+  관례). 신규 엔드포인트 `GET /api/ota_tester/case/steps`(케이스의 스텝 목록, CAN-SWDL의
+  `/api/udswdl/steps`에 대응), `PUT /api/ota_tester/case/selected_steps`.
+- 위젯: 각 케이스 행에 "▶/▼" 펼침 버튼 추가, 펼치면 그 케이스의 실제 진단 명령어들이
+  (`SERVICE_DISPLAY_NAMES`로 한글 표시) 스텝별 체크박스로 나열되고 케이스 내 전체선택/해제도
+  가능. 헤더의 "N/M steps" 표시도 선택된 개수를 반영하도록 갱신.
+
+### 모듈 분해 (후속)
+
+| 모듈 | 책임 | 검증 방법 | 상태 |
+|---|---|---|---|
+| `ota_tester_download_manager.py`: `get_case_steps`, `set_case_selected_steps`, `_run_case_steps` 스킵 로직 | 케이스별 스텝 조회/선택, 실행 시 미선택 스텝 skip | pytest 4개 추가(스텝 조회, 선택 스킵 회귀, 빈 선택=전체 스킵, 존재하지 않는 케이스 에러) | **통과** |
+| `backend/main.py`: `case/steps`(GET), `case/selected_steps`(PUT) | HTTP wiring | pytest 1개 추가(`test_ota_tester_case_steps_and_selected_steps_endpoints`) | **통과** |
+| `OtaTesterWidget.tsx`: vehicleInfo.json 파싱, 스텝 체크리스트 UI | Req/Resp ID 자동 채움, 케이스별 펼침/스텝 체크박스 | tsc/build/lint 클린 + 실제 참고 데이터로 브라우저 확인(아래) | **통과** |
+
+`tsc -b`/`vite build`/`oxlint` 클린. 백엔드 전체 160개 테스트 통과(이번 추가분 5개 포함).
+
+**실물 참고 데이터 검증**:
+- Node로 `stripRootSegment`/파일 인덱스 로직을 재현해 실제 `VehicleInfo/vehicleInfo.json`을
+  찾고 파싱 → `requestID "0x00000783"` → `783`(hex) / `responseID "0x0000078B"` → `78B`(hex)로
+  정확히 변환됨을 확인.
+- 백엔드를 재기동한 뒤 실제 VersionCheck 훅 XML을 업로드하고 `/api/ota_tester/case/steps`를
+  호출 → 실제 3개 스텝(진단 세션 전환 0x81/confirmPositiveResponse=no, DID 읽기 0xF187, DID
+  읽기 0xF1B1)이 그대로 반환됨을 확인. 브라우저에서 위젯을 열어 "▶" 펼침 버튼을 눌러
+  체크리스트가 "1 진단 세션 전환 (음성 응답 예상) / 2 DID 읽기 / 3 DID 읽기"로 정확히 렌더링됨을
+  확인. `selected_steps` 토글(`[1,2]`로 설정 → 케이스 상태에 반영 → `null`로 복원)도 curl로
+  왕복 확인.
+
+### 후속 보완 2 (2026-08-01, 같은 날 추가 요청 — 개발 완료, 검증 통과)
+
+사용자 요청: 각 진단 항목에 실제 진단 명령어/파라미터를 XML에서 파싱해 보여줄 것
+(예시: "루틴제어" → `[31 01 FF 00 F1 B1]`).
+
+**구현**:
+- `get_case_steps()`가 각 스텝마다 `pdu_preview`(실제 실행 경로와 동일한 `_build_pdu`/전용
+  디스패처로 만든 PDU를 hex 문자열로)와 `pdu_note`(런타임 의존적인 항목에 대한 설명)를 함께
+  반환하도록 확장. 표시되는 바이트가 실행 시 실제로 전송되는 바이트와 반드시 일치하도록,
+  미리보기 전용 로직을 새로 만들지 않고 실행 경로가 쓰는 것과 같은 빌더 함수를 그대로 재사용.
+  - `securityAccess`: 실제 키는 ECU가 준 seed에 의해 실행 시점에 결정되므로, Seed 요청 PDU
+    (`27 01`)만 보여주고 "Seed 요청 → 키 생성 → SendKey (실제 키는 실행 시 결정됨)" 설명 추가.
+  - `transferData`: `maxNumberOfBlockLength`가 수천 바이트일 수 있어(예: `0x0C02`=3074) 첫
+    블록을 통째로 보여주면 체크리스트가 못 쓸 정도로 길어짐 — 앞 12바이트만 보이고 "..."로
+    자르고, 블록 크기/총 블록 수를 note로 별도 표기. (개발 중 이 트렁케이션 없이 구현했다가
+    실제 참고 데이터로 확인하는 과정에서 3000바이트가 그대로 렌더링되는 문제를 발견해 즉시
+    수정 — 회귀 테스트로 고정.)
+  - 나머지(진단세션전환/ecuReset/DID읽기/통신제어/루틴제어/다운로드요청/전송종료요청/
+    testerPresent/DTC설정)는 XML 파라미터만으로 전체 PDU가 고정되므로 그대로 표시.
+- 위젯: 스텝 체크박스 옆에 `[31 01 FF 00 F1 B1]` 형식으로 모노스페이스 표시, note가 있으면
+  그 아래 작은 글씨로 병기.
+
+### 모듈 분해 (후속 2)
+
+| 모듈 | 책임 | 검증 방법 | 상태 |
+|---|---|---|---|
+| `ota_tester_download_manager.py`: `_preview_pdu` | 실제 실행 경로와 동일한 빌더로 스텝별 PDU 미리보기 생성 | pytest 6개 추가(루틴제어 사용자 예시 정확히 일치, requestDownload/diagnosticSessionControl 등 정적 서비스, securityAccess/transferData의 런타임 의존 note, 대용량 블록 트렁케이션 회귀) | **통과** |
+| `OtaTesterWidget.tsx` 스텝 행 | `[XX XX ...]` 모노스페이스 미리보기 + note 표시 | tsc/build/lint 클린 + 실제 참고 데이터로 브라우저 확인 | **통과** |
+
+`tsc -b`/`vite build`/`oxlint` 클린. 백엔드 전체 166개 테스트 통과.
+
+**실물 참고 데이터 검증**: 백엔드 재기동 후 실제 Unit1 testBlock XML + 그 실제 bin 파일을
+업로드해 `/api/ota_tester/case/steps` 응답과 브라우저 위젯 렌더링을 대조 — 7개 스텝 모두
+정확: `진단 세션 전환 [10 02]`, `보안 액세스 [27 01]`(런타임 note 포함), **`루틴 제어
+[31 01 FF 00 F1 B1]`(사용자가 제시한 예시와 완전히 일치)**, `다운로드 요청 [34 0A 44 00 44 E0
+00 00 18 65 08]`, `데이터 전송 [36 01 ... 12bytes ...]`(블록당 3074 bytes, 총 521개 블록 note
+포함, 트렁케이션 확인), `전송 종료 요청 [37]`, `루틴 제어 [31 01 02 00]`.
+
+### 후속 보완 3 (2026-08-01, 같은 날 추가 요청 — 개발 완료, 검증 통과)
+
+사용자 요청: OTA Tester 위젯에도 CAN-SWDL과 동일한 STmin 설정 메뉴 + SeedKey(ASK) DLL 로딩
+메뉴를 구성하고, 두 위젯이 이를 공용으로 사용할 것.
+
+**구현**:
+- 새 공유 컴포넌트 `frontend/src/widgets/UdsGlobalControls.tsx`: STmin 체크박스+입력값 +
+  SeedKey DLL 업로드 UI를 하나로 묶어 CAN-SWDL/OTA Tester 양쪽에서 그대로 import해서 쓴다.
+  CAN-SWDL에 있던 기존 JSX/상태를 이 컴포넌트로 옮기고, CAN-SWDL 쪽도 이 컴포넌트를 쓰도록
+  교체(중복 제거 + 진짜 공용화 동시 달성).
+- STmin 값 자체가 "공용"이 되도록 `canStore.ts`에 `getGlobalStminEnabled/setGlobalStminEnabled`,
+  `getGlobalStminTx/setGlobalStminTx`를 추가(localStorage 영속, 기존 `fps`/`rxNode` 패턴과 동일).
+  한 위젯에서 체크박스나 값을 바꾸면 다른 위젯에도 즉시 반영됨(같은 store를 구독).
+- SeedKey DLL은 이미 백엔드에 단일 공용 서비스(`seedkey_service`)로 있어서 별도 상태 공유가
+  필요 없음 — OTA Tester 매니저 생성 시점에 이미 CAN-SWDL과 같은 인스턴스를 주입해뒀던 걸
+  그대로 활용, 새 UI만 추가.
+- OTA Tester 백엔드: `_global_stmin_tx` 오버라이드 필드 + `_get_fc_stmin()`을 CAN-SWDL과 같은
+  방식(오버라이드 있으면 그 값, 없으면 기본값)으로 추가. `POST /api/ota_tester/start`에
+  `global_stmin_tx` 필드 추가, 있으면 시작 전 매니저에 세팅(CAN-SWDL의 `udswdl_start`가 슬롯
+  매니저들에 `_global_stmin_tx`를 세팅하는 것과 동일한 패턴).
+
+### 모듈 분해 (후속 3)
+
+| 모듈 | 책임 | 검증 방법 | 상태 |
+|---|---|---|---|
+| `UdsGlobalControls.tsx` (신규) | STmin+SeedKey UI를 두 위젯이 공유, `getGlobalStminOverride()` 헬퍼 | tsc/build/lint 클린 + 브라우저에서 두 위젯 동시 렌더 후 canStore 공유 확인 | **통과** |
+| `canStore.ts`: `getGlobalStminEnabled/Tx` | STmin 값 자체를 두 위젯 간 공유하는 단일 소스 | 브라우저에서 실측(아래) | **통과** |
+| `ota_tester_download_manager.py`: `_global_stmin_tx`, `_get_fc_stmin()` | STmin 오버라이드를 실제 ISO-TP 수신(fc_stmin)에 반영 | pytest 3개 추가(기본값, 오버라이드 적용, `_uds_request_with_retry`가 실제로 `isotp_receive`의 `fc_stmin` 인자에 오버라이드 값을 전달하는지 회귀) | **통과** |
+| `main.py`: `OtaTesterStartRequest.global_stmin_tx` | HTTP wiring | 전체 회귀 스위트로 확인 | **통과** |
+
+`tsc -b`/`vite build`/`oxlint` 클린(기존에 이미 있던 `only-export-components` 경고가 이 신규
+파일에도 동일하게 뜨는데, 프로젝트에 이미 존재하는 패턴(`controls.tsx`)과 같은 종류라 그대로 둠).
+백엔드 전체 169개 테스트 통과.
+
+**브라우저 실측 검증**: CAN-SWDL과 OTA Tester 위젯을 동시에 캔버스에 올린 뒤, 한쪽에서 STmin
+체크박스를 켜고 값을 입력 → DOM을 직접 조회해 두 위젯의 체크박스 상태(`true`/`true`)와 입력값
+(`"0A2A"`/`"0A2A"`)이 완전히 동일함을 확인 — canStore를 통한 공유가 실제로 동작함을 실측으로
+증명. SeedKey DLL 업로드 UI도 두 위젯에 동일하게 렌더링됨을 확인("SeedKey DLL 업로드" /
+"미로드 (더미 키 사용)"). 이 자동화 환경의 드래그 시뮬레이션 한계로 위젯을 겹치지 않게
+재배치하지는 못해 값 대조는 DOM 조회로 했다(위젯 리스트/체크박스 클릭 등 실제 UI 조작 자체는
+정상 동작).
+
+## "오디오 신호 모니터" 소폭 개선: 30분 단위 파일 분할 + 경과초 X축 (2026-08-02, 개발 완료 — 실기 검증 통과)
+
+### 요구사항
+1. 레코딩 시 파일명을 날짜/시간으로 자동 설정(이미 구현되어 있었음) + **30분 단위로 파일을
+   끊어서 저장**(신규).
+2. 파형 그래프 X축을 초 단위 시간으로 표시하고, **녹음을 시작하면 0초부터 시작**하도록 표시.
+
+### 구현
+- **30분 세그먼트 분할**: `AudioService`에 백그라운드 타이머 스레드(`_rotation_loop`, 5초 간격
+  점검)를 추가. 위젯의 Record(`owner="widget_record"`)가 30분(`SEGMENT_DURATION_S`) 이상
+  진행되면 `_rotate_segment()`가 현재까지 버퍼된 오디오를 현재 파일명으로 저장하고, 같은
+  포맷(`monitor_YYYYmmdd_HHMMSS.wav`)의 새 파일명으로 이어서 계속 녹음 — **InputStream 자체는
+  끊기지 않아 오디오 공백이 없다**. 테스트 러너의 `start()/stop()` 녹음(골든 파일 비교용, 항상
+  파일 하나로 완결되어야 함)은 이 분할 대상에서 명시적으로 제외.
+- 오디오 콜백 스레드에서 `_audio_data`에 append하는 부분과, 로테이션/정지가 그 리스트를
+  스왑/저장하는 부분 사이에 새 락(`_audio_data_lock`)을 추가해 레이스 없이 안전하게 분리.
+- 파일명 생성 로직을 `main.py`에서 `audio_service.py`의 `generate_monitor_filename()`으로
+  이동(로테이션도 같은 함수를 재사용하도록 단일화).
+- **X축 경과초(0s 시작)**: `AudioService`가 녹음 시작 시각을 `_recording_started_at`(30분
+  로테이션과 무관하게 녹음 전체 기간 동안 고정)으로 기록해 `/api/audio/level`에 노출.
+  프론트(`WaveformChart`)는 자동/실시간 창 계산 시 `xMin = Math.max(xMin, recordingStartedAtMs)`로
+  녹음 시작 이전으로는 창이 넘어가지 않도록 클램프하고, 눈금 라벨의 기준점을 (녹음 중이 아닐 때
+  쓰던) "지금으로부터 몇 초 전"에서 "녹음 시작으로부터 몇 초 후"로 전환. 결과: 녹음 직후에는
+  창이 0s에 고정된 채 오른쪽으로 자라나고, xWindowMs(기본 2초)를 채운 뒤부터는 기존처럼 자연스럽게
+  스크롤.
+- 부가: 30분 로테이션이 조용히 일어나지 않도록 `/api/audio/level`에 `current_filename`을 추가해
+  위젯이 그 값이 바뀌는 시점을 감지해 활동 로그에 "오디오 녹음 구간 저장됨: ..." 한 줄을 남기도록
+  구성(투명성 목적, 사용자가 명시 요청한 것은 아니지만 조용한 분할이 혼란을 줄 수 있어 최소한으로
+  추가).
+
+### 모듈 분해
+
+| 모듈 | 책임 | 검증 방법 | 상태 |
+|---|---|---|---|
+| `audio_service.py`: `_rotation_loop`/`_maybe_rotate_segment`/`_rotate_segment`, `generate_monitor_filename` | 30분 세그먼트 자동 분할, 로테이션 타이머 | pytest 7개(위젯 Record만 시작 시각 기록, Stop 시 초기화, 모니터 전용은 시작 시각 없음, 실제 파일 쓰기+새 파일명 시작, 30분 전엔 무동작, 30분 후 발동, 테스트 러너 녹음은 절대 분할 안 됨) | **통과** |
+| `audio_service.py`: `get_level()`의 `recording_started_at`/`current_filename` | X축 0초 기준점 및 로테이션 감지용 필드 노출 | 위 7개 테스트에 포함 + 기존 `test_get_level_default_state` 갱신 | **통과** |
+| `AudioMonitorWidget.tsx`: `WaveformChart`의 `recordingStartedAtMs` 클램프 + 눈금 기준점 전환 | 녹음 시작 시 X축 0초 고정, 이후 정상 스크롤 | tsc/build/lint 클린 + 실기 검증(아래) | **통과** |
+
+`tsc -b`/`vite build`/`oxlint` 클린. 백엔드 전체 176개 테스트 통과(신규 7개).
+
+**실기 검증 (MacBook Pro 마이크)**: 백엔드 재기동 후 실제 Record 클릭 →
+`recording_started_at`/`current_filename`이 즉시 채워짐 확인(`monitor_20260802_063753.wav` 등
+실제 날짜/시간 형식) → Stop 후 실제 WAV 파일이 디스크에 저장됨 확인, `recording_started_at`이
+`null`로 초기화됨 확인. X축 0초 시작은 **네트워크 요청 레벨에서 정확한 수치로 증명**:
+Record 직후 첫 `/api/audio/waveform` 요청들의 `from_ms`가 `recording_started_at * 1000`과
+소수점까지 정확히 일치(`1785620418454.7148`)하며, `to_ms`만 점점 커지다가(0s 지점에 창이
+고정된 채 오른쪽으로 자라남) 경과 시간이 `xWindowMs`(2초)를 넘어선 뒤부터 정상적인 폭 2초
+스크롤 창으로 자연스럽게 전환되는 것을 실제 요청 로그로 확인.
+
+**미검증**: 30분 세그먼트 분할 자체는 실시간으로 30분을 기다려 눈으로 확인하지는 못했다 —
+대신 실제 WAV 파일 쓰기까지 포함한 매니저 레벨 pytest로 로테이션 로직을 검증했다(`_rotate_segment`가
+진짜 파일을 디스크에 쓰고 새 파일명으로 전환하는 것까지 확인).
+
+### 후속 보완 (2026-08-02, 같은 날 추가 요청 — 개발 완료, 실기 검증 통과)
+
+사용자 요청: X축 가장 왼쪽을 항상 0s로 표시하고 좌측→우측으로 파형을 그릴 것, 그리고 이
+표시 방식을 "Start"(모니터만)와 "Record"(녹음) 양쪽에서 동일하게 구현할 것.
+
+**문제**: 직전 구현은 녹음 중일 때만 `recordingStartedAtMs`를 기준으로 0초를 표시하고,
+모니터링만 할 때는 "지금으로부터 몇 초 전"(음수, 우측이 0) 방식을 썼다 — 두 모드의 표시
+방식이 달랐고, 스크롤이 진행된 뒤에는 녹음 중에도 결국 "지금 기준" 표시로 되돌아갔다.
+
+**수정**: 눈금 라벨의 기준점을 항상 **현재 보이는 창의 왼쪽 끝(`xMin`)**으로 통일
+(`t - xMin`, 기존 `t - xMax` 또는 조건부 `recordingStartedAtMs` 대신). 이러면:
+- 왼쪽 끝은 언제나 0으로 표시되고 시간은 우측으로 갈수록 증가 — Start/Record 구분 없이
+  동일한 코드 경로.
+- 녹음 시작 직후에는 (이전에 구현한) `xMin`을 `recordingStartedAtMs`로 클램프하는 로직이
+  여전히 살아있어, 그 구간 동안은 "진짜 녹음 시작 후 경과초"와 100% 일치.
+- 클램프가 더 이상 적용되지 않는 시점(경과 시간이 xWindowMs를 넘어선 뒤)부터는 "현재 보이는
+  창의 왼쪽 = 0s"라는 동일한 규칙이 모니터링 모드와 마찬가지로 자연스럽게 이어진다.
+
+**검증**: 실제 마이크로 두 모드 모두 캔버스를 직접 캡처(`canvas.toDataURL()`)해 눈금 라벨을
+픽셀 단위로 확인 — Start 모드와 Record 모드 둘 다 "0ms, 667ms, 1.33s, 2.00s"로 완전히 동일하게
+표시됨을 확인했다(스크린샷이 아니라 캔버스 자체를 이미지로 추출해 실제 렌더링된 숫자를 직접
+읽은 것이라 신뢰도가 높다). tsc 클린, 백엔드 전체 176개 테스트 통과(로직 변경 없음, 프론트
+전용 수정).
+
+### 후속 보완 2 (2026-08-02, 같은 날 추가 요청 — 개발 완료, 실기 검증 통과)
+
+사용자 피드백: "Record"할 때의 파형 출력(왼쪽=0s, 0에서 시작해 창이 채워짐)은 잘 됐는데,
+"Start"(모니터만)일 때는 아직 이 방식이 아니었다 — 동일하게 고칠 것.
+
+**원인**: x축 0초 기준(`recording_started_at`)을 실제 WAV 녹음이 시작될 때(`start()`/
+`start_widget_recording()`)만 설정하고 있었다. Start(모니터 전용, `start_monitor()`)는 이
+값을 전혀 설정하지 않아서, `xMin`이 `recordingStartedAtMs`로 클램프되지 않고 처음부터
+"지금 - xWindowMs"로 계산되어 버렸다 — 즉 Start를 누른 순간에도 창이 0에서부터 자라나지
+않고 바로 꽉 찬 폭으로 시작(대부분 빈 구간)했다.
+
+**수정**: 이 앵커 개념을 "녹음이 시작된 시각"에서 **"현재 스트림(Start든 Record든)이 열린
+시각"**으로 일반화했다.
+- 필드명을 `_recording_started_at` → `_stream_started_at`으로 변경(의미가 넓어졌으므로).
+- `_open_stream()`(monitor/recording/widget_record 셋 다 거치는 공통 경로)에서 스트림이
+  실제로 열릴 때 **항상** 이 값을 설정 — Start와 Record가 정확히 같은 코드 경로를 타게 됨.
+- CAN-SWDL의 SeedKey 패턴처럼 "이미 열린 스트림을 그 자리에서 업그레이드"하는 경로
+  (모니터→녹음, 모니터→위젯 녹음)는 그 순간 앵커를 새로 리셋 — Record를 누르면 그 순간부터
+  다시 0초 (모니터링 중이던 시간과 무관하게).
+- 이미 스트림이 열려 있을 때의 `start_monitor()` "piggyback" 경로(예: 테스트 러너 녹음이
+  이미 진행 중일 때 Start를 누른 경우)는 기존 앵커를 건드리지 않음 — 회귀 테스트로 고정.
+- `get_level()` 응답 필드명도 `recording_started_at` → `stream_started_at`으로 변경, 프론트
+  `AudioLevel` 타입과 `AudioMonitorWidget.tsx`도 동일하게 리네임(`recordingStartedAtMs` →
+  `streamStartedAtMs`).
+
+**검증**: pytest 6개 추가/수정(모니터 전용 스트림도 앵커가 설정됨, piggyback 시 앵커 유지,
+stop_monitor 시 앵커 초기화, 기존 rotate/stop 테스트 리네임) — 백엔드 전체 178개 테스트 통과.
+실기 검증: 실제 마이크로 Start를 누른 직후 `/api/audio/level`의 `stream_started_at`이 즉시
+채워짐을 확인했고, 그 직후 첫 `/api/audio/waveform` 요청들의 `from_ms`가 `stream_started_at *
+1000`과 소수점까지 정확히 일치(`1785625223104.1619`)하며 `to_ms`만 점점 커지는 것을
+확인했다 — Record 모드에서 이미 검증했던 것과 완전히 동일한 동작.
+
+### 후속 보완 3 (2026-08-02, 같은 날 추가 버그 리포트 — 수정 완료, 실기 검증 통과)
+
+사용자 리포트: "x 축 시간 값이 변하지 않고 항상 고정되어 있다."
+
+**원인**: 직전 수정("Start/Record 동일하게")에서 눈금 라벨 기준점을 `t - xMin`(현재 보이는
+창의 왼쪽 끝)으로 바꿨는데, 실시간 스크롤 구간에서는 `xMin`이 매 프레임 `t`와 같은 속도로
+같이 흘러가기 때문에 `t - xMin`이 **항상 상수**가 되어버렸다(예: 항상 "0ms, 667ms, 1.33s,
+2.00s"로 고정 — 실제로는 절대 변하지 않음). "왼쪽=0s"라는 요구사항을 잘못 해석해서, 매
+순간의 창 자체를 기준으로 라벨을 다시 정규화한 것이 문제였다.
+
+**수정**: 눈금 기준점을 다시 **고정된 앵커**(`streamStartedAtMs`, Start/Record가 시작된
+절대 시각)로 되돌렸다 — 단, 이번엔 백엔드가 Start/Record 양쪽에 이미 이 값을 채워주고
+있으므로(후속 보완 2에서 구현) 별도 분기 없이도 자동으로 "Start와 Record 동일" 요구사항이
+충족된다. 이 앵커가 고정되어 있으므로 `t - streamStartedAtMs`는 실제 벽시계 경과 시간과
+함께 계속 증가한다 — 스트림 시작 직후에는 (기존 클램프 덕분에) 왼쪽 끝이 정확히 0s이고,
+시간이 지나면서 좌우 라벨 모두 실제 경과초를 반영하며 계속 커진다.
+
+**검증**: 실제 마이크로 Start 실행 후 5초 간격으로 캔버스를 두 번 스크린샷 — 첫 번째
+"311.26s ~ 316.26s", 5초 뒤 "336.48s ~ 341.48s"로 라벨이 실제로 전진하는 것을 육안으로
+확인했다(더 이상 고정되지 않음). 추가로 `/api/audio/level`의 `stream_started_at`과 실제
+캡처된 `/api/audio/waveform` 요청들의 `from_ms`를 대조해 좌측 눈금 값이 경과초와 정확히
+일치하며 시간에 따라 증가함을 수치로도 재확인했다. tsc/build/lint 클린, 백엔드 전체 178개
+테스트 통과(이번 수정은 프론트 라벨 계산 로직만 변경, 백엔드/테스트 변경 없음).

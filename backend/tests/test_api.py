@@ -383,6 +383,49 @@ def test_audio_devices_and_selection_api():
         assert client.get("/api/audio/status").json()["device_index"] == 0
 
 
+def test_audio_monitor_endpoints():
+    # main.audio_service is a process-wide singleton shared by every test in
+    # this file, so device_index may already be set by
+    # test_audio_devices_and_selection_api above -- reset it to force the
+    # deterministic, hardware-free rejection path instead of actually trying
+    # to open a real device stream.
+    with make_client() as client:
+        main.audio_service.device_index = None
+
+        r = client.get("/api/audio/level")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["active"] is False
+        assert len(body["channels"]) == 2
+
+        r = client.post("/api/audio/monitor/start")
+        assert r.status_code == 200
+        assert r.json()["ok"] is False  # no device selected
+
+        r = client.post("/api/audio/monitor/stop")
+        assert r.status_code == 200
+        assert r.json()["ok"] is True  # nothing active -> no-op, not an error
+
+
+def test_audio_waveform_and_record_endpoints():
+    with make_client() as client:
+        main.audio_service.device_index = None
+
+        r = client.get("/api/audio/waveform?from_ms=0&to_ms=1000&max_points=50")
+        assert r.status_code == 200
+        body = r.json()
+        assert body["active"] is False
+        assert all(ch["points"] == [] for ch in body["channels"])
+
+        r = client.post("/api/audio/record/start")
+        assert r.status_code == 200
+        assert r.json()["ok"] is False  # no device selected
+
+        r = client.post("/api/audio/record/stop")
+        assert r.status_code == 200
+        assert r.json()["ok"] is False  # widget never started a recording
+
+
 def test_testrunner_golden_upload():
     with make_client() as client:
         r = client.post(
@@ -490,3 +533,84 @@ def test_log_start_stop_api():
         assert r.json()["recording"] is False
 
         client.post("/api/disconnect")
+
+
+HOOK_XML_FOR_API_TEST = """<?xml version="1.0" encoding="utf-8"?>
+<xfrm:root xmlns:xfrm="http://gitauto.com/xfrm/">
+  <xfrm:test-rule binaryPath="">
+    <xfrm:rule comment="VersionCheck">
+      <xfrm:diagnosticSessionControl diagnosticSessionType="0x81" confirmPositiveResponse="no" />
+    </xfrm:rule>
+  </xfrm:test-rule>
+</xfrm:root>
+"""
+
+
+def test_ota_tester_case_endpoints_wiring():
+    """HTTP-level smoke test for the new folder-driven case endpoints
+    (upload/enable/set_all_enabled/clear) -- verifies multipart + query-param
+    binding end-to-end, independent of the manager-level unit tests in
+    test_ota_tester_download_manager.py (which bypass HTTP/main.py entirely)."""
+    with make_client() as client:
+        client.post("/api/ota_tester/cases/clear")
+
+        r = client.post(
+            "/api/ota_tester/case/xml_upload"
+            "?case_id=hook-api-1&label=VersionCheck&kind=hook&order=0&enabled=true",
+            files={"file": ("hook.xml", HOOK_XML_FOR_API_TEST.encode("utf-8"))},
+        )
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["total_cases"] == 1
+        assert body["cases"][0]["id"] == "hook-api-1"
+        assert body["cases"][0]["total_steps"] == 1
+        assert body["cases"][0]["enabled"] is True
+
+        r = client.post("/api/ota_tester/case/enable", json={"case_id": "hook-api-1", "enabled": False})
+        assert r.status_code == 200
+        assert r.json()["cases"][0]["enabled"] is False
+
+        r = client.post("/api/ota_tester/cases/set_all_enabled", json={"enabled": True})
+        assert r.json()["cases"][0]["enabled"] is True
+
+        # Wrong extension is rejected
+        r = client.post(
+            "/api/ota_tester/case/xml_upload?case_id=bad&label=x&kind=hook&order=0",
+            files={"file": ("hook.json", b"{}")},
+        )
+        assert r.status_code == 400
+
+        assert client.get("/api/ota_tester/status").json()["total_cases"] == 1
+
+        r = client.post("/api/ota_tester/cases/clear")
+        assert r.json()["total_cases"] == 0
+
+
+def test_ota_tester_case_steps_and_selected_steps_endpoints():
+    with make_client() as client:
+        client.post("/api/ota_tester/cases/clear")
+        r = client.post(
+            "/api/ota_tester/case/xml_upload"
+            "?case_id=hook-api-2&label=VersionCheck&kind=hook&order=0&enabled=true",
+            files={"file": ("hook.xml", HOOK_XML_FOR_API_TEST.encode("utf-8"))},
+        )
+        assert r.status_code == 200
+
+        r = client.get("/api/ota_tester/case/steps", params={"case_id": "hook-api-2"})
+        assert r.status_code == 200
+        steps = r.json()
+        assert len(steps) == 1
+        assert steps[0]["service"] == "diagnosticSessionControl"
+        assert steps[0]["params"]["diagnosticSessionType"] == "0x81"
+
+        r = client.put(
+            "/api/ota_tester/case/selected_steps",
+            json={"case_id": "hook-api-2", "selected_steps": []},
+        )
+        assert r.status_code == 200
+        assert r.json()["cases"][0]["selected_steps"] == []
+
+        r = client.get("/api/ota_tester/case/steps", params={"case_id": "does-not-exist"})
+        assert r.status_code == 400
+
+        client.post("/api/ota_tester/cases/clear")

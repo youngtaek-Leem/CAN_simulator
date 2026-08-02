@@ -69,6 +69,14 @@ export const api = {
   txConfigure: (entries: unknown[]) => post('/api/tx/configure', { entries }),
   txStart: () => post('/api/tx/start'),
   txStop: () => post('/api/tx/stop'),
+  txSendOnce: (entry: {
+    arbitration_id: number;
+    data?: string;
+    is_extended?: boolean;
+    is_fd?: boolean;
+    bitrate_switch?: boolean;
+    key?: string;
+  }) => post('/api/tx/send_once', entry),
   txSignal: (message_name: string, values: Record<string, number | string>) =>
     post('/api/tx/signal', { message_name, values }),
   txAutoStop: (message_name?: string) =>
@@ -123,8 +131,21 @@ export const api = {
   // UDS Software Download (CAN-SWDL) — Multi-slot
   udsUploadXml: (file: File, slotIndex: number = 0) => upload<{ slot: number; status: import('../types').UdsDownloadStatus }>('/api/udswdl/xml/upload?slot_index=' + slotIndex, file),
   udsUploadBinary: (file: File, slotIndex: number = 0) => upload<{ slot: number; status: import('../types').UdsDownloadStatus }>('/api/udswdl/binary/upload?slot_index=' + slotIndex, file),
-  udsStart: (slotIndices: number[] = [0, 1, 2], selectedSteps: string[] = [], modifiedParams?: Record<string, Record<string, string>>, globalStminTx?: number) =>
-    post<any[]>('/api/udswdl/start', { slot_indices: slotIndices, selected_steps: selectedSteps, modified_params: modifiedParams, global_stmin_tx: globalStminTx }),
+  udsStart: (
+    slotIndices: number[] = [0, 1, 2],
+    selectedSteps?: (number[] | undefined),
+    modifiedParams?: Record<string, Record<string, string>>,
+    globalStminTx?: number,
+    perSlotSelectedSteps?: Record<number, (number[] | undefined)>,
+    perSlotModifiedParams?: Record<number, Record<string, Record<string, string>> | undefined>,
+  ) => post<any[]>('/api/udswdl/start', {
+    slot_indices: slotIndices,
+    selected_steps: selectedSteps,
+    modified_params: modifiedParams,
+    global_stmin_tx: globalStminTx,
+    per_slot_selected_steps: perSlotSelectedSteps,
+    per_slot_modified_params: perSlotModifiedParams,
+  }),
   udsStop: (slotIndex: number = 0) => post<import('../types').UdsDownloadStatus>('/api/udswdl/stop?slot_index=' + slotIndex),
   udsStatus: () => request<import('../types').UdsDownloadStatus[]>('/api/udswdl/status'),
   udsSteps: (slotIndex: number = 0) => request<import('../types').UdsStepInfo[]>('/api/udswdl/steps?slot_index=' + slotIndex),
@@ -134,12 +155,23 @@ export const api = {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ slot_index: slotIndex, step_service: stepService, params }),
     }),
+  seedkeyUpload: (file: File) => upload<import('../types').SeedKeyStatus>('/api/seedkey/upload', file),
+  seedkeyStatus: () => request<import('../types').SeedKeyStatus>('/api/seedkey/status'),
 
   powerConnect: () => post<import('../types').PowerStatus>('/api/power/connect'),
   powerDisconnect: () => post<import('../types').PowerStatus>('/api/power/disconnect'),
   audioDevices: () => request<import('../types').AudioStatus>('/api/audio/devices'),
   audioSelectDevice: (index: number) =>
     post<import('../types').AudioStatus>('/api/audio/device', { index }),
+  audioMonitorStart: () => post<{ ok: boolean; reason?: string }>('/api/audio/monitor/start'),
+  audioMonitorStop: () => post<{ ok: boolean; reason?: string }>('/api/audio/monitor/stop'),
+  audioRecordStart: () => post<{ ok: boolean; reason?: string; filename?: string }>('/api/audio/record/start'),
+  audioRecordStop: () => post<{ ok: boolean; reason?: string; filename?: string; frames?: number }>('/api/audio/record/stop'),
+  audioLevel: () => request<import('../types').AudioLevel>('/api/audio/level'),
+  audioWaveform: (fromMs: number, toMs: number, maxPoints: number) =>
+    request<import('../types').AudioWaveform>(
+      `/api/audio/waveform?from_ms=${fromMs}&to_ms=${toMs}&max_points=${maxPoints}`,
+    ),
 
   listLayouts: () => request<{ layouts: string[] }>('/api/layouts'),
   getLayout: (name: string) => request(`/api/layouts/${encodeURIComponent(name)}`),
@@ -148,10 +180,36 @@ export const api = {
   deleteLayout: (name: string) =>
     request(`/api/layouts/${encodeURIComponent(name)}`, { method: 'DELETE' }),
 
-  // OTA Tester
+  // OTA Tester (folder-driven: CLI/cli_config.json -> Testcases/<id>/*.json -> hook/testBlock XML+bin)
   otaTesterStatus: () => request<import('../types').OtaTesterStatus>('/api/ota_tester/status'),
-  otaTesterLoadXml: (file: File) => upload('/api/ota_tester/load_xml', file),
-  otaTesterStart: (request_id: number, response_id: number) =>
-    post('/api/ota_tester/start', { request_id, response_id }),
+  otaTesterCaseUploadXml: (
+    file: File, caseId: string, label: string, kind: string, order: number, enabled: boolean = true,
+  ) => {
+    const qs = new URLSearchParams({
+      case_id: caseId, label, kind, order: String(order), enabled: String(enabled),
+    });
+    return upload<import('../types').OtaTesterStatus>(`/api/ota_tester/case/xml_upload?${qs}`, file);
+  },
+  otaTesterCaseUploadBinary: (file: File, caseId: string) =>
+    upload<import('../types').OtaTesterStatus>(
+      `/api/ota_tester/case/binary_upload?${new URLSearchParams({ case_id: caseId })}`, file,
+    ),
+  otaTesterCaseEnable: (caseId: string, enabled: boolean) =>
+    post<import('../types').OtaTesterStatus>('/api/ota_tester/case/enable', { case_id: caseId, enabled }),
+  otaTesterCaseSteps: (caseId: string) =>
+    request<import('../types').OtaTesterStepInfo[]>(
+      `/api/ota_tester/case/steps?${new URLSearchParams({ case_id: caseId })}`,
+    ),
+  otaTesterSetSelectedSteps: (caseId: string, selectedSteps: number[] | null) =>
+    request<import('../types').OtaTesterStatus>('/api/ota_tester/case/selected_steps', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ case_id: caseId, selected_steps: selectedSteps }),
+    }),
+  otaTesterSetAllEnabled: (enabled: boolean) =>
+    post<import('../types').OtaTesterStatus>('/api/ota_tester/cases/set_all_enabled', { enabled }),
+  otaTesterClearCases: () => post<import('../types').OtaTesterStatus>('/api/ota_tester/cases/clear'),
+  otaTesterStart: (request_id: number, response_id: number, global_stmin_tx?: number) =>
+    post('/api/ota_tester/start', { request_id, response_id, global_stmin_tx }),
   otaTesterStop: () => post('/api/ota_tester/stop'),
 };

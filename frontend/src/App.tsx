@@ -8,7 +8,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   GridLayout,
-  useContainerWidth,
   type Compactor,
   type Layout,
   type LayoutItem,
@@ -50,6 +49,13 @@ const DEFAULT_CAN_CONFIG: CanConfig = {
   dataBitrate: 2_000_000,
 };
 
+// channel field's default value when switching interfaces in the CAN 설정 panel
+const DEFAULT_CHANNEL_BY_IFACE: Record<string, string> = {
+  virtual: 'ch0',
+  pcan: 'PCAN_USBBUS1',
+  vector: '1',
+};
+
 interface SavedLayout {
   pages: Page[];
   dbc?: SavedFile;
@@ -85,6 +91,12 @@ const freeCompactor: Compactor = {
   compact: (layout) => [...layout],
 };
 
+// Fixed pixel width for the grid so widget sizes stay constant regardless of
+// window/container size -- resizing the browser window no longer rescales
+// every widget. Narrower windows scroll (.canvas has overflow: auto) instead
+// of squeezing widgets down.
+const GRID_WIDTH = 1800;
+
 export default function App() {
   useCanVersion();
   const [dbc, setDbc] = useState<DbcSummary>({ loaded: false });
@@ -97,8 +109,7 @@ export default function App() {
   const [banner, setBanner] = useState<string | null>(null);
   const [activeId, setActiveId] = useState<string | null>(null);
   const [canConfig, setCanConfig] = useState<CanConfig>(DEFAULT_CAN_CONFIG);
-
-  const { width, containerRef, mounted } = useContainerWidth();
+  const widgetRefs = useRef<Record<string, HTMLDivElement | null>>({});
 
   const activePage = pages.find((p) => p.id === activePageId) ?? pages[0];
 
@@ -154,6 +165,9 @@ export default function App() {
         layout: [...p.layout, { i: id, x: (n % 6) * 2, y: n, ...meta.defaultSize }],
       };
     });
+    // otherwise the new widget can land visually behind whichever widget was
+    // last focused, which keeps its elevated z-index indefinitely
+    setActiveId(id);
   };
 
   const updateWidget = useCallback(
@@ -331,6 +345,13 @@ export default function App() {
     });
   };
 
+  // bring an existing widget to the front (same mechanism as clicking it)
+  // and scroll it into view -- used by the top bar's "위젯 리스트" picker.
+  const focusWidget = (id: string) => {
+    setActiveId(id);
+    widgetRefs.current[id]?.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'center' });
+  };
+
   // ---- page (tab) management -------------------------------------------------
 
   const addPage = () => {
@@ -365,6 +386,8 @@ export default function App() {
           setEditMode={setEditMode}
           addWidget={addWidget}
           arrange={arrange}
+          widgets={activePage.widgets}
+          onFocusWidget={focusWidget}
           layoutName={layoutName}
           setLayoutName={setLayoutName}
           layoutList={layoutList}
@@ -386,33 +409,32 @@ export default function App() {
           onRemove={removePage}
         />
         {banner && <div className="banner">{banner}</div>}
-        <div className="canvas" ref={containerRef}>
-          {mounted && (
-            <GridLayout
-              width={width}
-              layout={effectiveLayout}
-              gridConfig={{ cols: 24, rowHeight: 20, margin: [8, 8] }}
-              compactor={freeCompactor}
-              dragConfig={{ enabled: true, handle: '.drag-handle' }}
-              resizeConfig={{ enabled: true, handles: ['se', 'e', 's'] }}
-              onLayoutChange={(l: Layout) => updateActivePage((p) => ({ ...p, layout: [...l] }))}
-            >
-              {activePage.widgets.map((w) => {
-                const Comp = WIDGET_REGISTRY[w.type].component;
-                return (
-                  <div
-                    key={w.id}
-                    style={activeId === w.id ? { zIndex: 10 } : undefined}
-                    onMouseDownCapture={() => setActiveId(w.id)}
-                  >
-                    <WidgetFrame config={w}>
-                      <Comp config={w} />
-                    </WidgetFrame>
-                  </div>
-                );
-              })}
-            </GridLayout>
-          )}
+        <div className="canvas">
+          <GridLayout
+            width={GRID_WIDTH}
+            layout={effectiveLayout}
+            gridConfig={{ cols: 24, rowHeight: 20, margin: [8, 8] }}
+            compactor={freeCompactor}
+            dragConfig={{ enabled: true, handle: '.drag-handle' }}
+            resizeConfig={{ enabled: true, handles: ['se', 'e', 's'] }}
+            onLayoutChange={(l: Layout) => updateActivePage((p) => ({ ...p, layout: [...l] }))}
+          >
+            {activePage.widgets.map((w) => {
+              const Comp = WIDGET_REGISTRY[w.type].component;
+              return (
+                <div
+                  key={w.id}
+                  ref={(el) => { widgetRefs.current[w.id] = el; }}
+                  style={activeId === w.id ? { zIndex: 10 } : undefined}
+                  onMouseDownCapture={() => setActiveId(w.id)}
+                >
+                  <WidgetFrame config={w}>
+                    <Comp config={w} />
+                  </WidgetFrame>
+                </div>
+              );
+            })}
+          </GridLayout>
           {activePage.widgets.length === 0 && (
             <div className="empty-canvas">
               상단의 "+ 위젯 추가"에서 컴포넌트를 배치해 GUI를 구성하세요.
@@ -480,7 +502,15 @@ function PageTabs({ pages, activePageId, editMode, onSwitch, onAdd, onRename, on
                 ✎
               </button>
               {pages.length > 1 && (
-                <button className="icon-btn" title="페이지 삭제" onClick={() => onRemove(p.id)}>
+                <button
+                  className="icon-btn"
+                  title="페이지 삭제"
+                  onClick={() => {
+                    if (window.confirm(`"${p.name}" 페이지를 삭제할까요? 페이지 안의 모든 위젯이 함께 삭제됩니다.`)) {
+                      onRemove(p.id);
+                    }
+                  }}
+                >
                   ✕
                 </button>
               )}
@@ -506,6 +536,8 @@ interface TopBarProps {
   setEditMode: (v: boolean) => void;
   addWidget: (t: WidgetType) => void;
   arrange: (mode: 'tile' | 'cascade') => void;
+  widgets: WidgetConfig[];
+  onFocusWidget: (id: string) => void;
   layoutName: string;
   setLayoutName: (v: string) => void;
   layoutList: string[];
@@ -521,7 +553,12 @@ interface TopBarProps {
 function TopBar(props: TopBarProps) {
   useCanVersion();
   const { iface, channel, bitrate, fd, dataBitrate } = props.canConfig;
-  const setIface = (v: string) => props.setCanConfig({ ...props.canConfig, iface: v });
+  const setIface = (v: string) =>
+    props.setCanConfig({
+      ...props.canConfig,
+      iface: v,
+      channel: DEFAULT_CHANNEL_BY_IFACE[v] ?? props.canConfig.channel,
+    });
   const setChannel = (v: string) => props.setCanConfig({ ...props.canConfig, channel: v });
   const setBitrate = (v: number) => props.setCanConfig({ ...props.canConfig, bitrate: v });
   const setFd = (v: boolean) => props.setCanConfig({ ...props.canConfig, fd: v });
@@ -668,6 +705,21 @@ function TopBar(props: TopBarProps) {
           <option value="">자동 정렬…</option>
           <option value="tile">바둑판 정렬</option>
           <option value="cascade">계단식 정렬</option>
+        </select>
+        <select
+          value=""
+          disabled={props.widgets.length === 0}
+          title="현재 페이지에 열려있는 위젯을 선택하면 맨 앞으로 가져옵니다"
+          onChange={(e) => {
+            if (e.target.value) props.onFocusWidget(e.target.value);
+          }}
+        >
+          <option value="">위젯 리스트…</option>
+          {props.widgets.map((w) => (
+            <option key={w.id} value={w.id}>
+              {w.title}
+            </option>
+          ))}
         </select>
       </span>
 

@@ -27,8 +27,8 @@ from uds_core import (
     SECURITY_REQUEST_SEED, SECURITY_SEND_KEY,
     build_session_control,
     build_ecu_reset,
-    build_seed_request,
-    build_send_key,
+    build_security_access_request_seed,
+    build_security_access_send_key,
     build_routine_control,
     build_request_download,
     build_transfer_data,
@@ -57,10 +57,14 @@ STATE_ERROR = "ERROR"
 class UdsDownloadManager:
     """Manages UDS software download from XML procedure + BIN file."""
 
-    def __init__(self, can_manager, isotp_send_fn, isotp_receive_fn):
+    def __init__(self, can_manager, isotp_send_fn, isotp_receive_fn, seedkey_service=None):
         self._can = can_manager
         self._isotp_send = isotp_send_fn
         self._isotp_receive = isotp_receive_fn
+        # Real vendor SeedKey DLL (see seedkey_client.py). None (or not
+        # loaded) -> _execute_security_access() falls back to uds_core's
+        # dummy generate_key().
+        self._seedkey_service = seedkey_service
 
         self._lock = threading.RLock()
         self._state = STATE_IDLE
@@ -203,12 +207,18 @@ class UdsDownloadManager:
         except Exception as exc:
             raise RuntimeError(f"BIN 파일 로드 실패: {exc}")
 
-    def start(self, selected_steps: Optional[list[str]] = None, modified_params: Optional[dict[str, dict]] = None) -> dict:
+    def start(self, selected_steps: Optional[list[int]] = None, modified_params: Optional[dict[str, dict]] = None) -> dict:
         """Start the download procedure in a background thread.
 
         Args:
-            selected_steps: list of step service names to execute (empty/null = all)
+            selected_steps: list of step indices to execute (empty/null = all)
             modified_params: dict of step_name -> {param_key: new_value} overrides
+
+        The selected_steps and modified_params are captured as immutable copies
+        at ``start()`` time and passed into the worker thread so a subsequent
+        ``start()`` call (or a param mutation via ``set_param``) cannot perturb
+        this in-flight run -- the worker reads the captured copies, not the
+        live ``self._selected_steps``/``self._modified_params`` attributes.
         """
         with self._lock:
             if self._state not in (STATE_READY, STATE_COMPLETED, STATE_ERROR):
@@ -226,11 +236,22 @@ class UdsDownloadManager:
             self._progress = {"current_step": "", "total_blocks": 0, "current_block": 0, "percent": 0.0, "phase": ""}
             self._error_message = None
             self._running = True
-            self._selected_steps = selected_steps or []
-            self._modified_params = modified_params or {}
+            # Capture immutable copies for the worker thread. We also keep
+            # (overwriting) the live attributes for backward-compatible reads
+            # by other code paths (e.g. set_param), but the worker uses the
+            # captured locals -- never the live attributes -- so concurrent
+            # start()/set_param() calls cannot race the in-flight run.
+            captured_selected_steps = list(selected_steps) if selected_steps is not None else None
+            captured_modified_params = {svc: dict(params) for svc, params in (modified_params or {}).items()}
+            self._selected_steps = captured_selected_steps
+            self._modified_params = captured_modified_params
 
         self._stop_event.clear()
-        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread = threading.Thread(
+            target=self._run,
+            args=(captured_selected_steps, captured_modified_params),
+            daemon=True,
+        )
         self._thread.start()
         return self.status()
 
@@ -301,7 +322,12 @@ class UdsDownloadManager:
         return steps
 
     def set_param(self, step_service: str, param_key: str, param_value: str) -> None:
-        """Update a single parameter value for a step."""
+        """Update a single parameter value for a step.
+
+        Note: this mutates the live ``self._modified_params`` which is read by
+        the *next* ``start()`` call's capture. A currently running worker is
+        immune because it operates on its own captured copy (see ``start()``).
+        """
         proc = self._procedure
         if proc is None:
             raise RuntimeError("프로시저가 로드되지 않았습니다")
@@ -312,23 +338,38 @@ class UdsDownloadManager:
         modified_params[step_service][param_key] = param_value
         self._modified_params = modified_params
 
-    def _get_effective_params(self, step: UdsStep) -> dict:
-        """Get effective parameters for a step, merging modified overrides."""
+    def _get_effective_params(self, step: UdsStep, modified_params: Optional[dict[str, dict]] = None) -> dict:
+        """Get effective parameters for a step, merging modified overrides.
+
+        ``modified_params`` is the immutable copy captured at ``start()`` time
+        and threaded through the worker. When provided it takes precedence over
+        the live ``self._modified_params`` so the in-flight run is isolated
+        from concurrent ``start()``/``set_param()`` mutations.
+        """
         base = dict(step.params)
-        modified_params = getattr(self, '_modified_params', {})
-        if step.service in modified_params:
-            for k, v in modified_params[step.service].items():
+        mp = modified_params if modified_params is not None else getattr(self, '_modified_params', {})
+        if step.service in mp:
+            for k, v in mp[step.service].items():
                 if v:  # non-empty override → 사용자가 수정한 값
                     base[k] = v
                 # 빈 문자열이면 원래값 유지
         return base
 
-    def _is_step_selected(self, step: UdsStep) -> bool:
-        """Check if a step is selected (or if no selection -> all selected)."""
-        selected_steps = getattr(self, '_selected_steps', [])
-        if not selected_steps:
-            return True  # All steps selected by default
-        return step.service in selected_steps
+    def _is_step_selected(self, step_idx: int, step: UdsStep, selected_steps: Optional[list[int]] = None) -> bool:
+        """Check if a step is selected by its index.
+
+        - None: all steps selected (default)
+        - []: no steps selected
+        - [idx1, idx2, ...]: only selected step indices
+
+        ``selected_steps`` is the immutable copy captured at ``start()`` time.
+        When provided it takes precedence over ``self._selected_steps`` so a
+        concurrent ``start()`` cannot change the selection of a running worker.
+        """
+        ss = selected_steps if selected_steps is not None else getattr(self, '_selected_steps', None)
+        if ss is None:
+            return True  # No selection → all by default
+        return step_idx in ss
 
     # ---- Internal: state management -----------------------------------------
 
@@ -351,7 +392,7 @@ class UdsDownloadManager:
 
     def _get_fc_stmin(self) -> int:
         """Get the stmin value to use in Flow Control frames.
-        
+
         Priority:
         1. global_stmin_tx override (if set)
         2. XML parsed stmin_tx value
@@ -378,9 +419,17 @@ class UdsDownloadManager:
             is_ext = extended_id_attr
         fc_stmin = self._get_fc_stmin()
 
+        # Log raw CAN frame before sending
+        req_hex = request.hex(" ").upper() if isinstance(request, (bytes, bytearray)) else str(request)
+        self._log(
+            level="INFO",
+            service="CAN_TX",
+            msg=f"Tx CAN_ID=0x{tx_id:03X} DATA=[{req_hex}] ({label})"
+        )
+
         try:
             self._isotp_send(
-                tx_id, rx_id, request,
+                self._can, tx_id, rx_id, request,
                 is_extended_id=is_ext,
                 fc_timeout_s=timeout_s,
             )
@@ -389,7 +438,7 @@ class UdsDownloadManager:
 
         try:
             response = self._isotp_receive(
-                rx_id, tx_id,
+                self._can, rx_id, tx_id,
                 timeout_s=timeout_s,
                 is_extended_id=is_ext,
                 fc_stmin=fc_stmin,
@@ -422,88 +471,123 @@ class UdsDownloadManager:
 
     # ---- Internal: Main execution loop ---------------------------------------
 
-    def _run(self) -> None:
+    def _run(self, selected_steps: Optional[list[int]], modified_params: Optional[dict[str, dict]]) -> None:
+        # Thread entry point. selected_steps and modified_params are the
+        # immutable copies captured at start() time.
         try:
-            self._run_procedure()
+            self._run_procedure(selected_steps, modified_params)
         except Exception as exc:
             logger.exception("UDS download failed")
             self._log(level="ERROR", msg=f"다운로드 실패: {exc}")
             self._error_message = str(exc)
             self._set_state(STATE_ERROR)
             try:
-                self._run_error_recovery()
+                self._run_error_recovery(modified_params)
             except Exception:
                 logger.exception("Error recovery also failed")
         finally:
             with self._lock:
                 self._running = False
 
-    def _run_procedure(self) -> None:
+    def _run_procedure(self, selected_steps: Optional[list[int]], modified_params: Optional[dict[str, dict]]) -> None:
         proc = self._procedure
         if proc is None:
             raise RuntimeError("No procedure loaded")
 
-        self._log(msg="=== 다운로드 시작 ===")
-        self._log(msg=f"XML: {self._xml_path}, BIN: {self._binary_path} ({len(self._binary_data)} bytes)")
+        self._log(level="INFO", msg="========== 다운로드 시작 ==========")
+        self._log(level="INFO", msg=f"DEBUG: XML={self._xml_path}, BIN={self._binary_path} ({len(self._binary_data)} bytes)")
+        self._log(level="INFO", msg=f"DEBUG: selected_steps={selected_steps} (None=all, []=none, [int,...]=partial)")
 
-        # ---- Rule Preparation ----
-        self._set_state(STATE_RUNNING_PREP)
-        self._update_progress(phase="Preparation", current_step="Preparation phase")
-        self._log(msg="--- Preparation Phase ---")
-        self._run_steps(proc.processing_rule.preparation, "preparation")
+        # Build a flat list of all steps (consistent with get_procedure_steps)
+        all_phases = [
+            ("preparation", proc.processing_rule.preparation),
+            ("unit", proc.processing_rule.unit),
+            ("complete", proc.processing_rule.complete),
+            ("activate_prep", proc.activate_rule.preparation),
+            ("activate_unit", proc.activate_rule.unit),
+            ("activate_complete", proc.activate_rule.complete),
+        ]
 
-        # ---- Rule Unit (Download) ----
-        self._set_state(STATE_RUNNING_DOWNLOAD)
-        self._update_progress(phase="Download", current_step="Download phase")
-        self._log(msg="--- Download (Unit) Phase ---")
-        self._run_steps(proc.processing_rule.unit, "unit")
+        # Debug: dump full step list with global indices
+        global_idx = 0
+        step_index_map = []
+        for phase_name, phase_steps in all_phases:
+            for step in phase_steps:
+                selected = self._is_step_selected(global_idx, step, selected_steps)
+                step_index_map.append(f"  [{global_idx}] {phase_name}: {step.service} → {'✓ SELECTED' if selected else '✗ SKIP'}")
+                global_idx += 1
+        self._log(level="INFO", msg="DEBUG: 전체 스텝 리스트:")
+        for line in step_index_map:
+            self._log(level="INFO", msg=line)
 
-        # ---- Rule Complete ----
-        self._set_state(STATE_RUNNING_ACTIVATE)
-        self._update_progress(phase="Complete", current_step="Complete phase")
-        self._log(msg="--- Complete Phase ---")
-        self._run_steps(proc.processing_rule.complete, "complete")
-
-        # ---- Activate Rule ----
-        self._log(msg="--- Activate Phase ---")
-        self._run_steps(proc.activate_rule.preparation, "activate_prep")
-        self._run_steps(proc.activate_rule.unit, "activate_unit")
-        self._run_steps(proc.activate_rule.complete, "activate_complete")
+        # Execute phases with global indexing
+        global_step_idx = 0
+        for phase_name, phase_steps in all_phases:
+            self._log(level="INFO", msg=f"DEBUG: --- {phase_name} Phase (시작 idx={global_step_idx}) ---")
+            global_step_idx = self._run_steps(
+                phase_steps, phase_name, global_step_idx, selected_steps, modified_params
+            )
 
         self._set_state(STATE_COMPLETED)
         self._update_progress(current_step="Complete", percent=100.0)
-        self._log(msg="=== 다운로드 완료 ===")
+        self._log(level="INFO", msg="===== 다운로드 완료 =====")
 
-    def _run_steps(self, steps: list[UdsStep], phase_name: str) -> None:
-        """Execute a list of UDS steps, skipping unselected ones."""
+    def _run_steps(self, steps: list[UdsStep], phase_name: str, start_idx: int = 0,
+                   selected_steps: Optional[list[int]] = None,
+                   modified_params: Optional[dict[str, dict]] = None,
+                   force_all: bool = False) -> int:
+        """Execute a list of UDS steps, skipping unselected ones.
+
+        Args:
+            steps: list of UDS steps for this phase
+            phase_name: phase label for logging
+            start_idx: global step index offset for this phase
+            selected_steps: immutable captured selection (None=all, []=none)
+            modified_params: immutable captured param overrides (or None)
+            force_all: run every step regardless of selected_steps. Needed for
+                error-rule recovery, whose own step list is indexed from 0
+                independently of the main procedure's -- reusing the main
+                run's index-based selected_steps there would match unrelated
+                steps by coincidental index overlap (selected_steps=None
+                would fall back to the live self._selected_steps instead of
+                meaning "all", so it can't be used to express this either).
+
+        Returns:
+            next global step index after this phase
+        """
+        step_idx = start_idx
         for step in steps:
             if self._stop_event.is_set():
                 raise RuntimeError("사용자에 의해 중단됨")
-            if not self._is_step_selected(step):
-                self._log(level="INFO", msg=f"스킵 (선택 안됨): {step.service}")
+            selected = True if force_all else self._is_step_selected(step_idx, step, selected_steps)
+            self._log(level="INFO", msg=f"DEBUG: step[{step_idx}] {step.service} → {'SELECTED' if selected else 'SKIPPED'}")
+            if not selected:
+                step_idx += 1
                 continue
-            self._execute_step(step, phase_name)
+            self._execute_step(step, phase_name, modified_params)
+            step_idx += 1
+        return step_idx
 
-    def _execute_step(self, step: UdsStep, phase_name: str) -> None:
+    def _execute_step(self, step: UdsStep, phase_name: str, modified_params: Optional[dict[str, dict]] = None) -> None:
         """Execute a single UDS step."""
-        params = self._get_effective_params(step)
+        params = self._get_effective_params(step, modified_params)
         svc = step.service
         self._update_progress(current_step=f"{svc} ({phase_name})")
-        self._log(service=svc, msg=f"실행: {svc} {params}")
+        self._log(level="INFO", service=svc, msg=f"실행: {svc} {params}")
 
         if svc == "startCommunication":
-            self._log(msg=f"CAN 통신 초기화 (STmin=0x{self._procedure.stmin_tx:02X}, "
+            self._log(level="INFO", msg=f"CAN 통신 초기화 (STmin=0x{self._procedure.stmin_tx:02X}, "
                           f"P2={self._procedure.p2_can_server_max}ms)")
 
         elif svc == "stopCommunication":
-            self._log(msg="CAN 통신 종료")
+            self._log(level="INFO", msg="CAN 통신 종료")
 
         elif svc == "diagnosticSessionControl":
             # Determine which session type(s) to send.
-            # The frontend may pass _selectedSessionType_* override to choose
+            # The frontend may pass _sessionType_* override to choose
             # between diagnosticSessionType and background_diagnosticSessionType
             # when both are present in the XML.
-            step_params = self._get_effective_params(step)
+            step_params = self._get_effective_params(step, modified_params)
 
             # Collect all keys matching _sessionType_*
             selected_type_keys = {k for k in step_params if k.startswith("_sessionType_")}
@@ -526,34 +610,34 @@ class UdsDownloadManager:
                     request = build_session_control(stype)
                     label = f"SessionControl(0x{stype:02X})"
                     self._uds_request_with_retry(request, timeout_s, label)
-                    self._log(msg=f"세션 전환 성공: 0x{stype:02X}")
+                    self._log(level="INFO", msg=f"세션 전환 성공: 0x{stype:02X}")
                 # If selected_session_type's value is empty, fall through to default
                 else:
                     session_type = int(session_type_str, 16) if isinstance(session_type_str, str) else session_type_str
                     request = build_session_control(session_type)
                     self._uds_request_with_retry(request, timeout_s, f"SessionControl(0x{session_type:02X})")
-                    self._log(msg=f"세션 전환 성공: 0x{session_type:02X}")
+                    self._log(level="INFO", msg=f"세션 전환 성공: 0x{session_type:02X}")
 
                     if bg_session_type_str:
                         bg_session = int(bg_session_type_str, 16) if isinstance(bg_session_type_str, str) else bg_session_type_str
                         request2 = build_session_control(bg_session)
                         self._uds_request_with_retry(request2, timeout_s, f"SessionControl(Background=0x{bg_session:02X})")
-                        self._log(msg=f"백그라운드 세션 전환 성공: 0x{bg_session:02X}")
+                        self._log(level="INFO", msg=f"백그라운드 세션 전환 성공: 0x{bg_session:02X}")
             else:
                 # No explicit selection — send both if both exist (existing behavior)
                 session_type = int(session_type_str, 16) if isinstance(session_type_str, str) else session_type_str
                 request = build_session_control(session_type)
                 self._uds_request_with_retry(request, timeout_s, f"SessionControl(0x{session_type:02X})")
-                self._log(msg=f"세션 전환 성공: 0x{session_type:02X}")
+                self._log(level="INFO", msg=f"세션 전환 성공: 0x{session_type:02X}")
 
                 if bg_session_type_str:
                     bg_session = int(bg_session_type_str, 16) if isinstance(bg_session_type_str, str) else bg_session_type_str
                     request2 = build_session_control(bg_session)
                     self._uds_request_with_retry(request2, timeout_s, f"SessionControl(Background=0x{bg_session:02X})")
-                    self._log(msg=f"백그라운드 세션 전환 성공: 0x{bg_session:02X}")
+                    self._log(level="INFO", msg=f"백그라운드 세션 전환 성공: 0x{bg_session:02X}")
 
         elif svc == "securityAccess":
-            self._execute_security_access(step, phase_name)
+            self._execute_security_access(step, phase_name, modified_params)
 
         elif svc == "routineControl":
             ctrl_type_str = params.get("routineControlType", "0x01")
@@ -569,13 +653,13 @@ class UdsDownloadManager:
             self._uds_request_with_retry(request, timeout_s,
                                           f"RoutineControl(0x{routine_id:04X}, type={ctrl_type})",
                                           max_retries=10, retry_delay_s=0.5)
-            self._log(msg=f"루틴 제어 성공: ID=0x{routine_id:04X}, type={ctrl_type}")
+            self._log(level="INFO", msg=f"루틴 제어 성공: ID=0x{routine_id:04X}, type={ctrl_type}")
 
         elif svc == "requestDownload":
-            self._execute_request_download(step)
+            self._execute_request_download(step, modified_params)
 
         elif svc == "transferData":
-            self._execute_transfer_data(step)
+            self._execute_transfer_data(step, modified_params)
 
         elif svc == "requestTransferExit":
             self._execute_transfer_exit(step)
@@ -593,26 +677,26 @@ class UdsDownloadManager:
                 self._uds_request(request, timeout_s, f"ECUReset(0x{reset_mode:02X})")
             except UdsError:
                 pass
-            self._log(msg=f"ECU 리셋 명령 전송: mode=0x{reset_mode:02X}")
+            self._log(level="INFO", msg=f"ECU 리셋 명령 전송: mode=0x{reset_mode:02X}")
 
         elif svc == "controlDTCSetting":
-            self._log(msg=f"DTC 설정 (로깅): {params}")
+            self._log(level="INFO", msg=f"DTC 설정 (로깅): {params}")
 
         elif svc == "communicationControl":
-            self._log(msg=f"통신 제어 (로깅): {params}")
+            self._log(level="INFO", msg=f"통신 제어 (로깅): {params}")
 
         elif svc == "readDataByIdentifier":
-            self._log(msg=f"DID 읽기 (로깅): {params}")
+            self._log(level="INFO", msg=f"DID 읽기 (로깅): {params}")
 
-        elif svc == "complete\u0110ecision":
-            self._log(msg=f"완료 판정 (향후): {params}")
+        elif svc == "completeDecision":
+            self._log(level="INFO", msg=f"완료 판정 (향후): {params}")
 
         else:
             self._log(level="WARN", msg=f"알 수 없는 서비스: {svc}")
 
-    def _execute_security_access(self, step: UdsStep, phase_name: str) -> None:
+    def _execute_security_access(self, step: UdsStep, phase_name: str, modified_params: Optional[dict[str, dict]] = None) -> None:
         """Execute SecurityAccess sequence: RequestSeed → GenerateKey → SendKey."""
-        params = self._get_effective_params(step)
+        params = self._get_effective_params(step, modified_params)
         algorithm_str = params.get("algorithm", "0x00")
         algorithm = int(algorithm_str, 16) if isinstance(algorithm_str, str) else algorithm_str
 
@@ -628,22 +712,33 @@ class UdsDownloadManager:
 
         timeout_s = self._procedure.p2_can_server_max / 1000.0 if self._procedure else 0.05
 
-        request = build_seed_request(access_mode_seed)
-        self._log(msg=f"Seed 요청 (algorithm=0x{algorithm:02X}, mode=0x{access_mode_seed:02X})")
+        request = build_security_access_request_seed(access_mode_seed)
+        self._log(level="INFO", msg=f"Seed 요청 (algorithm=0x{algorithm:02X}, mode=0x{access_mode_seed:02X})")
         result = self._uds_request_with_retry(request, timeout_s, "RequestSeed")
-        seed = bytes(result["data"][1:])
-        self._log(msg=f"Seed 수신: {seed.hex()} ({len(seed)} bytes)")
 
-        key = generate_key(seed)
-        self._log(msg=f"키 생성 완료: {key.hex()}")
+        # Positive response layout is SID(1) | securityAccessType(1) | seed(N) --
+        # skip both header bytes, not just the SID, or the seed passed to
+        # generate_key() is off by one (starts with the echoed access type).
+        seed = bytes(result["data"][2:])
+        self._log(level="INFO", msg=f"Seed 수신: {seed.hex()} ({len(seed)} bytes)")
 
-        request = build_send_key(access_mode_key, key)
+        if self._seedkey_service is not None and self._seedkey_service.loaded:
+            try:
+                key = self._seedkey_service.generate_key(seed)
+            except Exception as exc:
+                raise UdsError(f"SeedKey 키 생성 실패: {exc}")
+            self._log(level="INFO", msg=f"키 생성 완료 (SeedKey DLL): {key.hex()}")
+        else:
+            key = generate_key(seed)
+            self._log(level="WARN", msg=f"[더미 키] SeedKey DLL이 로드되지 않아 더미 키를 사용합니다: {key.hex()}")
+
+        request = build_security_access_send_key(key, access_mode_key)
         self._uds_request_with_retry(request, timeout_s, "SendKey")
-        self._log(msg="보안 액세스 성공 (Key accepted)")
+        self._log(level="INFO", msg="보안 액세스 성공 (Key accepted)")
 
-    def _execute_request_download(self, step: UdsStep) -> None:
+    def _execute_request_download(self, step: UdsStep, modified_params: Optional[dict[str, dict]] = None) -> None:
         """Execute RequestDownload."""
-        params = self._get_effective_params(step)
+        params = self._get_effective_params(step, modified_params)
         dfi = int(params.get("dataFormatIdentifier", "0x00"), 16)
         alfi = int(params.get("addressAndLengthFormatIdentifier", "0x44"), 16)
         mem_addr = int(params.get("memoryAddress", "0x00000000"), 16)
@@ -658,9 +753,12 @@ class UdsDownloadManager:
             max_retries=10, retry_delay_s=0.5,
         )
 
-        download_info = parse_request_download_response(
-            bytes([0x74, alfi]) + result["data"]
-        )
+        # result["data"] is already the full positive response (SID 0x74 +
+        # the ECU's own lengthFormatIdentifier byte + maxNumberOfBlockLength);
+        # it must be passed through as-is, not prefixed with a second
+        # synthetic 0x74/alfi header, or parsing reads the wrong bytes as the
+        # length field.
+        download_info = parse_request_download_response(result["data"])
         max_block_length = download_info.get("max_length", 0)
 
         xml_block_str = params.get("maxNumberOfBlockLength", "0x0C02")
@@ -673,19 +771,19 @@ class UdsDownloadManager:
 
         effective_block_size = min(block_size, 4095)
 
-        self._log(msg=f"RequestDownload 성공: blockSize={effective_block_size}")
+        self._log(level="INFO", msg=f"RequestDownload 성공: blockSize={effective_block_size}")
 
         self._download_block_size = effective_block_size
         self._download_memory_addr = mem_addr
         self._download_memory_size = mem_size
 
-    def _execute_transfer_data(self, step: UdsStep) -> None:
+    def _execute_transfer_data(self, step: UdsStep, modified_params: Optional[dict[str, dict]] = None) -> None:
         """Execute TransferData: send binary in blocks."""
         binary = self._binary_data
         if binary is None:
             raise RuntimeError("BIN 데이터가 없습니다")
 
-        params = self._get_effective_params(step)
+        params = self._get_effective_params(step, modified_params)
         block_size = getattr(self, '_download_block_size', 0x0C02)
 
         seek_addr_str = params.get("seekAddress", "0x0200")
@@ -701,7 +799,7 @@ class UdsDownloadManager:
             self._log(level="WARN", msg=f"seekAddress(0x{seek_addr:X}) + writeSize(0x{write_size:X})가 BIN 파일 크기를 초과하여 endOffset을 {len(binary)}로 제한")
 
         if write_size == 0:
-            self._log(msg=f"TransferData 건너뜀: writeSize=0")
+            self._log(level="INFO", msg="TransferData 건너뜀: writeSize=0")
             self._update_progress(total_blocks=0, current_block=0, percent=100.0)
             return
 
@@ -715,7 +813,7 @@ class UdsDownloadManager:
         seq_num = 1
         offset = seek_addr
 
-        self._log(msg=f"TransferData 시작: seekAddress=0x{seek_addr:X}, writeSize=0x{write_size:X}, "
+        self._log(level="INFO", msg=f"TransferData 시작: seekAddress=0x{seek_addr:X}, writeSize=0x{write_size:X}, "
                       f"endOffset=0x{end_offset:X}, blockSize={block_size}, totalBlocks={total_blocks}")
 
         while offset < end_offset:
@@ -746,9 +844,9 @@ class UdsDownloadManager:
             )
 
             if seq_num % 10 == 0:
-                self._log(msg=f"전송 진도: 0x{offset:X}/0x{end_offset:X} bytes ({pct:.1f}%)")
+                self._log(level="INFO", msg=f"전송 진도: 0x{offset:X}/0x{end_offset:X} bytes ({pct:.1f}%)")
 
-        self._log(msg=f"TransferData 완료: {total_blocks} blocks, {total_size} bytes (0x{seek_addr:X} → 0x{end_offset:X})")
+        self._log(level="INFO", msg=f"TransferData 완료: {total_blocks} blocks, {total_size} bytes (0x{seek_addr:X} → 0x{end_offset:X})")
 
     def _execute_transfer_exit(self, step: UdsStep) -> None:
         """Execute RequestTransferExit."""
@@ -756,23 +854,35 @@ class UdsDownloadManager:
         timeout_s = max(self._procedure.p2_star_can_server_max / 1000.0, 2.0) if self._procedure else 2.0
 
         self._uds_request_with_retry(request, timeout_s, "RequestTransferExit", max_retries=10, retry_delay_s=0.5)
-        self._log(msg="전송 종료 성공")
+        self._log(level="INFO", msg="전송 종료 성공")
 
-    def _run_error_recovery(self) -> None:
-        """Execute error-rule if present."""
+    def _run_error_recovery(self, modified_params: Optional[dict[str, dict]] = None) -> None:
+        """Execute error-rule if present, running every one of its steps.
+
+        The step checklist in the UI only ever lists the main processing/
+        activate rules (see get_procedure_steps()) -- there is no checkbox
+        for error-rule steps, so there is no user selection to apply here.
+        Previously this reused the main run's ``selected_steps``, but that
+        index list is sized for the (much longer) main procedure's flat step
+        list; against the error-rule's own, separate, shorter step list the
+        same numbers pointed at unrelated steps by coincidence, so recovery
+        would run the wrong services (or skip real ones) depending on what
+        had been checked for the main run.
+        """
         proc = self._procedure
         if proc is None:
             return
         if not proc.error_rule.preparation and not proc.error_rule.unit and not proc.error_rule.complete:
-            self._log(msg="에러 복구 규칙 없음")
+            self._log(level="INFO", msg="에러 복구 규칙 없음")
             return
 
-        self._log(msg="--- 에러 복구 절차 실행 ---")
+        self._log(level="INFO", msg="--- 에러 복구 절차 실행 ---")
         try:
-            self._run_steps(proc.error_rule.preparation, "error_prep")
-            self._run_steps(proc.error_rule.unit, "error_unit")
-            self._run_steps(proc.error_rule.complete, "error_complete")
-            self._log(msg="에러 복구 완료")
+            idx = 0
+            idx = self._run_steps(proc.error_rule.preparation, "error_prep", idx, None, modified_params, force_all=True)
+            idx = self._run_steps(proc.error_rule.unit, "error_unit", idx, None, modified_params, force_all=True)
+            idx = self._run_steps(proc.error_rule.complete, "error_complete", idx, None, modified_params, force_all=True)
+            self._log(level="INFO", msg="에러 복구 완료")
         except Exception as exc:
             self._log(level="ERROR", msg=f"에러 복구 실패: {exc}")
 
@@ -785,15 +895,15 @@ class MultiUdsDownloadManager:
 
     NUM_SLOTS = 3
 
-    def __init__(self, can_manager, isotp_send_fn, isotp_receive_fn):
+    def __init__(self, can_manager, isotp_send_fn, isotp_receive_fn, seedkey_service=None):
         self._managers = [
-            UdsDownloadManager(can_manager, isotp_send_fn, isotp_receive_fn)
+            UdsDownloadManager(can_manager, isotp_send_fn, isotp_receive_fn, seedkey_service)
             for _ in range(self.NUM_SLOTS)
         ]
 
     def get_manager(self, slot_index: int) -> UdsDownloadManager:
         if not 0 <= slot_index < self.NUM_SLOTS:
-            raise ValueError(f"공대 슬롯 index: {slot_index}")
+            raise ValueError(f"잘못된 슬롯 index: {slot_index}")
         return self._managers[slot_index]
 
     def all_status(self) -> list[dict]:
@@ -805,19 +915,76 @@ class MultiUdsDownloadManager:
         return [m.get_procedure_steps() for m in self._managers]
 
     def start_all(self, slot_indices: list[int],
-                   selected_steps: Optional[list[str]] = None,
+                   per_slot_selected_steps: Optional[dict[int, Optional[list[int]]]] = None,
+                   per_slot_modified_params: Optional[dict[int, Optional[dict[str, dict]]]] = None,
+                   selected_steps: Optional[list[int]] = None,
                    modified_params: Optional[dict[str, dict]] = None) -> list[dict]:
-        """Start specified slots in sequence (0→1→2)."""
+        """Start specified slots sequentially: slot N+1 only starts once slot N
+        has stopped running (COMPLETED/ERROR), never in parallel.
+
+        Per-slot overrides (``per_slot_selected_steps``/``per_slot_modified_params``)
+        take precedence over the shared ``selected_steps``/``modified_params``.
+        Missing per-slot entries fall back to the shared value, and a missing
+        shared value means ``None`` (use XML defaults / no overrides).
+
+        The first slot is started synchronously so its immediate result
+        (success or failure) is reflected in the returned list, matching the
+        previous single-call behavior. Remaining slots are started one at a
+        time from a background orchestrator thread as their turn comes --
+        each waits for the slot ahead of it to stop running before starting.
+        A failure to start one of them is written to that slot's own event
+        log (visible in the TextDisplay) and stops the rest of the sequence,
+        the same "stop on first failure" behavior as before.
+        """
+        ordered = sorted(slot_indices)
         results: list[dict] = []
-        # Sort by slot index
-        for idx in sorted(slot_indices):
-            mgr = self._managers[idx]
-            try:
-                result = mgr.start(selected_steps=selected_steps, modified_params=modified_params)
-                results.append({"slot_index": idx, "status": result, "success": True})
-            except Exception as exc:
-                results.append({"slot_index": idx, "error": str(exc), "success": False})
-                break
+        if not ordered:
+            return results
+
+        def resolve(idx: int) -> tuple[Optional[list[int]], Optional[dict[str, dict]]]:
+            slot_selected = (
+                per_slot_selected_steps.get(idx) if per_slot_selected_steps is not None else None
+            )
+            if slot_selected is None:
+                slot_selected = selected_steps
+            slot_params = (
+                per_slot_modified_params.get(idx) if per_slot_modified_params is not None else None
+            )
+            if slot_params is None:
+                slot_params = modified_params
+            return slot_selected, slot_params
+
+        first_idx = ordered[0]
+        first_mgr = self._managers[first_idx]
+        first_selected, first_params = resolve(first_idx)
+        try:
+            result = first_mgr.start(selected_steps=first_selected, modified_params=first_params)
+            results.append({"slot_index": first_idx, "status": result, "success": True})
+        except Exception as exc:
+            results.append({"slot_index": first_idx, "error": str(exc), "success": False})
+            return results
+
+        remaining = ordered[1:]
+        for idx in remaining:
+            results.append({"slot_index": idx, "status": "queued", "success": None})
+
+        if remaining:
+            def _run_sequence() -> None:
+                prev_mgr = first_mgr
+                for idx in remaining:
+                    while prev_mgr.running:
+                        time.sleep(0.05)
+                    mgr = self._managers[idx]
+                    slot_selected, slot_params = resolve(idx)
+                    try:
+                        mgr.start(selected_steps=slot_selected, modified_params=slot_params)
+                    except Exception as exc:
+                        mgr._log(level="ERROR", msg=f"슬롯 시작 실패로 순차 실행 중단: {exc}")
+                        return
+                    prev_mgr = mgr
+
+            threading.Thread(target=_run_sequence, daemon=True).start()
+
         return results
 
     def stop_all(self, slot_indices: list[int]) -> list[dict]:

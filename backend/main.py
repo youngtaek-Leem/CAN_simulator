@@ -23,12 +23,13 @@ from pydantic import BaseModel
 
 import timer_util
 import isotp_service
-from audio_service import AudioService
+from audio_service import AudioService, generate_monitor_filename
 from can_manager import CanManager
 from dbc_service import DbcService
 from log_service import LogService
 from power_supply_service import PowerSupplyService
 from replay_service import ReplayService
+from seedkey_client import SeedKeyService
 from test_runner_service import TestRunnerService
 from tx_scheduler import TxScheduler
 from uds_download_manager import MultiUdsDownloadManager
@@ -39,9 +40,14 @@ class _SuppressNoisyAccessLog(logging.Filter):
     """The frontend polls /api/testrunner/status every 400ms while the app
     is open (see canStore.ts / TestRunnerBox.tsx), which floods the terminal
     with access-log lines that carry no diagnostic value. Drop just that
-    path; every other request still logs normally."""
+    path; every other request still logs normally.
 
-    _SUPPRESSED_PATHS = ("/api/testrunner/status",)
+    /api/audio/level is the same story: AudioMonitorWidget polls it every
+    100ms continuously (not just while its own Start is active) so it can
+    reflect a recording started elsewhere -- see AudioMonitorWidget.tsx.
+    /api/audio/waveform is polled at a similar cadence per zoomable chart."""
+
+    _SUPPRESSED_PATHS = ("/api/testrunner/status", "/api/audio/level", "/api/audio/waveform")
 
     def filter(self, record: logging.LogRecord) -> bool:
         path = record.args[2] if record.args and len(record.args) > 2 else ""
@@ -78,16 +84,20 @@ test_runner_service = TestRunnerService(
     audio_service=audio_service,
 )
 
+seedkey_service = SeedKeyService()
+
 uds_download_manager = MultiUdsDownloadManager(
     can_manager,
     isotp_service.send,
     isotp_service.receive,
+    seedkey_service,
 )
 
 ota_tester_manager = OtaTesterDownloadManager(
     can_manager,
     isotp_service.send,
     isotp_service.receive,
+    seedkey_service,
 )
 
 settings = {"ws_flush_ms": 30}
@@ -120,7 +130,13 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="CAN Evaluation Backend", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    # Wildcard would let any webpage the operator's browser has open make
+    # cross-origin requests to this server (CAN TX, firmware upload, etc. --
+    # a "drive-by localhost" attack). The only legitimate cross-origin caller
+    # is the Vite dev server (see .claude/launch.json's --port --strictPort);
+    # the production build is served from this same app (see FRONTEND_DIST
+    # mount below), so it never needs CORS at all.
+    allow_origins=["http://localhost:5174", "http://127.0.0.1:5174"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -383,6 +399,35 @@ def tx_stop():
     return tx_scheduler.stop()
 
 
+class TxSendOnceRequest(BaseModel):
+    arbitration_id: int
+    data: str = ""
+    is_extended: bool = False
+    is_fd: bool = False
+    bitrate_switch: bool = False
+    key: Optional[str] = None
+
+
+@app.post("/api/tx/send_once")
+def tx_send_once(req: TxSendOnceRequest):
+    """TX box row's Send button, and live edits to a row's data field while
+    the list is running -- a one-shot send independent of that row's
+    periodic flag."""
+    _require_running()
+    if not can_manager.connected:
+        raise HTTPException(status_code=400, detail="CAN bus is not connected")
+    try:
+        data = bytes.fromhex(req.data) if req.data else b""
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"잘못된 hex 데이터: {exc}")
+    try:
+        return tx_scheduler.send_once(
+            req.arbitration_id, data, req.is_extended, req.is_fd, req.bitrate_switch, req.key,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
 class SignalSendRequest(BaseModel):
     message_name: str
     values: dict[str, float | int | str]
@@ -612,12 +657,21 @@ def testrunner_script_raw():
     return test_runner_service.script_raw() or {"loaded": False}
 
 
+def _safe_upload_filename(filename: Optional[str], default: str) -> str:
+    """Basename only, with any path/traversal components stripped -- an
+    UploadFile's filename is attacker-controlled input, and joining it
+    directly onto an upload directory (as every handler below used to do)
+    lets a crafted name like '../../etc/x' write outside that directory."""
+    name = Path(filename or "").name
+    return name or default
+
+
 @app.post("/api/testrunner/logfile/upload")
 async def testrunner_upload_logfile(file: UploadFile):
     suffix = Path(file.filename or "").suffix.lower()
     if suffix not in (".blf", ".asc"):
         raise HTTPException(status_code=400, detail="only .blf / .asc are supported")
-    dest = TESTRUNNER_LOG_DIR / (file.filename or f"log{suffix}")
+    dest = TESTRUNNER_LOG_DIR / _safe_upload_filename(file.filename, f"log{suffix}")
     dest.write_bytes(await file.read())
     return {"saved": dest.name}
 
@@ -697,7 +751,7 @@ async def udswdl_xml_upload(file: UploadFile, slot_index: int = 0):
     suffix = Path(file.filename or "").suffix.lower()
     if suffix != ".xml":
         raise HTTPException(status_code=400, detail="only .xml files are supported")
-    dest = UDS_UPLOAD_DIR / (file.filename or "procedure.xml")
+    dest = UDS_UPLOAD_DIR / _safe_upload_filename(file.filename, "procedure.xml")
     content = await file.read()
     dest.write_bytes(content)
     try:
@@ -718,7 +772,7 @@ async def udswdl_binary_upload(file: UploadFile, slot_index: int = 0):
     suffix = Path(file.filename or "").suffix.lower()
     if suffix != ".bin":
         raise HTTPException(status_code=400, detail="only .bin files are supported")
-    dest = UDS_UPLOAD_DIR / (file.filename or "firmware.bin")
+    dest = UDS_UPLOAD_DIR / _safe_upload_filename(file.filename, "firmware.bin")
     content = await file.read()
     dest.write_bytes(content)
     try:
@@ -729,16 +783,55 @@ async def udswdl_binary_upload(file: UploadFile, slot_index: int = 0):
         raise HTTPException(status_code=400, detail=f"BIN 파일 로드 오류: {exc}")
 
 
+SEEDKEY_UPLOAD_DIR = BASE_DIR / "uploads" / "seedkey"
+
+
+@app.post("/api/seedkey/upload")
+async def seedkey_upload(file: UploadFile):
+    """Load the real HKMC Advanced SeedKey DLL (Windows only) so
+    SecurityAccess computes a real key instead of uds_core's dummy zero key."""
+    SEEDKEY_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    suffix = Path(file.filename or "").suffix.lower()
+    if suffix != ".dll":
+        raise HTTPException(status_code=400, detail="only .dll files are supported")
+    filename = _safe_upload_filename(file.filename, "seedkey.dll")
+    dest = SEEDKEY_UPLOAD_DIR / filename
+    content = await file.read()
+    dest.write_bytes(content)
+    try:
+        return seedkey_service.load(str(dest), filename)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"SeedKey DLL 로드 오류: {exc}")
+
+
+@app.get("/api/seedkey/status")
+def seedkey_status():
+    return seedkey_service.status()
+
+
 class UdsSwdlStartRequest(BaseModel):
     slot_indices: list[int] = [0, 1, 2]
-    selected_steps: list[str] = []
-    modified_params: dict[str, dict[str, str]] = {}
+    # Single-array form (applies the same selection/overrides to every slot in
+    # slot_indices). Kept for backward compat / single-slot callers.
+    selected_steps: Optional[list[int]] = None
+    modified_params: Optional[dict[str, dict[str, str]]] = None
+    # Per-slot form (preferred when starting multiple slots at once): a map of
+    # slot_index -> selection / params. Each per-slot entry takes precedence
+    # over the shared fields above; a missing entry falls back to the shared
+    # field, and a missing shared field means None (XML defaults / no overrides).
+    per_slot_selected_steps: Optional[dict[int, Optional[list[int]]]] = None
+    per_slot_modified_params: Optional[dict[int, Optional[dict[str, dict[str, str]]]]] = None
     global_stmin_tx: Optional[int] = None
 
 
 @app.post("/api/udswdl/start")
 def udswdl_start(req: UdsSwdlStartRequest):
-    """Start UDS software download on specified slots (sequential)."""
+    """Start UDS software download on specified slots (sequential).
+
+    Each slot receives its own selected_steps / modified_params snapshot,
+    threaded into that slot's worker thread as an immutable copy (see
+    UdsDownloadManager.start) so concurrent slot starts cannot race.
+    """
     if not can_manager.connected:
         raise HTTPException(status_code=400, detail="CAN bus is not connected")
     try:
@@ -749,8 +842,10 @@ def udswdl_start(req: UdsSwdlStartRequest):
                 mgr._global_stmin_tx = req.global_stmin_tx
         return uds_download_manager.start_all(
             req.slot_indices,
-            selected_steps=req.selected_steps or None,
-            modified_params=req.modified_params or None,
+            per_slot_selected_steps=req.per_slot_selected_steps,
+            per_slot_modified_params=req.per_slot_modified_params,
+            selected_steps=req.selected_steps,  # fallback when per-slot omitted
+            modified_params=req.modified_params,  # fallback when per-slot omitted
         )
     except (RuntimeError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc))
@@ -834,12 +929,52 @@ def audio_status():
     return audio_service.info()
 
 
+@app.post("/api/audio/monitor/start")
+def audio_monitor_start():
+    """오디오 신호 모니터 위젯의 Start -- 이미 테스트 러너 녹음이 진행 중이면
+    새 스트림을 열지 않고 그 스트림의 레벨 데이터를 그대로 사용한다."""
+    return audio_service.start_monitor()
+
+
+@app.post("/api/audio/monitor/stop")
+def audio_monitor_stop():
+    """녹음이 소유한 스트림이면 끄지 않고 그대로 둔다 (모니터의 Stop이 실수로
+    진행 중인 테스트 녹음을 끊지 않도록)."""
+    return audio_service.stop_monitor()
+
+
+@app.get("/api/audio/level")
+def audio_level():
+    return audio_service.get_level()
+
+
+@app.get("/api/audio/waveform")
+def audio_waveform(from_ms: float, to_ms: float, max_points: int = 300):
+    """오디오 신호 모니터의 확대/축소 가능한 파형 차트가 폴링하는 엔드포인트.
+    from_ms/to_ms는 JS Date.now() 단위 (epoch ms) -- 같은 로컬 머신이라 프론트/
+    백엔드 시계가 그대로 맞아떨어진다."""
+    return audio_service.get_waveform(from_ms, to_ms, max_points)
+
+
+@app.post("/api/audio/record/start")
+def audio_record_start():
+    """오디오 신호 모니터 위젯의 Record 버튼 -- 파형을 보여주는 동시에 WAV로
+    저장한다. 파일명은 타임스탬프로 자동 생성되고, 30분마다 새 파일로 이어서
+    저장된다 (audio_service.py의 백그라운드 로테이션 타이머 참고)."""
+    return audio_service.start_widget_recording(generate_monitor_filename())
+
+
+@app.post("/api/audio/record/stop")
+def audio_record_stop():
+    return audio_service.stop_widget_recording()
+
+
 @app.post("/api/testrunner/golden/upload")
 async def testrunner_upload_golden(file: UploadFile):
     suffix = Path(file.filename or "").suffix.lower()
     if suffix != ".wav":
         raise HTTPException(status_code=400, detail="only .wav is supported")
-    dest = TESTRUNNER_GOLDEN_DIR / (file.filename or "golden.wav")
+    dest = TESTRUNNER_GOLDEN_DIR / _safe_upload_filename(file.filename, "golden.wav")
     dest.write_bytes(await file.read())
     return {"saved": dest.name}
 
@@ -895,25 +1030,106 @@ def ota_tester_status():
     return ota_tester_manager.status()
 
 
-@app.post("/api/ota_tester/load_xml")
-async def ota_tester_load_xml(file: UploadFile):
-    """Load a GITAuto test-rule XML file."""
+@app.post("/api/ota_tester/case/xml_upload")
+async def ota_tester_case_xml_upload(
+    file: UploadFile, case_id: str, label: str, kind: str = "testBlock",
+    order: int = 0, enabled: bool = True,
+):
+    """Load one hook/testBlock's test-rule XML as a case in the run sequence.
+
+    ``case_id`` is the hook/testBlock's own id (a stable key so re-uploading
+    the same case, e.g. after re-selecting the folder, replaces it in place
+    rather than appending a duplicate); ``order`` fixes its position in the
+    sequence (hooks before testBlocks, then each list's own JSON order)."""
     OTA_TESTER_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     suffix = Path(file.filename or "").suffix.lower()
     if suffix != ".xml":
         raise HTTPException(status_code=400, detail="only .xml files are supported")
-    dest = OTA_TESTER_UPLOAD_DIR / (file.filename or "test_rule.xml")
+    dest = OTA_TESTER_UPLOAD_DIR / _safe_upload_filename(f"{case_id}_{file.filename}", "test_rule.xml")
     content = await file.read()
     dest.write_bytes(content)
     try:
-        return ota_tester_manager.load_xml(str(dest), file.filename)
+        return ota_tester_manager.add_case(case_id, label, kind, str(dest), order, enabled)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"XML 파싱 오류: {exc}")
+
+
+@app.post("/api/ota_tester/case/binary_upload")
+async def ota_tester_case_binary_upload(file: UploadFile, case_id: str):
+    """Load the firmware binary referenced by one case's binaryPath."""
+    OTA_TESTER_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    suffix = Path(file.filename or "").suffix.lower()
+    if suffix != ".bin":
+        raise HTTPException(status_code=400, detail="only .bin files are supported")
+    dest = OTA_TESTER_UPLOAD_DIR / _safe_upload_filename(f"{case_id}_{file.filename}", "firmware.bin")
+    content = await file.read()
+    dest.write_bytes(content)
+    try:
+        return ota_tester_manager.set_case_binary(case_id, str(dest))
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"BIN 파일 로드 오류: {exc}")
+
+
+class OtaTesterCaseEnableRequest(BaseModel):
+    case_id: str
+    enabled: bool
+
+
+@app.post("/api/ota_tester/case/enable")
+def ota_tester_case_enable(req: OtaTesterCaseEnableRequest):
+    """Toggle whether a single case is included in the next run."""
+    try:
+        return ota_tester_manager.set_case_enabled(req.case_id, req.enabled)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+class OtaTesterSetAllEnabledRequest(BaseModel):
+    enabled: bool
+
+
+@app.post("/api/ota_tester/cases/set_all_enabled")
+def ota_tester_set_all_enabled(req: OtaTesterSetAllEnabledRequest):
+    """전체 선택 / 전체 해제."""
+    return ota_tester_manager.set_all_enabled(req.enabled)
+
+
+@app.post("/api/ota_tester/cases/clear")
+def ota_tester_cases_clear():
+    """Reset the case list before loading a (possibly different) folder."""
+    try:
+        return ota_tester_manager.clear_cases()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.get("/api/ota_tester/case/steps")
+def ota_tester_case_steps(case_id: str):
+    """Per-command checklist data for one case (mirrors /api/udswdl/steps)."""
+    try:
+        return ota_tester_manager.get_case_steps(case_id)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+class OtaTesterCaseSelectedStepsRequest(BaseModel):
+    case_id: str
+    selected_steps: Optional[list[int]] = None
+
+
+@app.put("/api/ota_tester/case/selected_steps")
+def ota_tester_case_selected_steps(req: OtaTesterCaseSelectedStepsRequest):
+    """Set which step indices within a case run (None = all, [] = none)."""
+    try:
+        return ota_tester_manager.set_case_selected_steps(req.case_id, req.selected_steps)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
 
 class OtaTesterStartRequest(BaseModel):
     request_id: int
     response_id: int
+    global_stmin_tx: Optional[int] = None
 
 
 @app.post("/api/ota_tester/start")
@@ -923,6 +1139,8 @@ def ota_tester_start(req: OtaTesterStartRequest):
     if not can_manager.connected:
         raise HTTPException(status_code=400, detail="CAN bus is not connected")
     try:
+        if req.global_stmin_tx is not None:
+            ota_tester_manager._global_stmin_tx = req.global_stmin_tx
         return ota_tester_manager.start(req.request_id, req.response_id)
     except (RuntimeError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc))

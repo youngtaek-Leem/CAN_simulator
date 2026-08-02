@@ -23,19 +23,19 @@ interface SignalRow {
 }
 
 /** "수신 CAN 신호 표시창": a flat, per-signal (not per-message) live table of
- * the AMP TX signals -- i.e. signals belonging to messages the simulator
- * itself transmits (groupedMessages' "tx" set, relative to the configured
- * RX node / real DUT), showing only currently-valid values. Unlike
- * CanMessageDisplay, there's no message-row-with-expandable-detail: each row
- * IS a signal. */
+ * the AMP TX signals -- i.e. signals belonging to messages the real DUT
+ * (AMP) sends, which the simulator receives (groupedMessages' "rx" set,
+ * relative to the configured RX node), showing only currently-valid values.
+ * Unlike CanMessageDisplay, there's no message-row-with-expandable-detail:
+ * each row IS a signal. */
 export function RxSignalDisplay({ config: _config }: { config: WidgetConfig }) {
   useCanVersion();
   const { dbc } = useApp();
-  const txNames = new Set(groupedMessages(dbc, canStore.getRxNode()).tx.map((m) => m.name));
+  const ampTxNames = new Set(groupedMessages(dbc, canStore.getRxNode()).rx.map((m) => m.name));
 
   const rows: SignalRow[] = [];
   for (const f of canStore.frames.values()) {
-    if (!f.decoded || !txNames.has(f.decoded.name)) continue;
+    if (!f.decoded || !ampTxNames.has(f.decoded.name)) continue;
     const message = dbc.messages?.find((m) => m.name === f.decoded!.name);
     for (const signalName of f.decoded.valid_signals) {
       rows.push({

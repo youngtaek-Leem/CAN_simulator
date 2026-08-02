@@ -20,6 +20,7 @@ import { FunctionButtonWidget } from './FunctionButtonWidget';
 import { RandomButtonWidget } from './RandomButtonWidget';
 import UdsSwdlWidget from './UdsSwdlWidget';
 import OtaTesterWidget from './OtaTesterWidget';
+import { AudioMonitorWidget } from './AudioMonitorWidget';
 
 interface WidgetMeta {
   label: string;
@@ -36,22 +37,22 @@ export const WIDGET_REGISTRY: Record<WidgetType, WidgetMeta> = {
   checkbox: {
     label: '체크박스',
     component: CheckboxWidget,
-    defaultSize: { w: 2, h: 1, minW: 1, minH: 1 },
+    defaultSize: { w: 2, h: 2, minW: 1, minH: 1 },
   },
   dropdown: {
     label: '드롭다운',
     component: DropdownWidget,
-    defaultSize: { w: 3, h: 1, minW: 2, minH: 1 },
+    defaultSize: { w: 2, h: 2, minW: 2, minH: 1 },
   },
   slider: {
     label: '슬라이더',
     component: SliderWidget,
-    defaultSize: { w: 4, h: 2, minW: 2, minH: 1 },
+    defaultSize: { w: 4, h: 3, minW: 2, minH: 1 },
   },
   manualValue: {
     label: '입력 박스',
     component: ManualValueWidget,
-    defaultSize: { w: 4, h: 2, minW: 2, minH: 1 },
+    defaultSize: { w: 2, h: 3, minW: 2, minH: 1 },
   },
   functionButton: {
     label: 'Function 버튼',
@@ -66,86 +67,91 @@ export const WIDGET_REGISTRY: Record<WidgetType, WidgetMeta> = {
   multiButton: {
     label: '멀티 버튼',
     component: MultiButtonWidget,
-    defaultSize: { w: 6, h: 4, minW: 1, minH: 2 },
+    defaultSize: { w: 6, h: 5, minW: 1, minH: 2 },
   },
   multiCheckbox: {
     label: '멀티 체크박스',
     component: MultiCheckboxWidget,
-    defaultSize: { w: 6, h: 4, minW: 1, minH: 2 },
+    defaultSize: { w: 6, h: 5, minW: 1, minH: 2 },
   },
   multiDropdown: {
     label: '멀티 드롭다운',
     component: MultiDropdownWidget,
-    defaultSize: { w: 6, h: 4, minW: 1, minH: 2 },
+    defaultSize: { w: 6, h: 5, minW: 1, minH: 2 },
   },
   multiSlider: {
     label: '멀티 슬라이더',
     component: MultiSliderWidget,
-    defaultSize: { w: 6, h: 4, minW: 1, minH: 2 },
+    defaultSize: { w: 8, h: 5, minW: 1, minH: 2 },
   },
   multiManualValue: {
     label: '멀티 입력 박스',
     component: MultiManualValueWidget,
-    defaultSize: { w: 6, h: 4, minW: 1, minH: 2 },
+    defaultSize: { w: 6, h: 5, minW: 1, minH: 2 },
   },
   functionMultiButton: {
     label: '멀티 Function 버튼',
     component: FunctionMultiButtonWidget,
-    defaultSize: { w: 6, h: 4, minW: 1, minH: 2 },
+    defaultSize: { w: 6, h: 5, minW: 1, minH: 2 },
   },
   randomMultiButton: {
     label: '멀티 Random 버튼',
     component: RandomMultiButtonWidget,
-    defaultSize: { w: 6, h: 4, minW: 1, minH: 2 },
+    defaultSize: { w: 6, h: 5, minW: 1, minH: 2 },
   },
   txBox: {
     label: 'CAN 메시지 전송[IG]',
     component: TxBox,
-    defaultSize: { w: 7, h: 5, minW: 4, minH: 3 },
+    defaultSize: { w: 7, h: 10, minW: 4, minH: 3 },
   },
   isotpTx: {
     label: 'ISO-TP 메시지 전송[UDS]',
     component: IsoTpBox,
-    defaultSize: { w: 6, h: 4, minW: 1, minH: 2 },
+    defaultSize: { w: 7, h: 7, minW: 1, minH: 2 },
   },
   replayBox: {
     label: 'CAN 로그 Replay',
     component: ReplayBox,
-    defaultSize: { w: 5, h: 3, minW: 3, minH: 2 },
+    defaultSize: { w: 8, h: 7, minW: 3, minH: 2 },
   },
   testRunner: {
     label: '테스트 Sequence 실행기',
     component: TestRunnerBox,
-    defaultSize: { w: 8, h: 6, minW: 4, minH: 3 },
+    defaultSize: { w: 11, h: 12, minW: 4, minH: 3 },
   },
   signalGraph: {
     label: 'CAN 신호 그래프',
     component: GraphWidget,
-    defaultSize: { w: 7, h: 5, minW: 1, minH: 2 },
+    defaultSize: { w: 9, h: 6, minW: 1, minH: 2 },
   },
   canMessageDisplay: {
     label: 'CAN 메시지 표시창',
     component: CanMessageDisplay,
-    defaultSize: { w: 6, h: 5, minW: 3, minH: 2 },
+    defaultSize: { w: 8, h: 11, minW: 3, minH: 2 },
   },
   rxSignalDisplay: {
     label: '수신 CAN 신호 표시창',
     component: RxSignalDisplay,
-    defaultSize: { w: 6, h: 5, minW: 3, minH: 2 },
+    defaultSize: { w: 8, h: 11, minW: 3, minH: 2 },
   },
   textDisplay: {
     label: '텍스트 표시창',
     component: TextDisplay,
-    defaultSize: { w: 5, h: 4, minW: 2, minH: 2 },
+    defaultSize: { w: 8, h: 11, minW: 2, minH: 2 },
   },
   udsSwdl: {
     label: 'CAN-SWDL',
     component: UdsSwdlWidget,
-    defaultSize: { w: 8, h: 6, minW: 4, minH: 3 },
+    defaultSize: { w: 12, h: 20, minW: 4, minH: 3 },
   },
   otaTester: {
     label: 'OTA Tester',
     component: OtaTesterWidget,
-    defaultSize: { w: 8, h: 6, minW: 4, minH: 3 },
+    defaultSize: { w: 13, h: 20, minW: 4, minH: 3 },
+  },
+  audioMonitor: {
+    label: '오디오 신호 모니터',
+    component: AudioMonitorWidget,
+    defaultSize: { w: 11, h: 12, minW: 3, minH: 2 },
   },
 };

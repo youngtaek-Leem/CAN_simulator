@@ -47,6 +47,15 @@ backend/layouts/default3.json
 Automation/
 Automation.zip
 
+# Real OEM security-access DLL (HKMC_AdvancedSeedKey), its known-answer
+# seed/key test vectors, and OEM ECU firmware binaries dropped into
+# reference/ for local testing -- these were previously committed and
+# leaked to the public GitHub remote, then purged from history via
+# git-filter-repo. Never track these again.
+reference/**/*.dll
+reference/**/*.bin
+reference/ask_client.py
+
 # OS
 .DS_Store
 

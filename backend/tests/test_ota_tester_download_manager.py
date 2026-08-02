@@ -1,0 +1,506 @@
+"""Tests for ota_tester_download_manager.py.
+
+Covers: PDU param-name correctness (regression for the diagnosticSessionType /
+dataIdentifier / routineControlOptionRecord attribute-name bugs), the pure
+seekAddress/writeSize chunking helper, and full multi-case sequential runs
+driven through fake isotp send/receive functions (no real CAN bus needed --
+the manager takes these as injected callables).
+"""
+
+from __future__ import annotations
+
+import textwrap
+import threading
+
+import pytest
+
+from ota_tester_download_manager import OtaTesterDownloadManager, iter_transfer_chunks
+
+
+# ---- _build_pdu param-name regression tests --------------------------------
+
+
+def _mgr():
+    can = type("FakeCan", (), {"notifier": object()})()
+    return OtaTesterDownloadManager(can, lambda *a, **kw: None, lambda *a, **kw: b"")
+
+
+def test_build_pdu_diagnostic_session_control_uses_diagnosticSessionType():
+    mgr = _mgr()
+    pdu = mgr._build_pdu("diagnosticSessionControl", {"diagnosticSessionType": "0x02"}, [])
+    assert pdu == bytearray([0x10, 0x02])
+
+
+def test_build_pdu_read_data_by_identifier_uses_dataIdentifier():
+    mgr = _mgr()
+    pdu = mgr._build_pdu("readDataByIdentifier", {"dataIdentifier": "0xF187"}, [])
+    assert pdu == bytearray([0x22, 0xF1, 0x87])
+
+
+def test_build_pdu_routine_control_includes_option_record():
+    mgr = _mgr()
+    pdu = mgr._build_pdu(
+        "routineControl",
+        {
+            "routineControlType": "0x01",
+            "routineIdentifier": "0xFF00",
+            "routineControlOptionRecord": "0xF1B1",
+        },
+        [],
+    )
+    assert pdu == bytearray([0x31, 0x01, 0xFF, 0x00, 0xF1, 0xB1])
+
+
+def test_build_pdu_ecu_reset():
+    mgr = _mgr()
+    pdu = mgr._build_pdu("ecuReset", {"resetMode": "0x01"}, [])
+    assert pdu == bytearray([0x11, 0x01])
+
+
+# ---- iter_transfer_chunks (pure) -------------------------------------------
+
+
+def test_iter_transfer_chunks_covers_full_range_in_order():
+    binary = bytes(range(256)) * 4  # 1024 bytes
+    seek_addr = 0x200
+    write_size = 0x10
+    block_size = 4
+
+    chunks = list(iter_transfer_chunks(binary, seek_addr, write_size, block_size))
+
+    assert len(chunks) == 4
+    offsets = [c[1] for c in chunks]
+    assert offsets == [0x200, 0x204, 0x208, 0x20C]
+    seq_nums = [c[0] for c in chunks]
+    assert seq_nums == [1, 2, 3, 4]
+    reconstructed = b"".join(c[2] for c in chunks)
+    assert reconstructed == binary[seek_addr:seek_addr + write_size]
+
+
+def test_iter_transfer_chunks_clamps_to_binary_end():
+    binary = bytes(20)
+    chunks = list(iter_transfer_chunks(binary, seek_addr=10, write_size=100, block_size=4))
+    total = sum(len(c[2]) for c in chunks)
+    assert total == 10  # only 10 bytes remain after offset 10
+
+
+def test_iter_transfer_chunks_wraps_sequence_number_at_255():
+    binary = bytes(2000)
+    chunks = list(iter_transfer_chunks(binary, seek_addr=0, write_size=2000, block_size=1))
+    assert chunks[254][0] == 255
+    assert chunks[255][0] == 0  # 256 & 0xFF
+
+
+# ---- Full sequential run against a fake ECU --------------------------------
+
+
+HOOK_XML = """<?xml version="1.0" encoding="utf-8"?>
+<xfrm:root xmlns:xfrm="http://gitauto.com/xfrm/">
+  <xfrm:test-rule binaryPath="">
+    <xfrm:rule comment="VersionCheck">
+      <xfrm:diagnosticSessionControl diagnosticSessionType="0x81" confirmPositiveResponse="no" />
+      <xfrm:readDataByIdentifier dataIdentifier="0xF187" confirmPositiveResponse="yes" />
+    </xfrm:rule>
+  </xfrm:test-rule>
+</xfrm:root>
+"""
+
+TESTBLOCK_XML = """<?xml version="1.0" encoding="utf-8"?>
+<xfrm:root xmlns:xfrm="http://gitauto.com/xfrm/">
+  <xfrm:test-rule binaryPath="fw/RomData01.bin">
+    <xfrm:rule funcTP="false">
+      <xfrm:diagnosticSessionControl diagnosticSessionType="0x02" confirmPositiveResponse="yes" />
+      <xfrm:securityAccess confirmPositiveResponse="yes" />
+      <xfrm:routineControl routineControlType="0x01" routineIdentifier="0xFF00" routineControlOptionRecord="0xF1B1" confirmPositiveResponse="yes" />
+      <xfrm:requestDownload dataFormatIdentifier="0x0A" addressAndLengthFormatIdentifier="0x44" memoryAddress="0x00000000" memorySize="0x00000010" confirmPositiveResponse="yes" />
+      <xfrm:transferData maxNumberOfBlockLength="0x08" seekAddress="0x0200" writeSize="0x00000010" confirmPositiveResponse="yes" />
+      <xfrm:requestTransferExit confirmPositiveResponse="yes" />
+    </xfrm:rule>
+  </xfrm:test-rule>
+</xfrm:root>
+"""
+
+
+class FakeEcu:
+    """Fake ECU: inspects the outgoing PDU's SID and returns a canned
+    positive response, tracking every request it received."""
+
+    def __init__(self, ecu_max_block_length: int = 4, fail_sid: int | None = None):
+        self.sent: list[bytes] = []
+        self.ecu_max_block_length = ecu_max_block_length
+        self.fail_sid = fail_sid
+        self._lock = threading.Lock()
+
+    def send(self, can, tx_id, rx_id, data, is_extended_id=False, fc_timeout_s=1.0, **kw):
+        with self._lock:
+            self.sent.append(bytes(data))
+        return {"sent": True}
+
+    def receive(self, can, rx_id, tx_id, timeout_s=1.0, is_extended_id=False, fc_stmin=0, **kw) -> bytes:
+        last = self.sent[-1]
+        sid = last[0]
+        if self.fail_sid is not None and sid == self.fail_sid:
+            return bytes([0x7F, sid, 0x22])  # conditionsNotCorrect
+
+        if sid == 0x10:
+            return bytes([0x50, last[1]])
+        if sid == 0x22:
+            return bytes([0x62, last[1], last[2], 0x01, 0x02])
+        if sid == 0x27:
+            if last[1] == 0x01:  # request seed
+                return bytes([0x67, 0x01]) + bytes([0x11] * 8)
+            return bytes([0x67, 0x02])  # send key
+        if sid == 0x31:
+            return bytes([0x71]) + last[1:4]
+        if sid == 0x34:
+            # lengthFormatIdentifier nibble=1 (one length byte) -> max_length=ecu_max_block_length
+            return bytes([0x74, 0x11, self.ecu_max_block_length])
+        if sid == 0x36:
+            return bytes([0x76, last[1]])
+        if sid == 0x37:
+            return bytes([0x77])
+        return bytes([0x7F, sid, 0x11])  # serviceNotSupported (unrecognized)
+
+
+def _write_xml(tmp_path, name: str, content: str) -> str:
+    p = tmp_path / name
+    p.write_text(content, encoding="utf-8")
+    return str(p)
+
+
+def _write_bin(tmp_path, name: str, size: int) -> str:
+    p = tmp_path / name
+    p.write_bytes(bytes(range(256)) * (size // 256 + 1))
+    return str(p)
+
+
+def test_full_sequence_runs_hook_then_testblock_with_binary_transfer(tmp_path):
+    ecu = FakeEcu(ecu_max_block_length=4)
+    can = type("FakeCan", (), {"notifier": object()})()
+    mgr = OtaTesterDownloadManager(can, ecu.send, ecu.receive)
+
+    hook_path = _write_xml(tmp_path, "hook.xml", HOOK_XML)
+    block_path = _write_xml(tmp_path, "block.xml", TESTBLOCK_XML)
+    bin_path = _write_bin(tmp_path, "fw.bin", 1024)
+
+    mgr.add_case("hook-1", "VersionCheck", "hook", hook_path, order=0)
+    mgr.add_case("block-1", "Unit1", "testBlock", block_path, order=1)
+    mgr.set_case_binary("block-1", bin_path)
+
+    mgr.start(request_id=0x18DA00F1, response_id=0x18DA00F1)
+    mgr._thread.join(timeout=5.0)
+
+    status = mgr.status()
+    assert status["state"] == "COMPLETED", status["events"]
+    assert not status["running"]
+
+    # transferData: writeSize=0x10 clamped to ecu_max_block_length=4 -> 4 chunks of 4 bytes
+    transfer_pdus = [b for b in ecu.sent if b[0] == 0x36]
+    assert len(transfer_pdus) == 4
+    assert [p[1] for p in transfer_pdus] == [1, 2, 3, 4]
+    with open(bin_path, "rb") as f:
+        binary = f.read()
+    expected = binary[0x200:0x210]
+    reconstructed = b"".join(p[2:] for p in transfer_pdus)
+    assert reconstructed == expected
+
+
+def test_disabled_case_is_skipped_entirely(tmp_path):
+    ecu = FakeEcu()
+    can = type("FakeCan", (), {"notifier": object()})()
+    mgr = OtaTesterDownloadManager(can, ecu.send, ecu.receive)
+
+    hook_path = _write_xml(tmp_path, "hook.xml", HOOK_XML)
+    mgr.add_case("hook-1", "VersionCheck", "hook", hook_path, order=0, enabled=False)
+
+    block_path = _write_xml(tmp_path, "block.xml", TESTBLOCK_XML)
+    bin_path = _write_bin(tmp_path, "fw.bin", 1024)
+    mgr.add_case("block-1", "Unit1", "testBlock", block_path, order=1)
+    mgr.set_case_binary("block-1", bin_path)
+
+    mgr.start(request_id=0x18DA00F1, response_id=0x18DA00F1)
+    mgr._thread.join(timeout=5.0)
+
+    # Only the enabled testBlock's steps should have produced traffic --
+    # the disabled hook's readDataByIdentifier (SID 0x22) must never appear.
+    assert not any(b[0] == 0x22 for b in ecu.sent)
+    assert mgr.status()["state"] == "COMPLETED"
+
+
+def test_real_negative_response_is_detected_not_ignored(tmp_path):
+    """Regression test for the removed TX-ONLY-TEST-MODE hardcoding: a real
+    negative response from the fake ECU must actually fail the run."""
+    ecu = FakeEcu(fail_sid=0x31)  # routineControl always fails
+    can = type("FakeCan", (), {"notifier": object()})()
+    mgr = OtaTesterDownloadManager(can, ecu.send, ecu.receive)
+
+    block_path = _write_xml(tmp_path, "block.xml", TESTBLOCK_XML)
+    bin_path = _write_bin(tmp_path, "fw.bin", 1024)
+    mgr.add_case("block-1", "Unit1", "testBlock", block_path, order=0)
+    mgr.set_case_binary("block-1", bin_path)
+
+    mgr.start(request_id=0x18DA00F1, response_id=0x18DA00F1)
+    mgr._thread.join(timeout=5.0)
+
+    status = mgr.status()
+    assert status["state"] == "ERROR"
+    assert status["error"]
+    # transferData (after the failing routineControl) must never have run
+    assert not any(b[0] == 0x36 for b in ecu.sent)
+
+
+def test_confirm_positive_response_no_treats_negative_as_success(tmp_path):
+    """HOOK_XML's diagnosticSessionControl has confirmPositiveResponse="no";
+    the fake ECU's default 0x50 positive reply would normally be fine, but
+    verify the negative-is-expected path explicitly."""
+    ecu = FakeEcu(fail_sid=0x10)  # diagnosticSessionControl returns negative
+    can = type("FakeCan", (), {"notifier": object()})()
+    mgr = OtaTesterDownloadManager(can, ecu.send, ecu.receive)
+
+    hook_path = _write_xml(tmp_path, "hook.xml", HOOK_XML)
+    mgr.add_case("hook-1", "VersionCheck", "hook", hook_path, order=0)
+
+    mgr.start(request_id=0x18DA00F1, response_id=0x18DA00F1)
+    mgr._thread.join(timeout=5.0)
+
+    status = mgr.status()
+    # diagnosticSessionControl's negative was expected (confirmPositiveResponse=no);
+    # readDataByIdentifier (confirmPositiveResponse=yes) still gets a real positive
+    # reply from the fake ECU, so the whole case should complete.
+    assert status["state"] == "COMPLETED", status["events"]
+
+
+def test_set_all_enabled_and_clear_cases(tmp_path):
+    can = type("FakeCan", (), {"notifier": object()})()
+    mgr = OtaTesterDownloadManager(can, lambda *a, **kw: None, lambda *a, **kw: b"")
+    hook_path = _write_xml(tmp_path, "hook.xml", HOOK_XML)
+    mgr.add_case("hook-1", "VersionCheck", "hook", hook_path, order=0, enabled=True)
+    mgr.add_case("hook-2", "Other", "hook", hook_path, order=1, enabled=True)
+
+    status = mgr.set_all_enabled(False)
+    assert all(not c["enabled"] for c in status["cases"])
+
+    status = mgr.set_case_enabled("hook-1", True)
+    assert [c["enabled"] for c in status["cases"] if c["id"] == "hook-1"] == [True]
+
+    status = mgr.clear_cases()
+    assert status["cases"] == []
+    assert status["state"] == "IDLE"
+
+
+def test_add_case_replaces_existing_case_with_same_id(tmp_path):
+    can = type("FakeCan", (), {"notifier": object()})()
+    mgr = OtaTesterDownloadManager(can, lambda *a, **kw: None, lambda *a, **kw: b"")
+    hook_path = _write_xml(tmp_path, "hook.xml", HOOK_XML)
+    mgr.add_case("hook-1", "VersionCheck", "hook", hook_path, order=0)
+    mgr.add_case("hook-1", "VersionCheck (재로드)", "hook", hook_path, order=0)
+
+    status = mgr.status()
+    assert status["total_cases"] == 1
+    assert status["cases"][0]["label"] == "VersionCheck (재로드)"
+
+
+def test_start_requires_at_least_one_case():
+    can = type("FakeCan", (), {"notifier": object()})()
+    mgr = OtaTesterDownloadManager(can, lambda *a, **kw: None, lambda *a, **kw: b"")
+    with pytest.raises(RuntimeError):
+        mgr.start(request_id=0x18DA00F1, response_id=0x18DA00F1)
+
+
+def test_start_requires_connected_can(tmp_path):
+    can = type("FakeCan", (), {"notifier": None})()
+    mgr = OtaTesterDownloadManager(can, lambda *a, **kw: None, lambda *a, **kw: b"")
+    hook_path = _write_xml(tmp_path, "hook.xml", HOOK_XML)
+    mgr.add_case("hook-1", "VersionCheck", "hook", hook_path, order=0)
+    with pytest.raises(RuntimeError):
+        mgr.start(request_id=0x18DA00F1, response_id=0x18DA00F1)
+
+
+# ---- Per-step selection (get_case_steps / set_case_selected_steps) --------
+
+
+def test_get_case_steps_returns_service_and_params(tmp_path):
+    can = type("FakeCan", (), {"notifier": object()})()
+    mgr = OtaTesterDownloadManager(can, lambda *a, **kw: None, lambda *a, **kw: b"")
+    hook_path = _write_xml(tmp_path, "hook.xml", HOOK_XML)
+    mgr.add_case("hook-1", "VersionCheck", "hook", hook_path, order=0)
+
+    steps = mgr.get_case_steps("hook-1")
+    assert len(steps) == 2
+    assert steps[0]["service"] == "diagnosticSessionControl"
+    assert steps[0]["params"]["diagnosticSessionType"] == "0x81"
+    assert steps[1]["service"] == "readDataByIdentifier"
+
+
+def test_set_case_selected_steps_skips_deselected_step(tmp_path):
+    """Deselecting the (always-failing, in this test) diagnosticSessionControl
+    step should make it never execute, while the rest of the case still runs."""
+    ecu = FakeEcu(fail_sid=0x10)
+    can = type("FakeCan", (), {"notifier": object()})()
+    mgr = OtaTesterDownloadManager(can, ecu.send, ecu.receive)
+
+    hook_path = _write_xml(tmp_path, "hook.xml", HOOK_XML)
+    mgr.add_case("hook-1", "VersionCheck", "hook", hook_path, order=0)
+    # HOOK_XML step 0 = diagnosticSessionControl, step 1 = readDataByIdentifier
+    mgr.set_case_selected_steps("hook-1", [1])
+
+    mgr.start(request_id=0x18DA00F1, response_id=0x18DA00F1)
+    mgr._thread.join(timeout=5.0)
+
+    status = mgr.status()
+    assert status["state"] == "COMPLETED", status["events"]
+    # diagnosticSessionControl (SID 0x10) must never have been sent
+    assert not any(b[0] == 0x10 for b in ecu.sent)
+    assert any(b[0] == 0x22 for b in ecu.sent)
+
+
+def test_set_case_selected_steps_empty_list_skips_all(tmp_path):
+    ecu = FakeEcu()
+    can = type("FakeCan", (), {"notifier": object()})()
+    mgr = OtaTesterDownloadManager(can, ecu.send, ecu.receive)
+
+    hook_path = _write_xml(tmp_path, "hook.xml", HOOK_XML)
+    mgr.add_case("hook-1", "VersionCheck", "hook", hook_path, order=0)
+    mgr.set_case_selected_steps("hook-1", [])
+
+    mgr.start(request_id=0x18DA00F1, response_id=0x18DA00F1)
+    mgr._thread.join(timeout=5.0)
+
+    assert mgr.status()["state"] == "COMPLETED"
+    assert ecu.sent == []
+
+
+def test_get_case_steps_requires_existing_case():
+    can = type("FakeCan", (), {"notifier": object()})()
+    mgr = OtaTesterDownloadManager(can, lambda *a, **kw: None, lambda *a, **kw: b"")
+    with pytest.raises(RuntimeError):
+        mgr.get_case_steps("nonexistent")
+
+
+# ---- PDU preview (get_case_steps: pdu_preview / pdu_note) -------------------
+
+
+def test_get_case_steps_includes_pdu_preview_for_routine_control(tmp_path):
+    """User-reported example: routineControl(type=0x01, id=0xFF00,
+    optionRecord=0xF1B1) must preview as '31 01 FF 00 F1 B1'."""
+    can = type("FakeCan", (), {"notifier": object()})()
+    mgr = OtaTesterDownloadManager(can, lambda *a, **kw: None, lambda *a, **kw: b"")
+    block_path = _write_xml(tmp_path, "block.xml", TESTBLOCK_XML)
+    mgr.add_case("block-1", "Unit1", "testBlock", block_path, order=0)
+
+    steps = mgr.get_case_steps("block-1")
+    routine_step = next(s for s in steps if s["service"] == "routineControl")
+    assert routine_step["pdu_preview"] == "31 01 FF 00 F1 B1"
+    assert routine_step["pdu_note"] is None
+
+
+def test_get_case_steps_transfer_data_preview_without_binary(tmp_path):
+    can = type("FakeCan", (), {"notifier": object()})()
+    mgr = OtaTesterDownloadManager(can, lambda *a, **kw: None, lambda *a, **kw: b"")
+    block_path = _write_xml(tmp_path, "block.xml", TESTBLOCK_XML)
+    mgr.add_case("block-1", "Unit1", "testBlock", block_path, order=0)
+
+    steps = mgr.get_case_steps("block-1")
+    td_step = next(s for s in steps if s["service"] == "transferData")
+    assert td_step["pdu_preview"] is None
+    assert "바이너리 미로드" in td_step["pdu_note"]
+
+
+def test_get_case_steps_transfer_data_preview_with_binary(tmp_path):
+    can = type("FakeCan", (), {"notifier": object()})()
+    mgr = OtaTesterDownloadManager(can, lambda *a, **kw: None, lambda *a, **kw: b"")
+    block_path = _write_xml(tmp_path, "block.xml", TESTBLOCK_XML)
+    bin_path = _write_bin(tmp_path, "fw.bin", 1024)
+    mgr.add_case("block-1", "Unit1", "testBlock", block_path, order=0)
+    mgr.set_case_binary("block-1", bin_path)
+
+    steps = mgr.get_case_steps("block-1")
+    td_step = next(s for s in steps if s["service"] == "transferData")
+    # TESTBLOCK_XML: seekAddress=0x0200, writeSize=0x10, maxNumberOfBlockLength=0x08
+    with open(bin_path, "rb") as f:
+        binary = f.read()
+    expected_first_chunk = binary[0x200:0x208].hex(" ").upper()
+    assert td_step["pdu_preview"] == f"36 01 {expected_first_chunk}"
+    assert "총 2개 블록" in td_step["pdu_note"]
+
+
+def test_get_case_steps_security_access_preview(tmp_path):
+    can = type("FakeCan", (), {"notifier": object()})()
+    mgr = OtaTesterDownloadManager(can, lambda *a, **kw: None, lambda *a, **kw: b"")
+    block_path = _write_xml(tmp_path, "block.xml", TESTBLOCK_XML)
+    mgr.add_case("block-1", "Unit1", "testBlock", block_path, order=0)
+
+    steps = mgr.get_case_steps("block-1")
+    sa_step = next(s for s in steps if s["service"] == "securityAccess")
+    assert sa_step["pdu_preview"] == "27 01"
+    assert sa_step["pdu_note"]
+
+
+def test_get_case_steps_diagnostic_session_control_preview(tmp_path):
+    can = type("FakeCan", (), {"notifier": object()})()
+    mgr = OtaTesterDownloadManager(can, lambda *a, **kw: None, lambda *a, **kw: b"")
+    hook_path = _write_xml(tmp_path, "hook.xml", HOOK_XML)
+    mgr.add_case("hook-1", "VersionCheck", "hook", hook_path, order=0)
+
+    steps = mgr.get_case_steps("hook-1")
+    assert steps[0]["pdu_preview"] == "10 81"
+    assert steps[1]["pdu_preview"] == "22 F1 87"
+
+
+def test_get_case_steps_transfer_data_preview_truncates_large_block(tmp_path):
+    """A real maxNumberOfBlockLength (e.g. 0x0C02 = 3074 bytes) must not be
+    dumped in full into the checklist -- regression for an early version that
+    printed the entire first block (thousands of hex bytes) inline."""
+    xml = TESTBLOCK_XML.replace('maxNumberOfBlockLength="0x08"', 'maxNumberOfBlockLength="0x0C02"') \
+                        .replace('writeSize="0x00000010"', 'writeSize="0x00186508"')
+    can = type("FakeCan", (), {"notifier": object()})()
+    mgr = OtaTesterDownloadManager(can, lambda *a, **kw: None, lambda *a, **kw: b"")
+    block_path = _write_xml(tmp_path, "block.xml", xml)
+    bin_path = _write_bin(tmp_path, "fw.bin", 1_600_000)
+    mgr.add_case("block-1", "Unit1", "testBlock", block_path, order=0)
+    mgr.set_case_binary("block-1", bin_path)
+
+    steps = mgr.get_case_steps("block-1")
+    td_step = next(s for s in steps if s["service"] == "transferData")
+    assert td_step["pdu_preview"].endswith("...")
+    # "36 01" + 12 preview bytes (2 hex chars + 1 space each) + " ..."
+    assert len(td_step["pdu_preview"]) < 100
+    assert "블록당 3074 bytes" in td_step["pdu_note"]
+    assert "총 521개 블록" in td_step["pdu_note"]
+
+
+# ---- Global STmin override (shared with CAN-SWDL via the frontend) --------
+
+
+def test_get_fc_stmin_defaults_when_no_override():
+    can = type("FakeCan", (), {"notifier": object()})()
+    mgr = OtaTesterDownloadManager(can, lambda *a, **kw: None, lambda *a, **kw: b"")
+    assert mgr._get_fc_stmin() == 0x0A
+
+
+def test_get_fc_stmin_uses_global_override():
+    can = type("FakeCan", (), {"notifier": object()})()
+    mgr = OtaTesterDownloadManager(can, lambda *a, **kw: None, lambda *a, **kw: b"")
+    mgr._global_stmin_tx = 0x1F
+    assert mgr._get_fc_stmin() == 0x1F
+
+
+def test_uds_request_with_retry_passes_stmin_override_to_receive(tmp_path):
+    """Regression: the override must actually reach isotp_receive's fc_stmin,
+    not just be stored -- verified via a fake ECU that records the kwarg."""
+    received_stmin = []
+
+    def fake_send(can, tx_id, rx_id, data, is_extended_id=False, fc_timeout_s=1.0, **kw):
+        return {"sent": True}
+
+    def fake_receive(can, rx_id, tx_id, timeout_s=1.0, is_extended_id=False, fc_stmin=0, **kw):
+        received_stmin.append(fc_stmin)
+        return bytes([0x50, 0x02])  # positive diagnosticSessionControl response
+
+    can = type("FakeCan", (), {"notifier": object()})()
+    mgr = OtaTesterDownloadManager(can, fake_send, fake_receive)
+    mgr._global_stmin_tx = 0x2A
+
+    mgr._uds_request_with_retry(bytearray([0x10, 0x02]), 0.05, "test")
+
+    assert received_stmin == [0x2A]

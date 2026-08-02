@@ -117,6 +117,39 @@ export interface AudioStatus {
   recording: boolean;
 }
 
+export interface AudioChannelLevel {
+  index: number;
+  peak: number;
+  rms: number;
+}
+
+export interface AudioLevel {
+  active: boolean;
+  recording: boolean;
+  monitoring: boolean;
+  owner: 'monitor' | 'recording' | 'widget_record' | null;
+  channels: AudioChannelLevel[];
+  stream_started_at: number | null; // epoch seconds the current stream (Start OR Record) began; waveform x-axis "0s" reference
+  current_filename: string | null; // current segment's filename while recording
+}
+
+export interface AudioWaveformPoint {
+  t: number; // epoch seconds
+  min: number;
+  max: number;
+}
+
+export interface AudioWaveformChannel {
+  index: number;
+  points: AudioWaveformPoint[];
+}
+
+export interface AudioWaveform {
+  active: boolean;
+  samplerate: number | null;
+  channels: AudioWaveformChannel[];
+}
+
 export interface TestRunnerSummary {
   loaded: boolean;
   filename: string | null;
@@ -167,6 +200,18 @@ export interface UdsCommInfo {
   response_id: number;
 }
 
+export interface SeedKeyVersionInfo {
+  vendor_id: number;
+  module_id: number;
+  version: string;
+}
+
+export interface SeedKeyStatus {
+  loaded: boolean;
+  filename: string | null;
+  version: SeedKeyVersionInfo | null;
+}
+
 export interface UdsDownloadStatus {
   state: string;
   running: boolean;
@@ -208,44 +253,41 @@ export interface UdsSlotStatus {
   status?: UdsDownloadStatus;
 }
 
-// ---- OTA Tester types (new GITAuto test-rule XML format) ----
+// ---- OTA Tester types (folder-driven, GITAuto test-rule XML format) ----
 
-export interface OtaTesterStep {
-  service: string;
-  params: Record<string, string>;
-  sub_steps: OtaTesterSubStep[];
-  binary_path: string | null;
-  timing?: Record<string, number>;
+export interface OtaTesterCase {
+  id: string;
+  label: string;
+  kind: 'hook' | 'testBlock' | 'manual';
+  order: number;
+  enabled: boolean;
+  total_steps: number;
+  binary_loaded: boolean;
+  binary_filename: string | null;
+  binary_path_hint: string | null;
+  selected_steps: number[] | null;
 }
 
-export interface OtaTesterSubStep {
+export interface OtaTesterStepInfo {
   service: string;
   params: Record<string, string>;
+  sub_steps: { service: string; params: Record<string, string> }[];
+  confirm_positive_response: boolean;
+  pdu_preview: string | null;
+  pdu_note: string | null;
 }
 
 export interface OtaTesterStatus {
   state: string;
   running: boolean;
-  procedure_loaded: boolean;
-  xml_filename: string | null;
-  total_steps: number;
+  cases: OtaTesterCase[];
+  total_cases: number;
+  current_case_index: number;
+  current_case_label: string | null;
   current_step_index: number;
-  current_step_name: string | null;
+  total_steps_in_case: number;
   events: UdsEvent[];
   error: string | null;
-}
-
-export interface OtaTesterResultItem {
-  service: string;
-  step_no: number;
-  step_index: number;
-  success: boolean;
-  description: string;
-}
-
-export interface OtaTesterResult {
-  total_steps: number;
-  results: OtaTesterResultItem[];
 }
 
 export const SERVICE_DISPLAY_NAMES: Record<string, string> = {
@@ -288,7 +330,8 @@ export type WidgetType =
   | 'functionMultiButton'
   | 'randomMultiButton'
   | 'udsSwdl'
-  | 'otaTester';
+  | 'otaTester'
+  | 'audioMonitor';
 
 export interface SignalBinding {
   message: string;
@@ -328,6 +371,7 @@ export interface TxRow {
   dataHex: string;
   messageName: string | null;
   enabled: boolean;
+  periodic: boolean;
   isFd: boolean;
   bitrateSwitch: boolean;
 }

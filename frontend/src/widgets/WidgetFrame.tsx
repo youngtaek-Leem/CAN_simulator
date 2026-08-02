@@ -37,7 +37,13 @@ export function WidgetFrame({ config, children }: { config: WidgetConfig; childr
             <button className="icon-btn" title="설정" onClick={() => setShowConfig(true)}>
               ⚙
             </button>
-            <button className="icon-btn" title="삭제" onClick={() => removeWidget(config.id)}>
+            <button
+              className="icon-btn"
+              title="삭제"
+              onClick={() => {
+                if (window.confirm(`"${config.title}" 위젯을 삭제할까요?`)) removeWidget(config.id);
+              }}
+            >
               ✕
             </button>
           </span>

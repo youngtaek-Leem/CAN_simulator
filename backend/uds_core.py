@@ -123,16 +123,16 @@ def build_tester_present(suppress_pos_rsp: bool = False) -> bytearray:
 # Service 0x10 - DiagnosticSessionControl
 # ---------------------------------------------------------------------------
 
-VALID_SESSIONS = {0x01, 0x02, 0x03, 0x7F}
-
-
 def build_diagnostic_session(session_type: int) -> bytearray:
-    """UDS DiagnosticSessionControl (0x10)."""
-    if session_type not in VALID_SESSIONS:
-        raise ValueError(
-            f"Invalid session_type: 0x{session_type:02X}. "
-            f"Must be one of {VALID_SESSIONS}"
-        )
+    """UDS DiagnosticSessionControl (0x10).
+
+    Only rejects values that don't fit in the single-byte subFunction --
+    real test procedures (e.g. the OTA Tester reference XML's VersionCheck
+    hook uses 0x81) legitimately use ECU-manufacturer-specific session types
+    outside the standard 0x01/0x02/0x03/0x7F set, and the ECU itself is the
+    correct arbiter of whether it accepts an unusual value."""
+    if not 0x00 <= session_type <= 0xFF:
+        raise ValueError(f"Invalid session_type: 0x{session_type:X} (must fit in one byte)")
     return bytearray([0x10, session_type])
 
 
@@ -150,16 +150,21 @@ def build_read_data_by_id(did: int) -> bytearray:
 # Service 0x27 - SecurityAccess
 # ---------------------------------------------------------------------------
 
-def build_security_access_request_seed() -> bytearray:
-    """Request seed (level 01)."""
-    return bytearray([0x27, 0x01])
+def build_security_access_request_seed(access_mode: int = 0x01) -> bytearray:
+    """Request seed. ``access_mode`` is the securityAccessType sub-function
+    (an odd value per ISO 14229-1, e.g. 0x01, 0x03, 0x11...); it must match
+    whatever level the XML's requestSeed step (or the caller) specifies, or
+    the ECU will reject it as a level it never offered a seed for."""
+    return bytearray([0x27, access_mode])
 
 
-def build_security_access_send_key(key: bytes) -> bytearray:
-    """Send key (level 02)."""
+def build_security_access_send_key(key: bytes, access_mode: int = 0x02) -> bytearray:
+    """Send key. ``access_mode`` is the securityAccessType sub-function (an
+    even value, one greater than the matching requestSeed level, e.g. 0x02,
+    0x04, 0x12...) and must match the level used for the seed request above."""
     if len(key) != 8:
         raise ValueError(f"Key must be 8 bytes, got {len(key)}")
-    result = bytearray([0x27, 0x02])
+    result = bytearray([0x27, access_mode])
     result.extend(key)
     return result
 

@@ -12,6 +12,20 @@ import type { TxRow, WidgetConfig } from '../types';
 
 const MAX_ROWS = 20;
 
+/** Group hex digits into "XX XX XX ..." as the user types, so a payload
+ * reads byte-by-byte instead of as one long run of digits. */
+function formatHexBytes(raw: string): string {
+  const hex = raw.replace(/[^0-9a-fA-F]/g, '').toUpperCase();
+  return hex.match(/.{1,2}/g)?.join(' ') ?? hex;
+}
+
+/** Where the caret should land in the reformatted string, given how many hex
+ * digits (spaces excluded) preceded it in the raw input -- every full byte
+ * boundary after the first adds one space before it. */
+function caretAfterFormat(hexDigitsBeforeCaret: number): number {
+  return hexDigitsBeforeCaret + Math.floor(hexDigitsBeforeCaret / 2);
+}
+
 export function TxBox({ config }: { config: WidgetConfig }) {
   useCanVersion();
   const { dbc, updateWidget } = useApp();
@@ -34,9 +48,10 @@ export function TxBox({ config }: { config: WidgetConfig }) {
         key: `${Date.now()}-${rows.length}`,
         idHex: '100',
         periodMs: 100,
-        dataHex: '0000000000000000',
+        dataHex: '00 00 00 00 00 00 00 00',
         messageName: null,
         enabled: true,
+        periodic: true,
         isFd: false,
         bitrateSwitch: false,
       },
@@ -58,6 +73,7 @@ export function TxBox({ config }: { config: WidgetConfig }) {
           data: r.messageName ? null : r.dataHex.replace(/\s/g, ''),
           message_name: r.messageName,
           enabled: r.enabled,
+          periodic: r.periodic,
           is_fd: r.messageName ? false : r.isFd,
           bitrate_switch: r.messageName ? false : r.bitrateSwitch,
         })),
@@ -77,6 +93,37 @@ export function TxBox({ config }: { config: WidgetConfig }) {
     } catch (e) {
       setError((e as Error).message);
     }
+  };
+
+  /** One-shot immediate send of a row's current ID/data -- the row's Send
+   * button, and (from the data input's onChange) a live edit while running. */
+  const sendOnce = async (r: TxRow) => {
+    if (r.messageName) return; // DBC-bound rows have no raw id/data to send directly
+    try {
+      await api.txSendOnce({
+        key: r.key,
+        arbitration_id: parseInt(r.idHex, 16),
+        data: r.dataHex.replace(/\s/g, ''),
+        is_fd: r.isFd,
+        bitrate_switch: r.bitrateSwitch,
+      });
+      setError(null);
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
+
+  const handleDataInputChange = (r: TxRow, e: React.ChangeEvent<HTMLInputElement>) => {
+    const input = e.target;
+    const caret = input.selectionStart ?? input.value.length;
+    const hexDigitsBeforeCaret = input.value.slice(0, caret).replace(/[^0-9a-fA-F]/g, '').length;
+    const formatted = formatHexBytes(input.value);
+    patchRow(r.key, { dataHex: formatted });
+    const newCaret = caretAfterFormat(hexDigitsBeforeCaret);
+    requestAnimationFrame(() => input.setSelectionRange(newCaret, newCaret));
+    // Start 상태(전체 실행 중)에서 데이터 값을 바꾸면 다음 주기 tick을 기다리지
+    // 않고 바로 그 값을 한 번 전송한다.
+    if (txStatus?.running) sendOnce({ ...r, dataHex: formatted });
   };
 
   const txCount = (key: string) =>
@@ -111,9 +158,11 @@ export function TxBox({ config }: { config: WidgetConfig }) {
           <tr>
             <th></th>
             <th>ID(hex) / DBC 메시지</th>
+            <th title="체크하면 Start 상태에서 주기(ms)마다 자동 재전송, 해제하면 Send 버튼이나 데이터 값 변경 시에만 전송">주기</th>
             <th>주기(ms)</th>
             <th>데이터(hex)</th>
             <th>FD</th>
+            <th></th>
             <th>Cnt</th>
             <th></th>
           </tr>
@@ -155,10 +204,19 @@ export function TxBox({ config }: { config: WidgetConfig }) {
               </td>
               <td>
                 <input
+                  type="checkbox"
+                  checked={r.periodic}
+                  title="주기 재전송 여부"
+                  onChange={(e) => patchRow(r.key, { periodic: e.target.checked })}
+                />
+              </td>
+              <td>
+                <input
                   type="number"
                   className="period-input"
                   min={1}
                   value={r.periodMs}
+                  disabled={!r.periodic}
                   onChange={(e) => patchRow(r.key, { periodMs: Number(e.target.value) })}
                 />
               </td>
@@ -169,7 +227,7 @@ export function TxBox({ config }: { config: WidgetConfig }) {
                   <input
                     className="mono data-input"
                     value={r.dataHex}
-                    onChange={(e) => patchRow(r.key, { dataHex: e.target.value })}
+                    onChange={(e) => handleDataInputChange(r, e)}
                   />
                 )}
               </td>
@@ -205,6 +263,16 @@ export function TxBox({ config }: { config: WidgetConfig }) {
                   </span>
                 )}
               </td>
+              <td>
+                <button
+                  className="small-btn"
+                  disabled={!!r.messageName}
+                  title="현재 ID/데이터 값을 즉시 한 번 전송"
+                  onClick={() => sendOnce(r)}
+                >
+                  Send
+                </button>
+              </td>
               <td>{txCount(r.key)}</td>
               <td>
                 <button
@@ -218,7 +286,7 @@ export function TxBox({ config }: { config: WidgetConfig }) {
           ))}
           {rows.length === 0 && (
             <tr>
-              <td colSpan={7} className="empty">
+              <td colSpan={9} className="empty">
                 "+ 메시지 추가"로 전송할 메시지를 등록하세요
               </td>
             </tr>

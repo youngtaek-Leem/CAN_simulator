@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
 import { api } from '../api/client';
-import type { UdsDownloadStatus, UdsEvent, UdsStepInfo } from '../types';
+import { canStore } from '../store/canStore';
+import { UdsGlobalControls, getGlobalStminOverride } from './UdsGlobalControls';
+import type { UdsDownloadStatus, UdsStepInfo } from '../types';
 import { SERVICE_DISPLAY_NAMES } from '../types';
 
 interface Props {
@@ -61,46 +63,83 @@ export default function UdsSwdlWidget({ config: _config }: Props) {
     1: new Set(),
     2: new Set(),
   });
-  const [slotExecState, setSlotExecState] = useState<Record<number, string>>({ 0: 'idle', 1: 'idle', 2: 'idle' });
   const [globalError, setGlobalError] = useState<string | null>(null);
-  const [stminTxEnabled, setStminTxEnabled] = useState(false);
-  const [globalStminTx, setGlobalStminTx] = useState('0A');
   const [autoLoadMsg, setAutoLoadMsg] = useState<string | null>(null);
+  // Polling control: a single on/off flag. Turned on right before start, turned
+  // off once polling observes NO slot is running anymore. Decoupling the poll
+  // loop from the (instantly-resolving) start() HTTP call is the key fix -- the
+  // backend keeps the worker thread alive long after the request returns, so
+  // the only reliable "still running" signal is the backend status itself.
+  const [polling, setPolling] = useState(false);
+  // Local "starting" flag purely for disabling the ▶ button while the start
+  // POST is in flight; the long-running state is driven by `polling`, not this.
+  const [starting, setStarting] = useState(false);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const eventsEndRef = useRef<HTMLDivElement>(null);
+  const lastEventCountRef = useRef<Record<number, number>>({ 0: 0, 1: 0, 2: 0 });
 
-  // Poll status while any slot is running
+  // Poll status while `polling` is on -- also pipe CAN-SWDL events into the
+  // shared TextDisplay activity log (canStore.activityLog). The loop turns
+  // itself off once every slot's `running` flag goes false, so it stays alive
+  // for the whole background download even though the start HTTP call returned
+  // immediately (the backend runs the procedure in a daemon thread).
   useEffect(() => {
-    const anyRunning = Object.values(slotExecState).some(s => s === 'running');
-    if (anyRunning) {
-      pollRef.current = setInterval(async () => {
-        try {
-          const all = await api.udsStatus();
-          setSlots(prev => prev.map((s, i) => ({ ...s, status: all[i] || s.status })));
-        } catch { /* ignore */ }
-      }, 500);
-    } else {
+    if (!polling) {
       if (pollRef.current) clearInterval(pollRef.current);
       pollRef.current = null;
+      return;
     }
-    return () => { if (pollRef.current) clearInterval(pollRef.current); };
-  }, [slotExecState]);
+    pollRef.current = setInterval(async () => {
+      try {
+        const all = await api.udsStatus();
+        setSlots(prev => prev.map((s, i) => ({ ...s, status: all[i] || s.status })));
 
-  // Scroll events
-  useEffect(() => {
-    eventsEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [slots]);
+        // Push new CAN-SWDL events into the shared TextDisplay activity log.
+        let stillRunning = false;
+        for (let i = 0; i < NUM_SLOTS; i++) {
+          const slotStatus = all[i];
+          if (!slotStatus) continue;
+          if (slotStatus.running) stillRunning = true;
+          if (!slotStatus.events) continue;
+          const oldCount = lastEventCountRef.current[i] ?? 0;
+          const newEvents = slotStatus.events.slice(oldCount);
+          lastEventCountRef.current[i] = slotStatus.events.length;
+          for (const evt of newEvents) {
+            let label = '';
+            if (evt.service) label = `[${evt.service}] `;
+            if (evt.level === 'ERROR') label += '❌ ';
+            else if (evt.level === 'WARN') label += '⚠️ ';
+            canStore.pushActivity(`SWDL${i + 1}: ${label}${evt.msg ?? ''}`, (evt.ts ?? Date.now() / 1000) * 1000);
+          }
+        }
+        // Backend finished (no slot running) -> stop polling. The status
+        // snapshot has already been refreshed above, so the UI shows the final
+        // COMPLETED/ERROR state.
+        if (!stillRunning) {
+          setPolling(false);
+        }
+      } catch { /* ignore */ }
+    }, 500);
+    return () => { if (pollRef.current) clearInterval(pollRef.current); };
+  }, [polling]);
 
   const toggleStep = (slotIdx: number, stepIdx: number) => {
+    // Determined from the pre-click state (not inside the setState updater
+    // below) -- React only runs a batched updater eagerly for the first call
+    // in a tick, so a variable mutated inside it and read right after was
+    // stale for every subsequent rapid click, always logging "OFF" even when
+    // the box had just been checked.
+    const nowChecked = !(selectedSteps[slotIdx] ?? new Set()).has(stepIdx);
     setSelectedSteps(prev => {
       const current = new Set(prev[slotIdx] ?? []);
-      if (current.has(stepIdx)) {
-        current.delete(stepIdx);
-      } else {
-        current.add(stepIdx);
-      }
+      if (nowChecked) current.add(stepIdx); else current.delete(stepIdx);
       return { ...prev, [slotIdx]: current };
     });
+    // Debug visibility: log every checkbox change to the TextDisplay so the
+    // user can confirm their selection was actually captured by the frontend.
+    const slot = slots[slotIdx];
+    const step = slot.steps?.[stepIdx];
+    const name = step ? (SERVICE_DISPLAY_NAMES[step.service] || step.service) : `step ${stepIdx}`;
+    canStore.pushActivity(`SWDL${slotIdx + 1}: 체크${nowChecked ? ' ON' : ' OFF'} → [${stepIdx}] ${name}`);
   };
 
   const handleSelectAll = () => {
@@ -125,7 +164,28 @@ export default function UdsSwdlWidget({ config: _config }: Props) {
       await api.udsUploadXml(file, slotIdx);
       const steps = await api.udsSteps(slotIdx);
       const allStatus = await api.udsStatus();
-      setSlots(prev => prev.map((s, i) => i === slotIdx ? { ...s, status: allStatus[i], steps, uploading: false } : s));
+
+      // Auto-initialize paramOverrides for diagnosticSessionControl steps with multiple session types
+      const autoParams: Record<string, string> = {};
+      if (steps) {
+        steps.forEach((step, stepIdx) => {
+          if (step.service === 'diagnosticSessionControl') {
+            const sessionKeys = Object.keys(step.params).filter(k => k === 'diagnosticSessionType' || k === 'background_diagnosticSessionType');
+            if (sessionKeys.length > 1) {
+              autoParams[`_sessionType_${stepIdx}`] = sessionKeys[0]; // Preselect first as default
+            }
+          }
+        });
+      }
+
+      setSlots(prev => prev.map((s, i) => {
+        if (i !== slotIdx) return s;
+        const mergedParams = { ...s.paramOverrides };
+        if (Object.keys(autoParams).length > 0) {
+          mergedParams['diagnosticSessionControl'] = { ...autoParams };
+        }
+        return { ...s, status: allStatus[i], steps, uploading: false, paramOverrides: mergedParams };
+      }));
     } catch (e: unknown) {
       setSlots(prev => prev.map((s, i) => i === slotIdx ? { ...s, error: String(e instanceof Error ? e.message : e), uploading: false } : s));
     }
@@ -144,35 +204,69 @@ export default function UdsSwdlWidget({ config: _config }: Props) {
     }
   };
 
+
   const startAll = async () => {
     setGlobalError(null);
     const readySlots: number[] = [];
-    slots.forEach((s, i) => {
-      if (s.status?.procedure_loaded && s.status?.binary_loaded) readySlots.push(i);
-    });
+    for (let i = 0; i < NUM_SLOTS; i++) {
+      if (slots[i].status?.procedure_loaded && slots[i].status?.binary_loaded) readySlots.push(i);
+    }
     if (readySlots.length === 0) { setGlobalError('준비된 슬롯이 없습니다.'); return; }
 
+    // Build per-slot payloads. The backend `start_all` consumes
+    // `per_slot_selected_steps` (slot_index -> list[int] | None) and runs each
+    // ready slot in sequence. We use the per-slot form (not the shared
+    // `selected_steps`) so each slot only runs its own checked steps:
+    //   - no checks   -> []     (none)
+    //   - all checks  -> undefined (all)
+    //   - partial     -> [idx, ...]
+    const perSlotSelected: Record<number, number[] | undefined> = {};
+    const perSlotParams: Record<number, Record<string, Record<string, string>> | undefined> = {};
     for (const idx of readySlots) {
-      setSlotExecState(prev => ({ ...prev, [idx]: 'running' }));
-      try {
-        const slotStepIndices = Array.from(selectedSteps[idx] ?? []);
-        const slotStepServices = slotStepIndices.map(si => slots[idx].steps![si].service);
-        await api.udsStart([idx], slotStepServices, slots[idx].paramOverrides, stminTxEnabled ? parseInt(globalStminTx, 16) : undefined);
-        setSlotExecState(prev => ({ ...prev, [idx]: 'done' }));
-      } catch (e: unknown) {
-        setSlotExecState(prev => ({ ...prev, [idx]: 'error' }));
-        setGlobalError(`파일 ${idx + 1} 실패: ${String(e instanceof Error ? e.message : e)}`);
-        break;
-      }
+      const totalSteps = slots[idx].steps?.length ?? 0;
+      const checkedSet = selectedSteps[idx] ?? new Set<number>();
+      const arr = Array.from(checkedSet).sort((a, b) => a - b);
+      perSlotSelected[idx] =
+        arr.length === 0 ? [] :
+        arr.length === totalSteps ? undefined :
+        arr;
+      perSlotParams[idx] = slots[idx].paramOverrides && Object.keys(slots[idx].paramOverrides).length > 0
+        ? slots[idx].paramOverrides
+        : undefined;
+      // Debug log: announce what we are about to run for this slot.
+      const describe = arr.length === 0 ? '선택 없음(건너뜀)'
+        : arr.length === totalSteps ? `전체 ${totalSteps}스텝`
+        : `선택 ${arr.length}/${totalSteps}스텝 [${arr.join(',')}]`;
+      canStore.pushActivity(`SWDL${idx + 1}: 시작 요청 — ${describe}`);
     }
-    const final = await api.udsStatus();
-    setSlots(prev => prev.map((s, i) => ({ ...s, status: final[i] || s.status })));
+
+    setStarting(true);
+    canStore.pushActivity(`[CAN-SWDL] 전체 시작 (슬롯 ${readySlots.map(i => i + 1).join(', ')})`);
+    try {
+      // Turn polling ON *before* the POST so the very first tick after the
+      // (instant) response starts streaming events -- otherwise the previous
+      // race (start returns, UI flips to "done", poll never runs) would hide
+      // the whole background run from the TextDisplay.
+      setPolling(true);
+      await api.udsStart(
+        readySlots,
+        undefined,            // selected_steps (shared) -- unused with per-slot
+        undefined,            // modified_params (shared) -- unused with per-slot
+        getGlobalStminOverride(),
+        perSlotSelected,
+        perSlotParams,
+      );
+    } catch (e: unknown) {
+      setGlobalError(`시작 실패: ${String(e instanceof Error ? e.message : e)}`);
+      setPolling(false);
+    } finally {
+      setStarting(false);
+    }
   };
 
   const stopSlot = async (idx: number) => {
     try {
       await api.udsStop(idx);
-      setSlotExecState(prev => ({ ...prev, [idx]: 'idle' }));
       const all = await api.udsStatus();
       setSlots(prev => prev.map((s, i) => i === idx ? { ...s, status: all[i] } : s));
     } catch { /* ignore */ }
@@ -195,7 +289,9 @@ export default function UdsSwdlWidget({ config: _config }: Props) {
     }));
   };
 
-  const anyRunning = Object.values(slotExecState).some(s => s === 'running');
+  // Running is driven by backend status (kept fresh by polling), not by a
+  // local flag that flips to "done" the instant the start POST returns.
+  const anyRunning = slots.some(s => s.status?.running) || starting;
   const allReady = slots.every(s => s.status?.procedure_loaded && s.status?.binary_loaded);
 
   return (
@@ -205,33 +301,11 @@ export default function UdsSwdlWidget({ config: _config }: Props) {
         <span style={{ fontWeight: 600, fontSize: '14px', whiteSpace: 'nowrap' }}>CAN-SWDL</span>
         <button onClick={handleSelectAll} disabled={!allReady} style={{ fontSize: '10px', padding: '2px 6px', whiteSpace: 'nowrap' }}>전체 선택</button>
         <button onClick={handleDeselectAll} style={{ fontSize: '10px', padding: '2px 6px', whiteSpace: 'nowrap' }}>전체 해제</button>
-        <span style={{ display: 'inline-flex', alignItems: 'center', gap: '3px', padding: '0', background: 'none', borderRadius: '0', border: 'none' }}>
-          <label style={{ display: 'flex', alignItems: 'center', gap: '3px', fontSize: '11px', whiteSpace: 'nowrap', color: 'inherit' }}>
-            <input type="checkbox" checked={stminTxEnabled} onChange={e => setStminTxEnabled(e.target.checked)} style={{ margin: 0, width: '14px', height: '14px' }} />
-            <span style={{ fontWeight: 500, fontSize: '13px', color: 'inherit' }}>STmin</span>
-          </label>
-          <input
-            value={globalStminTx}
-            onChange={e => setGlobalStminTx(e.target.value)}
-            disabled={!stminTxEnabled}
-            placeholder="0A"
-            style={{
-              width: '32px',
-              fontSize: '11px',
-              padding: '1px 3px',
-              border: '1px solid var(--border)',
-              borderRadius: '2px',
-              backgroundColor: stminTxEnabled ? 'var(--input-bg)' : 'var(--panel)',
-              color: 'inherit',
-              flexShrink: 0,
-            }}
-            title="Flow Control STmin (hex), unit 0.1ms"
-          />
-          <span style={{ fontSize: '9px', color: '#6b7280', whiteSpace: 'nowrap' }}>×0.1ms</span>
-        </span>
+        {/* STmin override + SeedKey DLL loader -- shared with OTA Tester, see UdsGlobalControls.tsx */}
+        <UdsGlobalControls />
         {/* Folder auto-load */}
         <label style={{ fontSize: '10px', padding: '2px 6px', border: '1px solid var(--border)', borderRadius: '3px', cursor: 'pointer', whiteSpace: 'nowrap', background: 'var(--panel)', color: 'inherit' }}>
-          📁 폴더 선택
+          📁 패키지 폴더선택
           <input type="file" /* @ts-ignore */ {...{ webkitdirectory: '' }} style={{ display: 'none' }}
             onChange={async (e) => {
               const files = Array.from(e.target.files ?? []);
@@ -279,7 +353,28 @@ export default function UdsSwdlWidget({ config: _config }: Props) {
                       if (newSlots[slotIdx].xmlFile) {
                         await api.udsUploadXml(newSlots[slotIdx].xmlFile!, slotIdx);
                         const steps = await api.udsSteps(slotIdx);
-                        setSlots(prev => prev.map((s, si) => si === slotIdx ? { ...s, steps, status: null } : s));
+
+                        // Auto-initialize paramOverrides for diagnosticSessionControl with multiple session types
+                        const autoParams: Record<string, string> = {};
+                        if (steps) {
+                          steps.forEach((step, stepIdx) => {
+                            if (step.service === 'diagnosticSessionControl') {
+                              const sessionKeys = Object.keys(step.params).filter(k => k === 'diagnosticSessionType' || k === 'background_diagnosticSessionType');
+                              if (sessionKeys.length > 1) {
+                                autoParams[`_sessionType_${stepIdx}`] = sessionKeys[0];
+                              }
+                            }
+                          });
+                        }
+
+                        setSlots(prev => prev.map((s, si) => {
+                          if (si !== slotIdx) return s;
+                          const mergedParams = { ...s.paramOverrides };
+                          if (Object.keys(autoParams).length > 0) {
+                            mergedParams['diagnosticSessionControl'] = { ...autoParams };
+                          }
+                          return { ...s, steps, status: null, paramOverrides: mergedParams };
+                        }));
                       }
                       if (newSlots[slotIdx].binFile) {
                         await api.udsUploadBinary(newSlots[slotIdx].binFile!, slotIdx);
@@ -520,16 +615,6 @@ export default function UdsSwdlWidget({ config: _config }: Props) {
               </div>
             )}
 
-            {/* Event log (compact) */}
-            {slot.status?.events && slot.status.events.length > 0 && (
-              <div style={{ maxHeight: '60px', overflowY: 'auto', fontSize: '9px', backgroundColor: '#1f2937', color: '#e5e7eb', borderRadius: '3px', padding: '2px' }}>
-                {slot.status.events.map((evt: UdsEvent, i: number) => (
-                  <div key={i} style={{ color: evt.level === 'ERROR' ? '#fca5a5' : evt.level === 'WARN' ? '#fcd34d' : '#e5e7eb' }}>
-                    {evt.service && <span style={{ color: '#60a5fa' }}>[{evt.service}]</span>} {evt.msg}
-                  </div>
-                ))}
-              </div>
-            )}
           </div>
         ))}
       </div>
@@ -541,7 +626,6 @@ export default function UdsSwdlWidget({ config: _config }: Props) {
           ▶ 전체 시작
         </button>
       </div>
-      <div ref={eventsEndRef} />
     </div>
   );
 }

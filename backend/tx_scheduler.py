@@ -39,6 +39,10 @@ class TxEntry:
     period_ms: float
     is_extended: bool = False
     enabled: bool = True
+    periodic: bool = True                 # False -> never auto-resent by the
+                                           # scheduler loop; only sent via
+                                           # send_once() (the row's Send
+                                           # button, or a live data-field edit)
     data: Optional[bytes] = None          # fixed payload, or ...
     message_name: Optional[str] = None    # ... encode from DBC signal state
     is_fd: bool = False                   # raw-ID rows only; DBC rows use message.is_fd
@@ -79,6 +83,7 @@ class TxScheduler:
                 period_ms=float(e["period_ms"]),
                 is_extended=bool(e.get("is_extended", False)),
                 enabled=bool(e.get("enabled", True)),
+                periodic=bool(e.get("periodic", True)),
                 data=data,
                 message_name=e.get("message_name"),
                 is_fd=bool(e.get("is_fd", False)),
@@ -100,6 +105,32 @@ class TxScheduler:
     def stop(self) -> dict:
         with self._lock:
             self._running = False
+        return self.status()
+
+    def send_once(
+        self,
+        arbitration_id: int,
+        data: bytes,
+        is_extended: bool = False,
+        is_fd: bool = False,
+        bitrate_switch: bool = False,
+        key: Optional[str] = None,
+    ) -> dict:
+        """Immediate one-shot send of a raw ID/data row -- the TX box's Send
+        button, and live edits to a row's data field while the list is
+        running (so the bus reflects a typed value right away instead of
+        waiting for the next periodic tick or a re-apply).
+
+        If `key` matches a row already in the configured TX list, that row's
+        stored data is updated too, so any later periodic auto-resend for it
+        keeps using the fresh value instead of reverting to what was last
+        applied via configure()."""
+        self._can.send(arbitration_id, data, is_extended, is_fd=is_fd, bitrate_switch=bitrate_switch)
+        with self._lock:
+            entry = self._entries.get(key) if key else None
+            if entry is not None:
+                entry.data = data
+                entry.tx_count += 1
         return self.status()
 
     def set_paused(self, paused: bool) -> None:
@@ -325,7 +356,8 @@ class TxScheduler:
         due = []
         if self._running:
             due.extend(
-                e for e in self._entries.values() if e.enabled and e.next_due <= now
+                e for e in self._entries.values()
+                if e.enabled and e.periodic and e.next_due <= now
             )
         due.extend(e for e in self._auto_entries.values() if e.next_due <= now)
         return due
@@ -384,6 +416,7 @@ class TxScheduler:
                         "arbitration_id": e.arbitration_id,
                         "period_ms": e.period_ms,
                         "enabled": e.enabled,
+                        "periodic": e.periodic,
                         "message_name": e.message_name,
                         "is_fd": e.is_fd,
                         "bitrate_switch": e.bitrate_switch,

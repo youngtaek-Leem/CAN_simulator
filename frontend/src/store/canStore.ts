@@ -19,6 +19,8 @@ import type {
 
 const FPS_KEY = 'can-sim.ui-fps';
 const RX_NODE_KEY = 'can-sim.rx-node';
+const STMIN_ENABLED_KEY = 'can-sim.uds-stmin-enabled';
+const STMIN_VALUE_KEY = 'can-sim.uds-stmin-value';
 const TRACE_WINDOW_S = 60; // keep the last minute of raw frames for pause/scroll
 const TRACE_CAP = 30000; // hard memory cap for the trace buffer
 const HISTORY_CAP = 10000; // points kept per watched signal (graph widgets)
@@ -76,11 +78,15 @@ class CanStore {
   private lastEmit = 0;
   private fps: number;
   private rxNode: string;
+  private stminEnabled: boolean;
+  private stminValue: string;
 
   constructor() {
     const saved = Number(localStorage.getItem(FPS_KEY));
     this.fps = saved >= 10 && saved <= 60 ? saved : 30;
     this.rxNode = localStorage.getItem(RX_NODE_KEY) ?? '';
+    this.stminEnabled = localStorage.getItem(STMIN_ENABLED_KEY) === '1';
+    this.stminValue = localStorage.getItem(STMIN_VALUE_KEY) ?? '0A';
     requestAnimationFrame(this.tick);
     setInterval(this.pollTestRunnerEvents, TESTRUNNER_POLL_MS);
   }
@@ -106,6 +112,30 @@ class CanStore {
   setRxNode(node: string) {
     this.rxNode = node;
     localStorage.setItem(RX_NODE_KEY, node);
+    this.markDirty();
+  }
+
+  /** Flow Control STmin override for UDS SecurityAccess/transferData, shared
+   * between CAN-SWDL and OTA Tester (both widgets set/show the same value,
+   * see UdsGlobalControls.tsx) -- undefined-equivalent (disabled) means each
+   * widget's own XML/default timing is used instead. */
+  getGlobalStminEnabled() {
+    return this.stminEnabled;
+  }
+
+  setGlobalStminEnabled(enabled: boolean) {
+    this.stminEnabled = enabled;
+    localStorage.setItem(STMIN_ENABLED_KEY, enabled ? '1' : '0');
+    this.markDirty();
+  }
+
+  getGlobalStminTx() {
+    return this.stminValue;
+  }
+
+  setGlobalStminTx(value: string) {
+    this.stminValue = value;
+    localStorage.setItem(STMIN_VALUE_KEY, value);
     this.markDirty();
   }
 
@@ -137,7 +167,7 @@ class CanStore {
     return sig?.unit ? `${num} ${sig.unit}` : num;
   }
 
-  private pushActivity(text: string, ts = Date.now()) {
+  pushActivity(text: string, ts = Date.now()) {
     this.activityLog.push({ ts, text });
     if (this.activityLog.length > ACTIVITY_CAP) {
       this.activityLog.splice(0, this.activityLog.length - ACTIVITY_CAP);

@@ -584,7 +584,7 @@ td.empty {
 }
 
 .data-input {
-  width: 140px;
+  width: 200px;
 }
 
 .fd-controls {
@@ -1287,3 +1287,70 @@ td.empty {
   white-space: pre-wrap;
   word-break: break-all;
 }
+
+/* ---- 오디오 신호 모니터 ---- */
+
+.audio-monitor {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  height: 100%;
+  padding: 8px;
+}
+
+.audio-monitor-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.audio-levels {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.audio-level-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.audio-level-label {
+  width: 32px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.audio-level-track {
+  position: relative;
+  flex: 1;
+  height: 14px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  overflow: hidden;
+}
+
+.audio-level-rms {
+  position: absolute;
+  inset: 0 auto 0 0;
+  background: var(--accent, #3b82f6);
+  opacity: 0.5;
+}
+
+.audio-level-peak {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  transform: translateX(-1px);
+}
+
+.audio-level-value {
+  width: 40px;
+  text-align: right;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
