@@ -220,3 +220,156 @@ def test_not_connected_raises():
     cm = CanManager()
     with pytest.raises(isotp_service.IsoTpError):
         isotp_service.send(cm, TX_ID, FC_ID, b"\x01\x02")
+
+
+def test_send_defaults_to_fd_when_bus_is_fd():
+    cm = CanManager()
+    cm.connect("virtual", "t_isotp_fd", receive_own_messages=False, fd=True)
+    peer = can.Bus(interface="virtual", channel="t_isotp_fd", fd=True)
+    try:
+        isotp_service.send(cm, TX_ID, FC_ID, bytes.fromhex("0102030405"))
+        msg = peer.recv(timeout=1.0)
+        assert msg.is_fd is True
+        assert msg.bitrate_switch is True
+    finally:
+        peer.shutdown()
+        cm.disconnect()
+
+
+def test_send_stays_classic_when_bus_is_classic(stack):
+    cm, peer = stack
+    isotp_service.send(cm, TX_ID, FC_ID, bytes.fromhex("0102030405"))
+    msg = peer.recv(timeout=1.0)
+    assert msg.is_fd is False
+    assert msg.bitrate_switch is False
+
+
+def test_send_explicit_is_fd_overrides_bus_default(stack):
+    cm, peer = stack
+    isotp_service.send(cm, TX_ID, FC_ID, bytes.fromhex("0102030405"), is_fd=True, bitrate_switch=False)
+    msg = peer.recv(timeout=1.0)
+    assert msg.is_fd is True
+    assert msg.bitrate_switch is False
+
+
+@pytest.fixture
+def fd_stack():
+    cm = CanManager()
+    cm.connect("virtual", "t_isotp_fd2", receive_own_messages=False, fd=True)
+    peer = can.Bus(interface="virtual", channel="t_isotp_fd2", fd=True)
+    yield cm, peer
+    peer.shutdown()
+    cm.disconnect()
+
+
+def test_fd_single_frame_escape_form_for_8_to_62_bytes(fd_stack):
+    cm, peer = fd_stack
+    data = bytes(range(20))  # 20 bytes: too big for classic SF, fits FD escape SF
+    result = isotp_service.send(cm, TX_ID, FC_ID, data)
+    assert result == {
+        "sent": True,
+        "frame_type": "single",
+        "frames_sent": 1,
+        "bytes_sent": 20,
+        "duration_ms": result["duration_ms"],
+    }
+    msg = peer.recv(timeout=1.0)
+    assert msg.is_fd is True
+    assert len(msg.data) == 24  # smallest valid CAN-FD length >= 2 (PCI) + 20
+    assert msg.data[0] == 0x00  # SF escape PCI
+    assert msg.data[1] == 20  # explicit SF_DL
+    assert bytes(msg.data[2:22]) == data
+
+
+def test_fd_multi_frame_uses_up_to_64_byte_frames(fd_stack):
+    cm, peer = fd_stack
+    monitor = can.Bus(interface="virtual", channel="t_isotp_fd2", fd=True)
+    try:
+        stop, t, _ = start_fc_responder(peer, fs=0x0, bs=0x00, stmin=0x00)
+        try:
+            data = bytes((i % 256) for i in range(150))  # forces FD FF(62) + 2 CF(63,25)
+            result = isotp_service.send(cm, TX_ID, FC_ID, data, fc_timeout_s=1.0)
+            assert result["frame_type"] == "multi"
+            assert result["frames_sent"] == 3  # FF + 2 CF
+            assert result["bytes_sent"] == 150
+        finally:
+            stop.set()
+            t.join(timeout=1)
+
+        frames = [f for f in drain(monitor, 4) if f.arbitration_id == TX_ID]
+        ff, cf1, cf2 = frames[0], frames[1], frames[2]
+        assert ff.is_fd and cf1.is_fd and cf2.is_fd
+        assert len(ff.data) == 64  # PCI(2) + 62 data bytes, exact valid length
+        assert ff.data[0] & 0xF0 == 0x10
+        assert bytes(ff.data[2:64]) == data[:62]
+        assert len(cf1.data) == 64  # PCI(1) + 63 data bytes, exact valid length
+        assert bytes(cf1.data[1:64]) == data[62:125]
+        remaining_len = 150 - 62 - 63  # 25 bytes left in the last CF
+        assert len(cf2.data) == _min_fd_len(1 + remaining_len)
+        assert bytes(cf2.data[1:1 + remaining_len]) == data[125:150]
+    finally:
+        monitor.shutdown()
+
+
+def _min_fd_len(n):
+    for length in (8, 12, 16, 20, 24, 32, 48, 64):
+        if n <= length:
+            return length
+    raise AssertionError("length exceeds CAN-FD max")
+
+
+RESP_ID = 0x7A3  # arbitration ID the simulated ECU response arrives on
+
+
+def _pad_to_fd_len(data: bytes) -> bytes:
+    return data + bytes(_min_fd_len(len(data)) - len(data))
+
+
+def test_receive_decodes_fd_single_frame_escape_form(fd_stack):
+    cm, peer = fd_stack
+    data = bytes(range(30))
+    frame = _pad_to_fd_len(bytes([0x00, len(data)]) + data)
+
+    # receive() only attaches its BufferedReader to cm's notifier once
+    # called; sending from the main thread beforehand (or immediately after,
+    # with no synchronization) races that attachment against the notifier's
+    # own background dispatch thread. Running receive() in a background
+    # thread and giving it a moment to attach before sending removes the
+    # race deterministically.
+    result = {}
+
+    def run():
+        result["value"] = isotp_service.receive(cm, RESP_ID, FC_ID, timeout_s=2.0)
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    time.sleep(0.1)
+    peer.send(can.Message(arbitration_id=RESP_ID, data=frame, is_fd=True))
+    t.join(timeout=2)
+    assert result["value"] == data
+
+
+def test_receive_decodes_fd_multi_frame(fd_stack):
+    cm, peer = fd_stack
+    data = bytes((i % 256) for i in range(150))
+    ff_frame = bytes([0x10 | ((150 >> 8) & 0x0F), 150 & 0xFF]) + data[:62]
+
+    result = {}
+
+    def run():
+        result["value"] = isotp_service.receive(cm, RESP_ID, FC_ID, timeout_s=2.0)
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    time.sleep(0.1)  # let receive() attach its BufferedReader first (see above)
+
+    peer.send(can.Message(arbitration_id=RESP_ID, data=ff_frame, is_fd=True))
+    fc = peer.recv(timeout=1.0)
+    assert fc is not None and fc.arbitration_id == FC_ID
+    cf1 = bytes([0x21]) + data[62:125]
+    peer.send(can.Message(arbitration_id=RESP_ID, data=cf1, is_fd=True))
+    cf2 = _pad_to_fd_len(bytes([0x22]) + data[125:150])
+    peer.send(can.Message(arbitration_id=RESP_ID, data=cf2, is_fd=True))
+
+    t.join(timeout=2)
+    assert result["value"] == data

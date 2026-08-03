@@ -123,6 +123,35 @@ function WaveformChart({
   const [, bump] = useState(0);
   const redraw = () => bump((n) => n + 1);
 
+  // Live/frozen "now" anchor: while active, liveAnchorRef tracks the current
+  // moment (refreshed on every redraw, i.e. every ~60-200ms); the instant
+  // `active` goes false, frozenAnchorRef latches onto whatever liveAnchorRef
+  // last held and stops changing, so a chart that was auto-scrolling with
+  // the live edge freezes exactly where it was instead of continuing to
+  // slide with Date.now() (which would otherwise scroll the last-fetched
+  // waveform straight out of view within a few seconds of Stop). Cleared
+  // back to live the moment Start/Record reopens the stream.
+  const liveAnchorRef = useRef<{ nowMs: number; streamStartedAtMs: number | null }>({
+    nowMs: Date.now(),
+    streamStartedAtMs: null,
+  });
+  const frozenAnchorRef = useRef<{ nowMs: number; streamStartedAtMs: number | null } | null>(null);
+  // Only poll at all once this chart has actually been started at least
+  // once -- a widget that was never Start/Record'ed has nothing to show and
+  // shouldn't burn a background request every 60ms forever.
+  const hasEverStartedRef = useRef(false);
+  if (active) hasEverStartedRef.current = true;
+
+  const nowAnchor = (): { nowMs: number; streamStartedAtMs: number | null } => {
+    if (active) {
+      liveAnchorRef.current = { nowMs: Date.now(), streamStartedAtMs };
+      frozenAnchorRef.current = null;
+      return liveAnchorRef.current;
+    }
+    if (frozenAnchorRef.current === null) frozenAnchorRef.current = liveAnchorRef.current;
+    return frozenAnchorRef.current;
+  };
+
   useEffect(() => {
     const el = wrapRef.current;
     if (!el) return;
@@ -139,18 +168,24 @@ function WaveformChart({
   };
 
   // ---- polling: fetch a decimated waveform slice for the current view ----
+  // Kept running after Stop (not gated on `active`) so that panning/zooming
+  // into the frozen view still fetches the newly-visible part of the last
+  // RAW_BUFFER_SECONDS of audio (still served by the backend after Stop --
+  // see get_waveform() in audio_service.py); gated on hasEverStartedRef
+  // instead, so a chart that was never Start/Record'ed doesn't poll at all.
   useEffect(() => {
-    if (!active) return;
+    if (!active && !hasEverStartedRef.current) return;
     let cancelled = false;
     const poll = async () => {
       let xMin = viewRef.current.xMin;
       let xMax = viewRef.current.xMax;
       if (xMin === null || xMax === null) {
-        xMax = Date.now();
+        const anchor = nowAnchor();
+        xMax = anchor.nowMs;
         xMin = xMax - xWindowMs;
         // Start/Record just began -- there's no audio before its own 0s
         // mark, so the live window can't reach back past it either.
-        if (streamStartedAtMs !== null) xMin = Math.max(xMin, streamStartedAtMs);
+        if (anchor.streamStartedAtMs !== null) xMin = Math.max(xMin, anchor.streamStartedAtMs);
       }
       const maxPoints = Math.max(50, Math.round(size.w));
       try {
@@ -169,15 +204,18 @@ function WaveformChart({
       cancelled = true;
       clearInterval(id);
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [channelIndex, xWindowMs, active, size.w, streamStartedAtMs]);
 
-  // keep the rolling window scrolling forward even between polls
+  // keep the rolling window scrolling forward even between polls -- only
+  // while live; once frozen, the view has already stopped changing so
+  // there's nothing to keep re-rendering for.
   useEffect(() => {
     const id = setInterval(() => {
-      if (viewRef.current.xMin === null) redraw();
+      if (active && viewRef.current.xMin === null) redraw();
     }, 200);
     return () => clearInterval(id);
-  }, []);
+  }, [active]);
 
   // ---- drawing -------------------------------------------------------------
 
@@ -204,10 +242,11 @@ function WaveformChart({
 
     let xMin = viewRef.current.xMin;
     let xMax = viewRef.current.xMax;
+    const anchor = nowAnchor();
     if (xMin === null || xMax === null) {
-      xMax = Date.now();
+      xMax = anchor.nowMs;
       xMin = xMax - xWindowMs;
-      if (streamStartedAtMs !== null) xMin = Math.max(xMin, streamStartedAtMs);
+      if (anchor.streamStartedAtMs !== null) xMin = Math.max(xMin, anchor.streamStartedAtMs);
     }
 
     const points = pointsRef.current;
@@ -238,7 +277,7 @@ function WaveformChart({
     // scrolls forward -- anchoring to xMin instead would freeze every tick
     // at a constant offset (e.g. always "0ms, 667ms, 1.33s, 2.00s"), since
     // xMin scrolls forward at the same rate as the ticks themselves.
-    const xTickRef = streamStartedAtMs ?? xMax!;
+    const xTickRef = anchor.streamStartedAtMs ?? xMax!;
     ctx.strokeStyle = '#363b47';
     ctx.fillStyle = '#8b909c';
     ctx.font = '10px monospace';

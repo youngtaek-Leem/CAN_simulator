@@ -230,6 +230,29 @@ def test_get_waveform_before_any_stream_returns_empty_points(dirs):
     assert all(ch["points"] == [] for ch in result["channels"])
 
 
+def test_get_waveform_still_served_after_stream_closed(dirs):
+    """오디오 신호 모니터 위젯의 Stop 이후 파형 탐색: stop()/stop_monitor()는
+    _level_trackers를 지우지 않으므로, 스트림이 닫힌 뒤에도 최근
+    RAW_BUFFER_SECONDS만큼은 계속 조회할 수 있어야 한다 (그래야 위젯이 정지
+    시점 뷰를 고정하고 좌우로 스크롤/확대해서 탐색할 수 있다)."""
+    rec_dir, golden_dir = dirs
+    svc = AudioService(rec_dir, golden_dir)
+    svc._active_samplerate = SR
+    now = time.time()
+    svc._level_trackers[0].add_chunk(np.array([0.1, 0.2, 0.3], dtype=np.float32), now=now)
+
+    # simulate Stop: stream closed, but (as in the real stop paths) the
+    # level trackers are left untouched.
+    svc._stream = None
+
+    result = svc.get_waveform(from_ms=(now - 1) * 1000, to_ms=(now + 1) * 1000, max_points=10)
+    assert result["active"] is False
+    assert result["samplerate"] == SR
+    ch0_points = result["channels"][0]["points"]
+    assert len(ch0_points) > 0
+    assert any(p["max"] > 0 for p in ch0_points)
+
+
 def test_start_monitor_rejected_without_device_selected(dirs):
     rec_dir, golden_dir = dirs
     svc = AudioService(rec_dir, golden_dir)

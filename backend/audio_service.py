@@ -71,9 +71,13 @@ RAW_BUFFER_SECONDS = 30.0
 
 class _ChannelLevelTracker:
     """Rolling level state for one captured channel. add_chunk() runs on the
-    sounddevice callback thread; snapshot()/waveform_slice()/reset() are
+    sounddevice callback thread; snapshot()/snapshot_chunks()/reset() are
     called from request handler threads -- callers must hold
-    AudioService._level_lock for all of them."""
+    AudioService._level_lock for all of them (they only touch/copy state,
+    they're cheap). waveform_slice()'s actual per-column decimation is the
+    one exception: run it AFTER releasing the lock, on a snapshot_chunks()
+    copy, since it can be real work and must never block the callback -- see
+    AudioService.get_waveform()."""
 
     def __init__(self) -> None:
         self.peak = 0.0
@@ -98,19 +102,42 @@ class _ChannelLevelTracker:
         while self._raw_chunks and self._raw_chunks[0][0] < cutoff:
             self._raw_chunks.popleft()
 
-    def waveform_slice(self, from_s: float, to_s: float, max_points: int, samplerate: int) -> list[dict]:
+    def snapshot_chunks(self) -> list[tuple[float, np.ndarray]]:
+        """Shallow copy of the raw ring buffer -- O(number of chunks) but
+        only copying (float, ndarray) references, not the sample data
+        itself, so it's cheap enough to take under _level_lock. Callers
+        should release the lock before running waveform_slice()'s per-column
+        decimation on the result, so the real-time audio callback (which
+        needs the same lock every buffer) is never blocked behind that
+        math -- see AudioService.get_waveform()."""
+        return list(self._raw_chunks)
+
+    def waveform_slice(
+        self,
+        from_s: float,
+        to_s: float,
+        max_points: int,
+        samplerate: int,
+        chunks: Optional[list[tuple[float, np.ndarray]]] = None,
+    ) -> list[dict]:
         """Up to max_points {t, min, max} columns (epoch seconds, [-1,1])
         covering [from_s, to_s], decimated from the raw ring buffer. Zoomed
         far out -> each column averages many samples (an envelope, like a
         DAW's overview track); zoomed in close to sample-level -> each
-        column is ~1 sample, i.e. the actual waveform."""
+        column is ~1 sample, i.e. the actual waveform.
+
+        `chunks` defaults to the live ring buffer (for direct/test use);
+        AudioService.get_waveform() passes a snapshot_chunks() copy instead
+        so this decimation work runs without holding _level_lock."""
         if to_s <= from_s or max_points <= 0 or samplerate <= 0:
             return []
+        if chunks is None:
+            chunks = self._raw_chunks
         column_width = (to_s - from_s) / max_points
         col_min = [None] * max_points
         col_max = [None] * max_points
 
-        for chunk_start, arr in self._raw_chunks:
+        for chunk_start, arr in chunks:
             n = len(arr)
             if n == 0:
                 continue
@@ -559,16 +586,38 @@ class AudioService:
         from_ms/to_ms: epoch milliseconds (i.e. JS Date.now() units) -- the
         frontend's chart view state is expressed directly in this unit, no
         separate clock-sync step needed since frontend and backend share the
-        same machine clock here."""
+        same machine clock here.
+
+        The per-column decimation in waveform_slice() can be real work (it
+        scans every buffered chunk, up to RAW_BUFFER_SECONDS worth). It must
+        NOT run while holding _level_lock: that same lock is taken by the
+        sounddevice callback on every single audio buffer, and the widget
+        polls this endpoint continuously (every 60ms) while open. Holding
+        the lock across the decimation stalls the real-time callback behind
+        an HTTP-handler-thread computation, which is exactly what causes
+        recordings to glitch/drop out -- so only the O(chunk count) snapshot
+        copy happens under the lock; the actual math runs after releasing
+        it.
+
+        Deliberately served even after the stream has been stopped (i.e.
+        without requiring `self._stream is not None`): stop()/stop_monitor()
+        never clear `_level_trackers`, so the last RAW_BUFFER_SECONDS of
+        audio stay queryable after Stop, letting the 오디오 신호 모니터 widget
+        freeze its view and let the user pan/zoom back through the recent
+        past instead of the chart just going blank."""
         samplerate = self._active_samplerate
+        if samplerate is None:
+            channels = [{"index": i, "points": []} for i in range(len(self._level_trackers))]
+            return {"active": self._stream is not None, "samplerate": samplerate, "channels": channels}
+
         with self._level_lock:
-            if samplerate is None or self._stream is None:
-                channels = [{"index": i, "points": []} for i in range(len(self._level_trackers))]
-            else:
-                channels = [
-                    {"index": i, "points": t.waveform_slice(from_ms / 1000.0, to_ms / 1000.0, max_points, samplerate)}
-                    for i, t in enumerate(self._level_trackers)
-                ]
+            snapshots = [t.snapshot_chunks() for t in self._level_trackers]
+
+        from_s, to_s = from_ms / 1000.0, to_ms / 1000.0
+        channels = [
+            {"index": i, "points": t.waveform_slice(from_s, to_s, max_points, samplerate, chunks=snapshots[i])}
+            for i, t in enumerate(self._level_trackers)
+        ]
         return {
             "active": self._stream is not None,
             "samplerate": samplerate,

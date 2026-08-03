@@ -1,16 +1,31 @@
 """ISO-TP (ISO 15765-2) transport-layer sender/receiver, classic addressing.
 
-Single Frame is used for payloads up to 7 bytes and sent immediately. Longer
-payloads (up to the classic 12-bit length field's 4095 bytes) are sent as a
-First Frame followed by Consecutive Frames, waiting for a Flow Control frame
-from the receiver (arriving on `fc_id`) before each block and honoring its
-Block Size (BS) and STmin, per ISO 15765-2. All frames are padded to 8 bytes.
+Single Frame is used for payloads up to 7 bytes (classic CAN) and sent
+immediately. Longer payloads (up to the classic 12-bit length field's 4095
+bytes) are sent as a First Frame followed by Consecutive Frames, waiting for
+a Flow Control frame from the receiver (arriving on `fc_id`) before each
+block and honoring its Block Size (BS) and STmin, per ISO 15765-2.
+
+``is_fd``/``bitrate_switch`` select the CAN frame type. When not given
+explicitly, both default to ``can_manager.fd_enabled`` so that diagnostic
+traffic automatically goes out as CAN-FD frames whenever the bus is
+connected in FD mode, and as classic CAN frames otherwise. When ``is_fd`` is
+true, frames also carry more payload per the CAN-FD extension in ISO
+15765-2:2016: Single Frame up to 62 bytes (via the length-escape PCI form),
+First Frame data up to 62 bytes, Consecutive Frame data up to 63 bytes --
+each frame padded up to the nearest valid CAN-FD length (8/12/16/20/24/32/
+48/64). Classic (non-FD) frames are always padded to exactly 8 bytes as
+before.
 
 Reception (receive function):
 - Waits for an incoming ISO-TP message on a given arbitration ID
-- Single Frame (1-7 bytes payload): returned immediately
+- Single Frame: returned immediately (classic short form or CAN-FD escape
+  form, decided by the sender's actual PCI/frame length -- no is_fd branching
+  needed to parse it)
 - Multi-frame: receives First Frame, sends Flow Control, then receives
-  Consecutive Frames, reassembles the full payload
+  Consecutive Frames (each frame's own length determines its data bytes, so
+  classic and CAN-FD senders are both handled automatically), reassembles
+  the full payload
 - Timeout handling for each phase
 """
 
@@ -24,6 +39,16 @@ FF_DATA_LEN = 6
 CF_DATA_LEN = 7
 MAX_ISOTP_LEN = 4095
 PAD_BYTE = 0x00
+
+# CAN-FD (ISO 15765-2:2016) framing limits: escape-form Single Frame and
+# First Frame carry up to 62 data bytes (frame length 64 minus a 2-byte PCI),
+# Consecutive Frame up to 63 (minus its 1-byte PCI).
+FD_MAX_LEN = 64
+FD_SF_MAX_LEN = FD_MAX_LEN - 2
+FD_FF_DATA_LEN = FD_MAX_LEN - 2
+FD_CF_DATA_LEN = FD_MAX_LEN - 1
+# Valid CAN-FD data lengths (DLC 8-15), per ISO 11898-1.
+FD_VALID_LENGTHS = (8, 12, 16, 20, 24, 32, 48, 64)
 
 # PCI types
 PCI_SF = 0x00
@@ -45,6 +70,19 @@ def _pad(data: bytes) -> bytes:
     if len(data) < 8:
         return data + bytes([PAD_BYTE]) * (8 - len(data))
     return data
+
+
+def _fd_frame_len(n: int) -> int:
+    """Smallest valid CAN-FD data length that fits ``n`` bytes."""
+    for length in FD_VALID_LENGTHS:
+        if n <= length:
+            return length
+    raise IsoTpError(f"CAN-FD 프레임 최대 길이({FD_MAX_LEN}바이트)를 초과했습니다")
+
+
+def _pad_fd(data: bytes) -> bytes:
+    target = _fd_frame_len(len(data))
+    return data + bytes([PAD_BYTE]) * (target - len(data))
 
 
 def _decode_stmin(byte: int) -> float:
@@ -105,6 +143,8 @@ def send(
     is_extended_id: bool = False,
     fc_timeout_s: float = 1.0,
     max_wait_frames: int = 10,
+    is_fd: Optional[bool] = None,
+    bitrate_switch: Optional[bool] = None,
 ) -> dict:
     if not data:
         raise IsoTpError("전송할 데이터가 없습니다")
@@ -113,11 +153,25 @@ def send(
     if can_manager.notifier is None:
         raise IsoTpError("CAN 버스가 연결되어 있지 않습니다")
 
+    if is_fd is None:
+        is_fd = can_manager.fd_enabled
+    if bitrate_switch is None:
+        bitrate_switch = is_fd
+
+    sf_max_len = FD_SF_MAX_LEN if is_fd else SF_MAX_LEN
+    ff_data_len = FD_FF_DATA_LEN if is_fd else FF_DATA_LEN
+    cf_data_len = FD_CF_DATA_LEN if is_fd else CF_DATA_LEN
+    pad = _pad_fd if is_fd else _pad
+
     t0 = time.perf_counter()
 
-    if len(data) <= SF_MAX_LEN:
-        frame = _pad(bytes([len(data)]) + data)
-        can_manager.send(tx_id, frame, is_extended_id)
+    if len(data) <= sf_max_len:
+        if len(data) <= SF_MAX_LEN:
+            frame = pad(bytes([len(data)]) + data)
+        else:
+            # CAN-FD Single Frame escape form: PCI 0x00, explicit length byte
+            frame = pad(bytes([PCI_SF, len(data)]) + data)
+        can_manager.send(tx_id, frame, is_extended_id, is_fd=is_fd, bitrate_switch=bitrate_switch)
         return {
             "sent": True,
             "frame_type": "single",
@@ -127,12 +181,12 @@ def send(
         }
 
     total_len = len(data)
-    ff = bytes([PCI_FF | ((total_len >> 8) & 0x0F), total_len & 0xFF]) + data[:FF_DATA_LEN]
+    ff = bytes([PCI_FF | ((total_len >> 8) & 0x0F), total_len & 0xFF]) + data[:ff_data_len]
     reader = can.BufferedReader()
     can_manager.notifier.add_listener(reader)
     try:
-        can_manager.send(tx_id, _pad(ff), is_extended_id)
-        remaining = data[FF_DATA_LEN:]
+        can_manager.send(tx_id, pad(ff), is_extended_id, is_fd=is_fd, bitrate_switch=bitrate_switch)
+        remaining = data[ff_data_len:]
         frames_sent = 1
         sn = 1
         wait_count = 0
@@ -158,8 +212,14 @@ def send(
             while remaining and (block_size == 0 or block_count < block_size):
                 if stmin > 0 and block_count > 0:
                     time.sleep(stmin)
-                chunk, remaining = remaining[:CF_DATA_LEN], remaining[CF_DATA_LEN:]
-                can_manager.send(tx_id, _pad(bytes([PCI_CF | (sn & 0x0F)]) + chunk), is_extended_id)
+                chunk, remaining = remaining[:cf_data_len], remaining[cf_data_len:]
+                can_manager.send(
+                    tx_id,
+                    pad(bytes([PCI_CF | (sn & 0x0F)]) + chunk),
+                    is_extended_id,
+                    is_fd=is_fd,
+                    bitrate_switch=bitrate_switch,
+                )
                 frames_sent += 1
                 sn = (sn + 1) % 16
                 block_count += 1
@@ -188,6 +248,8 @@ def receive(
     is_extended_id: bool = False,
     fc_stmin: int = 0x00,
     fc_block_size: int = 0,
+    is_fd: Optional[bool] = None,
+    bitrate_switch: Optional[bool] = None,
 ) -> bytes:
     """Receive an ISO-TP message on the given arbitration ID.
 
@@ -207,6 +269,11 @@ def receive(
         STmin value to send in Flow Control (default 0x00 = 0ms).
     fc_block_size : int
         Block Size to send in Flow Control (default 0 = unlimited).
+    is_fd : bool, optional
+        CAN frame type for the outgoing Flow Control frame. Defaults to
+        ``can_manager.fd_enabled`` when not given.
+    bitrate_switch : bool, optional
+        Defaults to ``is_fd`` when not given.
 
     Returns
     -------
@@ -220,6 +287,11 @@ def receive(
     """
     if can_manager.notifier is None:
         raise IsoTpError("CAN 버스가 연결되어 있지 않습니다")
+
+    if is_fd is None:
+        is_fd = can_manager.fd_enabled
+    if bitrate_switch is None:
+        bitrate_switch = is_fd
 
     reader = can.BufferedReader()
     can_manager.notifier.add_listener(reader)
@@ -255,16 +327,20 @@ def receive(
             if total_length > MAX_ISOTP_LEN:
                 raise IsoTpError(f"ISO-TP 길이({total_length})가 최대값({MAX_ISOTP_LEN})을 초과했습니다")
 
-            # Data carried in FF (after the 2-byte length)
-            payload = bytearray(data[2:2 + FF_DATA_LEN])
+            # Data carried in FF (after the 2-byte length). Uses the actual
+            # received frame length rather than a fixed constant, so both
+            # classic (8-byte) and CAN-FD (up to 64-byte) First Frames are
+            # decoded the same way.
+            ff_data_len = min(len(data) - 2, total_length)
+            payload = bytearray(data[2:2 + ff_data_len])
 
             # Send Flow Control (CTS, unlimited block size)
             fc = _build_fc(FS_CTS, fc_block_size, fc_stmin)
-            can_manager.send(tx_id, _pad(fc), is_extended_id)
+            can_manager.send(tx_id, _pad(fc), is_extended_id, is_fd=is_fd, bitrate_switch=bitrate_switch)
 
             # Receive Consecutive Frames
             expected_sn = 1
-            remaining = total_length - FF_DATA_LEN
+            remaining = total_length - ff_data_len
             while remaining > 0:
                 cf_timeout = max(0.1, timeout_s - (time.perf_counter() - t0))
                 if cf_timeout <= 0:
@@ -288,7 +364,7 @@ def receive(
                         f"Consecutive Frame SN 불일치: 기대={expected_sn}, 수신={cf_sn}"
                     )
 
-                chunk_len = min(CF_DATA_LEN, remaining)
+                chunk_len = min(len(cf_data) - 1, remaining)
                 payload.extend(cf_data[1:1 + chunk_len])
                 remaining -= chunk_len
                 expected_sn = (expected_sn + 1) % 16

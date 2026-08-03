@@ -25,27 +25,28 @@ interface SignalRow {
 /** "수신 CAN 신호 표시창": a flat, per-signal (not per-message) live table of
  * the AMP TX signals -- i.e. signals belonging to messages the real DUT
  * (AMP) sends, which the simulator receives (groupedMessages' "rx" set,
- * relative to the configured RX node), showing only currently-valid values.
- * Unlike CanMessageDisplay, there's no message-row-with-expandable-detail:
- * each row IS a signal. */
+ * relative to the configured RX node). Once a signal has been seen with a
+ * valid value at least once, its row stays in the table for good and only
+ * updates when a NEW valid value arrives -- a frame decoding as invalid
+ * just leaves the row showing its last-known-good value instead of making
+ * it disappear (see canStore.lastValidSignal). Unlike CanMessageDisplay,
+ * there's no message-row-with-expandable-detail: each row IS a signal. */
 export function RxSignalDisplay({ config: _config }: { config: WidgetConfig }) {
   useCanVersion();
   const { dbc } = useApp();
   const ampTxNames = new Set(groupedMessages(dbc, canStore.getRxNode()).rx.map((m) => m.name));
 
   const rows: SignalRow[] = [];
-  for (const f of canStore.frames.values()) {
-    if (!f.decoded || !ampTxNames.has(f.decoded.name)) continue;
-    const message = dbc.messages?.find((m) => m.name === f.decoded!.name);
-    for (const signalName of f.decoded.valid_signals) {
-      rows.push({
-        ts: f.ts,
-        message: f.decoded.name,
-        signal: signalName,
-        value: f.decoded.signals[signalName],
-        unit: message?.signals.find((s) => s.name === signalName)?.unit ?? null,
-      });
-    }
+  for (const entry of canStore.lastValidSignal.values()) {
+    if (!ampTxNames.has(entry.message)) continue;
+    const message = dbc.messages?.find((m) => m.name === entry.message);
+    rows.push({
+      ts: entry.ts,
+      message: entry.message,
+      signal: entry.signal,
+      value: entry.value,
+      unit: message?.signals.find((s) => s.name === entry.signal)?.unit ?? null,
+    });
   }
   rows.sort((a, b) => a.message.localeCompare(b.message) || a.signal.localeCompare(b.signal));
 

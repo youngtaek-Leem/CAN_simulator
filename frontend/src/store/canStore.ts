@@ -43,9 +43,23 @@ export function formatTestRunnerEvent(ev: TestRunnerEvent): string {
   return ev.msg ?? `[${ev.type ?? '?'}] ${ev.message ?? ''} ${ev.signal ?? ''} → ${ev.status ?? ''}`.trim();
 }
 
+export interface LastValidSignal {
+  ts: number;
+  message: string;
+  signal: string;
+  value: number | string;
+}
+
 class CanStore {
   frames = new Map<number, FrameEntry>();
   signals = new Map<string, number | string>(); // "Message.Signal" -> value
+  // "Message.Signal" -> last VALID decoded value (per backend's valid_signals
+  // for that frame). Unlike `signals` above (overwritten every frame,
+  // invalid or not), this only ever updates on a valid reading and is never
+  // deleted for a signal once seen -- so RxSignalDisplay can keep showing a
+  // signal's last-known-good value forever instead of the row disappearing
+  // whenever the current frame happens to decode as invalid.
+  lastValidSignal = new Map<string, LastValidSignal>();
   trace: RxFrame[] = []; // chronological raw frames (last TRACE_WINDOW_S seconds)
   // Per-signal time series, populated only for signals with an active graph
   // widget watching them (see watchSignal/unwatchSignal) so history isn't
@@ -270,9 +284,13 @@ class CanStore {
         cycleMs: cycleMs !== null && cycleMs > 0 ? cycleMs : prev?.cycleMs ?? null,
       });
       if (f.decoded) {
+        const validNames = new Set(f.decoded.valid_signals);
         for (const [sig, value] of Object.entries(f.decoded.signals)) {
           const key = `${f.decoded.name}.${sig}`;
           this.signals.set(key, value);
+          if (validNames.has(sig)) {
+            this.lastValidSignal.set(key, { ts: f.ts, message: f.decoded.name, signal: sig, value });
+          }
           if (this.signalWatchers.has(key)) {
             const numeric =
               typeof value === 'number' ? value : this.choiceReverse.get(key)?.get(value);
@@ -346,6 +364,7 @@ class CanStore {
   clearFrames() {
     this.frames.clear();
     this.signals.clear();
+    this.lastValidSignal.clear();
     this.resetTimeBase();
   }
 
