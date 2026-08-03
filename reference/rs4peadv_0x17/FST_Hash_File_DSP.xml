@@ -1,6 +1,0 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<root>
-	<firmware name="DSP_signature_full.hex" hash_type="sha256" digest="ac40647c24696181286cafaa4491856f773ef8384c4ca0df5025c88491e5a672">
-		<section>0x00000000--0x016FFFFF</section>
-	</firmware>
-</root>

@@ -1,6 +1,0 @@
-<?xml version="1.0" encoding="UTF-8"?>
-<root>
-	<firmware name="SFFS_signature_full.hex" hash_type="sha256" digest="0ae07c0e7a7049e6abf9f779789249a63997770aa287c2c0d0d9ae2daad50a7f">
-		<section>0x00000000--0x0051FFFF</section>
-	</firmware>
-</root>
