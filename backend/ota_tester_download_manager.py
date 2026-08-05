@@ -71,6 +71,31 @@ def _to_int(val: Any, default: int = 0) -> int:
     return default
 
 
+def _extract_comm_timing(steps: list[dict]) -> Optional[dict]:
+    """Look for a `startCommunication` step among a case's parsed steps and
+    return its config params (p2CanServerMax / p2StarCanServerMax /
+    NRC78Repetitiontimeout / stminTx / ...), or None if the case doesn't
+    have one.
+
+    None of the real xfrm:test-rule sample files this project has seen
+    include such a step (unlike CAN-SWDL's xfrm:processing-rule schema,
+    which nests it under startCommunication's first sub-step) -- OTA
+    Tester's flat rule list has historically carried no timing config at
+    all, which is why _p2_can_server_max/_p2_star_can_server_max default
+    to fixed constants below. This is deliberately schema-tolerant (checks
+    both the step's own params and its first sub-step's, matching either
+    layout) so that if a future export ever does include one, it's picked
+    up automatically instead of silently ignored."""
+    for step in steps:
+        if step.get("service") != "startCommunication":
+            continue
+        sub_steps = step.get("sub_steps") or []
+        if sub_steps and sub_steps[0].get("params"):
+            return sub_steps[0]["params"]
+        return step.get("params") or {}
+    return None
+
+
 def iter_transfer_chunks(
     binary: bytes, seek_addr: int, write_size: int, block_size: int
 ):
@@ -128,9 +153,12 @@ class OtaTesterDownloadManager:
 
         self._request_id = 0x18DA00F1
         self._response_id = 0x18DA00F1
-        # Timing (ms), matching uds_download_manager's convention -- the
-        # OTA Tester test-rule XML schema carries no global timing config,
-        # so these are fixed defaults rather than XML-derived.
+        # Timing (ms), matching uds_download_manager's convention. Fixed
+        # defaults, overridden in add_case() if a case's XML actually
+        # defines a startCommunication config (see _extract_comm_timing) --
+        # no real test-rule sample seen so far has one, but this makes the
+        # values genuinely XML-derived whenever the data exists instead of
+        # only ever using the hardcoded default.
         self._p2_can_server_max = 50.0
         self._p2_star_can_server_max = 5000.0
 
@@ -179,6 +207,20 @@ class OtaTesterDownloadManager:
             raise RuntimeError("XML 파서를 사용할 수 없습니다")
         steps = parse_test_rule_xml(xml_path)
         binary_hint = steps[0].get("binary_path") if steps else None
+
+        comm_cfg = _extract_comm_timing(steps)
+        if comm_cfg:
+            p2 = _to_int(comm_cfg.get("p2CanServerMax"), int(self._p2_can_server_max))
+            p2_star = _to_int(comm_cfg.get("p2StarCanServerMax"), int(self._p2_star_can_server_max))
+            with self._lock:
+                self._p2_can_server_max = float(p2)
+                self._p2_star_can_server_max = float(p2_star)
+            self._log(
+                level="INFO",
+                msg=f"통신 타이밍 설정 로드 ({label}): P2={self._p2_can_server_max:.0f}ms, "
+                    f"P2*={self._p2_star_can_server_max:.0f}ms",
+            )
+
         case = {
             "id": case_id,
             "label": label,
@@ -504,27 +546,35 @@ class OtaTesterDownloadManager:
         self, request: bytes, timeout_s: float, label: str = "",
         max_retries: int = 3, retry_delay_s: float = 0.1,
     ) -> dict:
-        """Send a UDS request and receive the response, retrying on NRC 0x78
-        (ResponsePending). Returns the parsed positive response dict; raises
-        UdsError on any other negative response."""
+        """Send a UDS request once and receive the response, waiting again
+        (without retransmitting) on NRC 0x78 (ResponsePending) -- per ISO
+        14229-1 the client must NOT resend the request while the server is
+        still processing it, it must just keep waiting for the eventual
+        final response. Each post-0x78 wait uses the extended
+        P2*Server_max timeout (`_p2_star_can_server_max`) instead of the
+        original, usually much shorter, P2 timeout that was only meant to
+        bound the FIRST reply. Returns the parsed positive response dict;
+        raises UdsError on any other negative response, or once
+        max_retries consecutive 0x78s are exceeded."""
         is_ext = self._is_extended()
+        req_hex = request.hex(" ").upper() if isinstance(request, (bytes, bytearray)) else str(request)
+        self._log(level="INFO", service="CAN_TX", msg=f"Tx CAN_ID=0x{self._request_id:03X} DATA=[{req_hex}] ({label})")
+        self._isotp_send(
+            self._can, self._request_id, self._response_id, request,
+            is_extended_id=is_ext, fc_timeout_s=timeout_s,
+        )
+        pending_timeout_s = max(self._p2_star_can_server_max / 1000.0, timeout_s)
         for attempt in range(max_retries + 1):
-            req_hex = request.hex(" ").upper() if isinstance(request, (bytes, bytearray)) else str(request)
-            self._log(level="INFO", service="CAN_TX", msg=f"Tx CAN_ID=0x{self._request_id:03X} DATA=[{req_hex}] ({label})")
-
-            self._isotp_send(
-                self._can, self._request_id, self._response_id, request,
-                is_extended_id=is_ext, fc_timeout_s=timeout_s,
-            )
             response = self._isotp_receive(
                 self._can, self._response_id, self._request_id,
-                timeout_s=timeout_s, is_extended_id=is_ext, fc_stmin=self._get_fc_stmin(),
+                timeout_s=timeout_s if attempt == 0 else pending_timeout_s,
+                is_extended_id=is_ext, fc_stmin=self._get_fc_stmin(),
             )
             result = parse_response(response)
             if result["positive"]:
                 return result
             if result["nrc"] == 0x78 and attempt < max_retries:
-                self._log(level="WARN", msg=f"NRC 0x78 (ResponsePending) 재시도 {attempt + 1}/{max_retries}")
+                self._log(level="WARN", msg=f"NRC 0x78 (ResponsePending) 대기 {attempt + 1}/{max_retries} (P2*={pending_timeout_s:.1f}s)")
                 time.sleep(retry_delay_s)
                 continue
             raise UdsError(f"UDS Negative Response ({label}): NRC=0x{result['nrc']:02X}", nrc=result["nrc"])

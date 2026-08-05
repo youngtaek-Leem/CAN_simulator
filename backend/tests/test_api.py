@@ -371,6 +371,43 @@ def test_power_api_degrades_gracefully_without_hardware():
         assert r.status_code == 200
 
 
+def test_power_control_widget_routes_degrade_gracefully_without_hardware():
+    with make_client() as client:
+        # not connected -- every action route reports ok:false rather than 5xx
+        r = client.post("/api/power/battery", json={"voltage": 12.6, "current": 5})
+        assert r.status_code == 200
+        assert r.json()["ok"] is False
+
+        r = client.post("/api/power/acc_ign", json={"command": "ACC_On"})
+        assert r.status_code == 200
+        assert r.json()["ok"] is False
+
+        r = client.post(
+            "/api/power/onoff/start",
+            json={"on_voltage": 12.0, "on_current": 5, "on_s": 1, "off_voltage": 1.0, "off_current": 0, "off_s": 1},
+        )
+        assert r.status_code == 200
+        assert r.json()["ok"] is False
+
+        r = client.post("/api/power/onoff/stop")
+        assert r.status_code == 200
+        assert r.json()["ok"] is True
+
+        r = client.post(
+            "/api/power/sweep/start",
+            json={"low": 9.0, "high": 15.0, "current": 10, "leg_s": 5},
+        )
+        assert r.status_code == 200
+        assert r.json()["ok"] is False
+
+        r = client.post("/api/power/sweep/stop")
+        assert r.status_code == 200
+        assert r.json()["ok"] is True
+
+        status = client.get("/api/power/status").json()
+        assert set(status) >= {"acc", "ign", "battery_voltage", "battery_current", "onoff", "sweep"}
+
+
 def test_audio_devices_and_selection_api():
     with make_client() as client:
         r = client.get("/api/audio/devices")

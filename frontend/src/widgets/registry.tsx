@@ -21,6 +21,7 @@ import { RandomButtonWidget } from './RandomButtonWidget';
 import UdsSwdlWidget from './UdsSwdlWidget';
 import OtaTesterWidget from './OtaTesterWidget';
 import { AudioMonitorWidget } from './AudioMonitorWidget';
+import { PowerControlWidget } from './PowerControlWidget';
 
 interface WidgetMeta {
   label: string;
@@ -153,5 +154,10 @@ export const WIDGET_REGISTRY: Record<WidgetType, WidgetMeta> = {
     label: '오디오 신호 모니터',
     component: AudioMonitorWidget,
     defaultSize: { w: 11, h: 12, minW: 3, minH: 2 },
+  },
+  powerControl: {
+    label: '전원 컨트롤',
+    component: PowerControlWidget,
+    defaultSize: { w: 6, h: 14, minW: 3, minH: 6 },
   },
 };

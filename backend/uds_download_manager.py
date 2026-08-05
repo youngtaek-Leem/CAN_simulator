@@ -458,16 +458,65 @@ class UdsDownloadManager:
         self, request: bytes, timeout_s: float, label: str = "",
         max_retries: int = 3, retry_delay_s: float = 0.1,
     ) -> dict:
-        """Send UDS request with NRC 0x78 (ResponsePending) retry logic."""
+        """Send a UDS request once and receive the response, waiting again
+        (without retransmitting) on NRC 0x78 (ResponsePending) -- per ISO
+        14229-1 the client must NOT resend the request while the server is
+        still processing it, it must just keep waiting for the eventual
+        final response. Each post-0x78 wait uses the extended
+        P2*Server_max timeout (`proc.p2_star_can_server_max`) instead of
+        the original, usually much shorter, P2 timeout that was only meant
+        to bound the FIRST reply.
+
+        Deliberately does not delegate to `_uds_request()` (which both
+        sends and receives) -- that method is still used as-is by callers
+        that want a single send+receive with no pending-retry handling
+        (e.g. ECUReset)."""
+        proc = self._procedure
+        if proc is None:
+            raise RuntimeError("No procedure loaded")
+
+        tx_id = proc.request_id
+        rx_id = proc.response_id
+        is_ext = (proc.request_id > 0x7FF) or (proc.response_id > 0x7FF)
+        extended_id_attr = getattr(proc, "is_extended_id", None)
+        if extended_id_attr is not None:
+            is_ext = extended_id_attr
+        fc_stmin = self._get_fc_stmin()
+
+        req_hex = request.hex(" ").upper() if isinstance(request, (bytes, bytearray)) else str(request)
+        self._log(level="INFO", service="CAN_TX", msg=f"Tx CAN_ID=0x{tx_id:03X} DATA=[{req_hex}] ({label})")
+        try:
+            self._isotp_send(self._can, tx_id, rx_id, request, is_extended_id=is_ext, fc_timeout_s=timeout_s)
+        except Exception as exc:
+            raise UdsError(f"ISO-TP 송신 실패 ({label}): {exc}")
+
+        pending_timeout_s = max(proc.p2_star_can_server_max / 1000.0, timeout_s)
         for attempt in range(max_retries + 1):
             try:
-                return self._uds_request(request, timeout_s, f"{label} (시도 {attempt + 1})")
-            except UdsError as exc:
-                if exc.nrc == 0x78 and attempt < max_retries:
-                    self._log(level="WARN", msg=f"NRC 0x78 (ResponsePending) 재시도 {attempt + 1}/{max_retries}")
-                    time.sleep(retry_delay_s)
-                    continue
-                raise
+                response = self._isotp_receive(
+                    self._can, rx_id, tx_id,
+                    timeout_s=timeout_s if attempt == 0 else pending_timeout_s,
+                    is_extended_id=is_ext,
+                    fc_stmin=fc_stmin,
+                )
+            except Exception as exc:
+                raise UdsError(f"ISO-TP 수신 실패 ({label}): {exc}")
+
+            result = parse_response(response)
+            if result["positive"]:
+                return result
+            if result["nrc"] == 0x78 and attempt < max_retries:
+                self._log(
+                    level="WARN",
+                    msg=f"NRC 0x78 (ResponsePending) 대기 {attempt + 1}/{max_retries} (P2*={pending_timeout_s:.1f}s)",
+                )
+                time.sleep(retry_delay_s)
+                continue
+            raise UdsError(
+                f"UDS Negative Response ({label}): SID=0x{result['sid']:02X}, NRC=0x{result['nrc']:02X}",
+                nrc=result["nrc"],
+            )
+        raise UdsError(f"No response ({label})")
 
     # ---- Internal: Main execution loop ---------------------------------------
 

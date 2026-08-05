@@ -15,7 +15,10 @@ true, frames also carry more payload per the CAN-FD extension in ISO
 First Frame data up to 62 bytes, Consecutive Frame data up to 63 bytes --
 each frame padded up to the nearest valid CAN-FD length (8/12/16/20/24/32/
 48/64). Classic (non-FD) frames are always padded to exactly 8 bytes as
-before.
+before. Passing ``is_fd=True`` explicitly only affects this module's own
+framing decisions -- ``CanManager.send()`` still clamps the frame actually
+put on the wire to classic whenever the connection itself isn't in FD mode,
+since classic hardware can't transmit FD frames.
 
 Reception (receive function):
 - Waits for an incoming ISO-TP message on a given arbitration ID

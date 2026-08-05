@@ -1235,3 +1235,54 @@ stop_monitor 시 앵커 초기화, 기존 rotate/stop 테스트 리네임) — �
 캡처된 `/api/audio/waveform` 요청들의 `from_ms`를 대조해 좌측 눈금 값이 경과초와 정확히
 일치하며 시간에 따라 증가함을 수치로도 재확인했다. tsc/build/lint 클린, 백엔드 전체 178개
 테스트 통과(이번 수정은 프론트 라벨 계산 로직만 변경, 백엔드/테스트 변경 없음).
+
+## "전원 컨트롤" 위젯 (2026-08-04, 사용자 승인 완료 — 개발 완료, 검증 통과)
+
+### 목표/범위
+- 기존 `backend/power_supply_service.py`(PyVISA/SCPI 파워서플라이 제어, 테스트 러너의
+  Power 스텝에서만 쓰이던 것)를 REST로 직접 노출하는 신규 독립 위젯.
+- 기능: ① 전원 연결/해제, ② 배터리 전압+전류 입력 후 OK로 명령 전송, ③ ACC 토글
+  스위치, ④ IGN 토글 스위치, ⑤ 자동 On/Off 반복(배터리 전압을 설정한 On값↔0V로 On시간/
+  Off시간 간격으로 계속 전환), ⑥ 자동 전압 Up/Down 반복(Low↔High 삼각파, 편도 시간 입력,
+  전류는 스윕 내내 고정).
+- 사양 확정 과정에서 명확히 한 것(사용자 확인):
+  - 5번은 ACC/IGN이 아니라 **배터리 전압**을 On(입력값)↔Off(0V/0A)로 토글하는 것.
+  - 6번은 **삼각파**(Low→High→Low, 한 사이클 = 입력한 편도 시간 × 2), 톱니파 아님.
+  - 2, 5, 6번 모두 전압+전류를 함께 입력(기존 `APPLy {voltage},{current}` SCPI 포맷 —
+    테스트 러너 스크립트의 `{"command":"BATT","voltage":"14.4,5"}` 패턴과 동일한 개념).
+- 제외: 실제 전압/전류 read-back(장비에 MEAS 계열 명령이 없어 측정값 조회 불가 — 위젯은
+  마지막으로 보낸 명령값만 표시), 파워서플라이 출력 릴레이 자체의 On/Off(OUTP 명령은
+  이 장비에서 검증된 적 없어 사용하지 않음 — ACC/IGN 디지털 비트와 배터리 전압 두 채널만
+  다룸).
+
+### 핵심 설계
+- `_apply_battery(v, i)` 공통 헬퍼로 모든 전압 설정 경로(수동 OK, On/Off 반복, 스윕)가
+  `APPLy {v},{i}`를 보내고 마지막 전압/전류를 추적(read-back이 없어 위젯 표시용으로 필요).
+  기존 `set_power()`(테스트 러너 스크립트용, 문자열 그대로 전달)는 하위 호환을 위해
+  변경하지 않고 그대로 둠 — 새 `set_battery()`/`set_acc_ign()`이 위젯 전용 진입점.
+- On/Off 반복과 전압 스윕은 `tx_scheduler.py`/`audio_service.py`의 기존 "상시 백그라운드
+  스레드 + 0.2초 틱" 패턴을 재사용(`_auto_loop`/`_auto_tick`). 둘 다 같은 전압 채널을
+  다루므로 하나가 켜져 있으면 다른 하나의 시작을 거부(`start_onoff_repeat`/`start_sweep`).
+  삼각파는 `elapsed % (leg_s*2)`로 위상 계산 — 위로/아래로 구간을 나눠 선형 보간.
+- `_auto_tick(now=...)`에 시각을 주입할 수 있게 해서, 테스트가 실제로 sleep하지 않고도
+  위상 전환/삼각파 계산을 결정론적으로 검증할 수 있게 함(`audio_service`의 회전 타이머
+  테스트와 동일한 패턴).
+
+### 모듈 분해
+
+| 모듈 | 책임 | 검증 방법 | 상태 |
+|---|---|---|---|
+| `backend/power_supply_service.py` | `set_battery`/`set_acc_ign`/`start·stop_onoff_repeat`/`start·stop_sweep`, 백그라운드 틱, `info()` 확장(acc/ign/battery_voltage/battery_current/onoff/sweep) | pytest 17개 신규(연결 안 됐을 때 거부, bit 디코딩, 시간 0 이하 거부, On/Off 위상 전환, 삼각파 4개 지점 값, 상호 배타, disconnect 시 자동모드 정지 등) | **통과** |
+| `backend/main.py` | `POST /api/power/battery`, `/acc_ign`, `/onoff/start`,`/stop`, `/sweep/start`,`/stop` | pytest 1개(`test_power_control_widget_routes_degrade_gracefully_without_hardware`): 미연결 상태에서 전부 `ok:false`(정지 라우트는 `ok:true`), status 필드 존재 확인 | **통과** |
+| `frontend/src/widgets/PowerControlWidget.tsx` (신규) | 6개 섹션 UI, `canStore.status.power` 폴링, 자동모드 중 수동 배터리 입력/반대쪽 자동모드 비활성화 | `tsc -b`/oxlint 클린, 브라우저로 미연결 상태 렌더링·비활성화 상태·스크롤 확인 | **통과** |
+| `types.ts`/`api/client.ts`/`registry.tsx` | `PowerStatus` 확장(`PowerOnOffState`/`PowerSweepState`), `WidgetType`에 `powerControl` 추가, API 클라이언트 6개 함수 | `tsc -b` | **통과** |
+
+백엔드 전체 204개 테스트 통과(신규 18개), 프론트 `tsc -b`/`oxlint`/`vite build` 클린.
+
+**검증 제약**: 이 개발 환경에는 실제 파워서플라이(VISA 장비)가 연결돼 있지 않다(기존
+`power_supply_service` 테스트도 동일 전제 — "no real VISA instrument attached in
+CI/dev"). 백엔드 로직(SCPI 명령 시퀀스, 위상 전환, 삼각파 보간)은 가짜 VISA 인스턴트로
+철저히 단위 검증했고, 프론트는 브라우저에서 연결 버튼 클릭 시 `pyvisa`가 없다는 에러가
+정확히 표시되는 것과 미연결 상태에서의 입력/버튼 비활성화, 6개 섹션 전체 스크롤을
+확인했다. 실제 하드웨어로 전압/ACC/IGN 명령이 물리적으로 잘 나가는지, On/Off 반복·삼각파
+스윕이 실제 장비에서 의도대로 동작하는지는 실기 연결 후 별도 확인이 필요하다.

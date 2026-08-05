@@ -97,10 +97,35 @@ export interface LogStatus {
   duration_s: number;
 }
 
+export interface PowerOnOffState {
+  enabled: boolean;
+  on_voltage: number;
+  on_current: number;
+  on_s: number;
+  off_voltage: number;
+  off_current: number;
+  off_s: number;
+  phase: 'on' | 'off';
+}
+
+export interface PowerSweepState {
+  enabled: boolean;
+  low: number;
+  high: number;
+  current: number;
+  leg_s: number;
+}
+
 export interface PowerStatus {
   initialized: boolean;
   error: string | null;
   status_bits: number;
+  acc: boolean;
+  ign: boolean;
+  battery_voltage: number;
+  battery_current: number;
+  onoff: PowerOnOffState;
+  sweep: PowerSweepState;
 }
 
 export interface AudioDevice {
@@ -331,7 +356,8 @@ export type WidgetType =
   | 'randomMultiButton'
   | 'udsSwdl'
   | 'otaTester'
-  | 'audioMonitor';
+  | 'audioMonitor'
+  | 'powerControl';
 
 export interface SignalBinding {
   message: string;

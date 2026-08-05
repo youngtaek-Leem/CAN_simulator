@@ -907,6 +907,63 @@ def power_status():
     return power_supply_service.info()
 
 
+class PowerBatteryRequest(BaseModel):
+    voltage: float
+    current: float
+
+
+@app.post("/api/power/battery")
+def power_set_battery(req: PowerBatteryRequest):
+    return power_supply_service.set_battery(req.voltage, req.current)
+
+
+class PowerAccIgnRequest(BaseModel):
+    command: str  # ACC_On | ACC_Off | IGN_On | IGN_Off | ACC_IGN_On | ACC_IGN_Off
+
+
+@app.post("/api/power/acc_ign")
+def power_set_acc_ign(req: PowerAccIgnRequest):
+    return power_supply_service.set_acc_ign(req.command)
+
+
+class PowerOnOffRepeatRequest(BaseModel):
+    on_voltage: float
+    on_current: float
+    on_s: float
+    off_voltage: float
+    off_current: float
+    off_s: float
+
+
+@app.post("/api/power/onoff/start")
+def power_onoff_start(req: PowerOnOffRepeatRequest):
+    return power_supply_service.start_onoff_repeat(
+        req.on_voltage, req.on_current, req.on_s, req.off_voltage, req.off_current, req.off_s
+    )
+
+
+@app.post("/api/power/onoff/stop")
+def power_onoff_stop():
+    return power_supply_service.stop_onoff_repeat()
+
+
+class PowerSweepRequest(BaseModel):
+    low: float
+    high: float
+    current: float
+    leg_s: float
+
+
+@app.post("/api/power/sweep/start")
+def power_sweep_start(req: PowerSweepRequest):
+    return power_supply_service.start_sweep(req.low, req.high, req.current, req.leg_s)
+
+
+@app.post("/api/power/sweep/stop")
+def power_sweep_stop():
+    return power_supply_service.stop_sweep()
+
+
 # ---- Audio (Phase 2) --------------------------------------------------------
 
 

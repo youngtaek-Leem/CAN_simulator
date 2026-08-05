@@ -44,6 +44,73 @@ def test_device_listing_does_not_crash_without_hardware(dirs):
     assert "devices" in info
 
 
+# ---- refresh_devices(): input-only, host-API deduplication ----------------
+#
+# Bug report: on Windows, the device list showed output devices too.
+# refresh_devices() now filters server-side (once, instead of leaving every
+# frontend widget to remember to filter) and additionally restricts to the
+# default host API, since Windows commonly enumerates the same physical
+# device once per host API (MME/DirectSound/WASAPI/WDM-KS) and some of
+# those duplicate entries misreport channel counts.
+
+
+def test_refresh_devices_excludes_output_only_devices(dirs):
+    rec_dir, golden_dir = dirs
+    fake_devices = [
+        {"name": "Microphone", "max_input_channels": 2, "hostapi": 0},
+        {"name": "Speakers", "max_input_channels": 0, "hostapi": 0},
+    ]
+    svc = AudioService(rec_dir, golden_dir)
+    with patch("audio_service.sd.query_devices", return_value=fake_devices), \
+         patch("audio_service.sd.default") as fake_default:
+        fake_default.hostapi = 0
+        svc.refresh_devices()
+
+    names = [d["name"] for d in svc.info()["devices"]]
+    assert names == ["Microphone"]
+
+
+def test_refresh_devices_restricts_to_default_hostapi_to_avoid_windows_duplicates(dirs):
+    """Simulates the Windows scenario: the same physical mic enumerated
+    under both MME (hostapi 0, the default) and WASAPI (hostapi 2), plus a
+    WASAPI entry that misreports input channels for what is actually an
+    output device. Only the default-hostapi mic should survive."""
+    rec_dir, golden_dir = dirs
+    fake_devices = [
+        {"name": "Mic [MME]", "max_input_channels": 2, "hostapi": 0},
+        {"name": "Speakers [MME]", "max_input_channels": 0, "hostapi": 0},
+        {"name": "Mic [WASAPI]", "max_input_channels": 2, "hostapi": 2},
+        {"name": "Speakers [WASAPI, misreported]", "max_input_channels": 2, "hostapi": 2},
+    ]
+    svc = AudioService(rec_dir, golden_dir)
+    with patch("audio_service.sd.query_devices", return_value=fake_devices), \
+         patch("audio_service.sd.default") as fake_default:
+        fake_default.hostapi = 0
+        svc.refresh_devices()
+
+    names = [d["name"] for d in svc.info()["devices"]]
+    assert names == ["Mic [MME]"]
+
+
+def test_refresh_devices_falls_back_to_other_hostapis_if_default_has_no_input(dirs):
+    """A real microphone attached under a non-default host API must never
+    disappear entirely just because the default host API happens to have
+    no input devices of its own."""
+    rec_dir, golden_dir = dirs
+    fake_devices = [
+        {"name": "Speakers [MME]", "max_input_channels": 0, "hostapi": 0},
+        {"name": "USB Mic [WASAPI]", "max_input_channels": 1, "hostapi": 2},
+    ]
+    svc = AudioService(rec_dir, golden_dir)
+    with patch("audio_service.sd.query_devices", return_value=fake_devices), \
+         patch("audio_service.sd.default") as fake_default:
+        fake_default.hostapi = 0
+        svc.refresh_devices()
+
+    names = [d["name"] for d in svc.info()["devices"]]
+    assert names == ["USB Mic [WASAPI]"]
+
+
 def test_start_rejected_without_device_selected(dirs):
     rec_dir, golden_dir = dirs
     svc = AudioService(rec_dir, golden_dir)

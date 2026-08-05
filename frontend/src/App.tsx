@@ -588,6 +588,16 @@ function TopBar(props: TopBarProps) {
     }
   };
 
+  const powerConnected = canStore.status?.power.initialized ?? false;
+  const togglePower = async () => {
+    try {
+      if (powerConnected) await api.powerDisconnect();
+      else await api.powerConnect();
+    } catch (e) {
+      props.notify(`전원 연결 오류: ${(e as Error).message}`);
+    }
+  };
+
   const uploadDbc = async (file: File) => {
     try {
       await api.uploadDbc(file);
@@ -727,7 +737,7 @@ function TopBar(props: TopBarProps) {
 
       <span className="topbar-more" ref={moreRef}>
         <button className="small-btn" onClick={() => setShowMore((v) => !v)}>
-          ⋯ 더보기
+          ⋯ 필수 설정
         </button>
         {showMore && (
           <div className="topbar-more-panel">
@@ -794,6 +804,23 @@ function TopBar(props: TopBarProps) {
                     해제
                   </button>
                 )}
+              </div>
+            </div>
+
+            <div className="topbar-more-section">
+              <div className="topbar-more-heading">전원 연결</div>
+              <div className="topbar-more-row">
+                <button
+                  className={`small-btn ${powerConnected ? 'danger' : 'primary'}`}
+                  onClick={togglePower}
+                >
+                  {powerConnected ? '전원 연결 해제' : '전원 연결'}
+                </button>
+                <span className="hint" title={canStore.status?.power.error ?? undefined}>
+                  {powerConnected
+                    ? '✅ 연결됨'
+                    : `⚠️ 미연결${canStore.status?.power.error ? ` (${canStore.status.power.error})` : ''}`}
+                </span>
               </div>
             </div>
 
@@ -884,7 +911,7 @@ function TopBar(props: TopBarProps) {
       </span>
 
       <button className="small-btn" onClick={props.openSettings}>
-        ⚙ 설정
+        ⚙ 최적화 설정
       </button>
     </header>
   );

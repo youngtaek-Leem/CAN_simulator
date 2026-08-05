@@ -33,15 +33,35 @@ try:
 except ImportError:  # pragma: no cover - exercised via _RECORDING_AVAILABLE branch
     _RECORDING_AVAILABLE = False
 
-try:
-    import librosa
-    from librosa.sequence import dtw
-    from scipy.signal import correlate
-    from sklearn.metrics.pairwise import cosine_similarity
+# librosa/scikit-learn (WAV-comparison only -- not needed for recording or
+# live monitoring) are NOT imported here at module load time: they pull in a
+# very heavy chain (numba/llvmlite, full scipy.signal/scipy.stats, joblib,
+# sklearn + narwhals) that measured ~8s of a ~16s server-startup import time
+# even when compare() is never called. Imported lazily on first actual use
+# by _ensure_compare_deps(), below.
+_COMPARE_AVAILABLE: Optional[bool] = None
+librosa = None
+dtw = None
+correlate = None
+cosine_similarity = None
 
-    _COMPARE_AVAILABLE = True
-except ImportError:  # pragma: no cover - exercised via _COMPARE_AVAILABLE branch
-    _COMPARE_AVAILABLE = False
+
+def _ensure_compare_deps() -> bool:
+    """Import librosa/scikit-learn on first use of the WAV-comparison
+    feature and cache the result; a no-op on every call after the first."""
+    global _COMPARE_AVAILABLE, librosa, dtw, correlate, cosine_similarity
+    if _COMPARE_AVAILABLE is None:
+        try:
+            import librosa as _librosa
+            from librosa.sequence import dtw as _dtw
+            from scipy.signal import correlate as _correlate
+            from sklearn.metrics.pairwise import cosine_similarity as _cosine_similarity
+        except ImportError:  # pragma: no cover - exercised via _COMPARE_AVAILABLE branch
+            _COMPARE_AVAILABLE = False
+        else:
+            librosa, dtw, correlate, cosine_similarity = _librosa, _dtw, _correlate, _cosine_similarity
+            _COMPARE_AVAILABLE = True
+    return _COMPARE_AVAILABLE
 
 # CH3/CH4 (0-indexed 1,2), matches AppTest.py's channel mapping for its
 # specific multi-channel audio interface.
@@ -311,15 +331,42 @@ class AudioService:
         self.refresh_devices()
 
     def refresh_devices(self) -> dict:
+        """Populate self._devices with input-capable devices only.
+
+        Filtering here (once, server-side) rather than leaving it to every
+        frontend consumer to remember is deliberate -- a previous version
+        left this to each widget and one of them (TestRunnerBox) forgot,
+        silently showing output devices too.
+
+        On Windows, PortAudio typically enumerates the same physical
+        device once per host API (MME/DirectSound/WASAPI/WDM-KS), and it's
+        a well-documented quirk that some of those duplicate entries can
+        report a nonzero max_input_channels for what is actually an
+        output-only device -- restricting to sounddevice's own default
+        host API avoids most of that duplication/misreporting. This is a
+        no-op on macOS/Linux, which only ever have a single host API
+        (Core Audio / ALSA) to begin with. Falls back to every host API's
+        input devices if that restriction would leave none at all, so a
+        real microphone attached under a non-default host API can never
+        disappear from the list entirely."""
         if not _RECORDING_AVAILABLE:
             self.error = "sounddevice가 설치되어 있지 않습니다"
             self.initialized = False
             return self.info()
         try:
-            self._devices = [
-                {"index": i, "name": d["name"], "channels": d["max_input_channels"]}
-                for i, d in enumerate(sd.query_devices())
+            all_devices = list(sd.query_devices())
+            default_hostapi = sd.default.hostapi
+
+            def as_entry(i: int, d: dict) -> dict:
+                return {"index": i, "name": d["name"], "channels": d["max_input_channels"]}
+
+            input_devices = [as_entry(i, d) for i, d in enumerate(all_devices) if d["max_input_channels"] > 0]
+            same_hostapi = [
+                as_entry(i, d)
+                for i, d in enumerate(all_devices)
+                if d["max_input_channels"] > 0 and d["hostapi"] == default_hostapi
             ]
+            self._devices = same_hostapi or input_devices
             self.initialized = True
             self.error = None
         except Exception as exc:
@@ -627,7 +674,7 @@ class AudioService:
     # ---- comparison -------------------------------------------------------------
 
     def compare(self, filename: str, golden_name: str, threshold: float = DEFAULT_THRESHOLD) -> dict:
-        if not _COMPARE_AVAILABLE:
+        if not _ensure_compare_deps():
             return {"ok": False, "reason": "librosa/scikit-learn이 설치되어 있지 않습니다"}
         rec_path = self._rec_dir / filename
         golden_path = self._golden_dir / golden_name

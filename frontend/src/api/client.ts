@@ -160,6 +160,30 @@ export const api = {
 
   powerConnect: () => post<import('../types').PowerStatus>('/api/power/connect'),
   powerDisconnect: () => post<import('../types').PowerStatus>('/api/power/disconnect'),
+  powerSetBattery: (voltage: number, current: number) =>
+    post<{ ok: boolean; reason?: string }>('/api/power/battery', { voltage, current }),
+  powerSetAccIgn: (command: string) =>
+    post<{ ok: boolean; reason?: string }>('/api/power/acc_ign', { command }),
+  powerOnOffStart: (
+    onVoltage: number,
+    onCurrent: number,
+    onS: number,
+    offVoltage: number,
+    offCurrent: number,
+    offS: number,
+  ) =>
+    post<{ ok: boolean; reason?: string }>('/api/power/onoff/start', {
+      on_voltage: onVoltage,
+      on_current: onCurrent,
+      on_s: onS,
+      off_voltage: offVoltage,
+      off_current: offCurrent,
+      off_s: offS,
+    }),
+  powerOnOffStop: () => post<{ ok: boolean; reason?: string }>('/api/power/onoff/stop'),
+  powerSweepStart: (low: number, high: number, current: number, legS: number) =>
+    post<{ ok: boolean; reason?: string }>('/api/power/sweep/start', { low, high, current, leg_s: legS }),
+  powerSweepStop: () => post<{ ok: boolean; reason?: string }>('/api/power/sweep/stop'),
   audioDevices: () => request<import('../types').AudioStatus>('/api/audio/devices'),
   audioSelectDevice: (index: number) =>
     post<import('../types').AudioStatus>('/api/audio/device', { index }),

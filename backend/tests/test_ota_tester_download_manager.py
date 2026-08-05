@@ -504,3 +504,149 @@ def test_uds_request_with_retry_passes_stmin_override_to_receive(tmp_path):
     mgr._uds_request_with_retry(bytearray([0x10, 0x02]), 0.05, "test")
 
     assert received_stmin == [0x2A]
+
+
+# ---- NRC 0x78 (ResponsePending) regression tests ---------------------------
+#
+# Bug report: the ECU sent 7F 10 78 (pending), then the real positive
+# response ~800ms later -- but the old code retransmitted the request on
+# 0x78 (a spec violation per ISO 14229-1) and re-listened with the same
+# short P2 timeout instead of the extended P2* timeout, so it never caught
+# the delayed response and timed out. See ota_tester_download_manager.py's
+# _uds_request_with_retry.
+
+
+def test_uds_request_with_retry_does_not_retransmit_on_nrc78():
+    send_calls = []
+    receive_calls = []
+    responses = [bytes([0x7F, 0x10, 0x78]), bytes([0x50, 0x02])]  # pending, then positive
+
+    def fake_send(can, tx_id, rx_id, data, is_extended_id=False, fc_timeout_s=1.0, **kw):
+        send_calls.append(bytes(data))
+        return {"sent": True}
+
+    def fake_receive(can, rx_id, tx_id, timeout_s=1.0, is_extended_id=False, fc_stmin=0, **kw):
+        receive_calls.append(timeout_s)
+        return responses.pop(0)
+
+    can = type("FakeCan", (), {"notifier": object()})()
+    mgr = OtaTesterDownloadManager(can, fake_send, fake_receive)
+
+    result = mgr._uds_request_with_retry(bytearray([0x10, 0x02]), 0.05, "diagnosticSessionControl")
+
+    assert result["positive"] is True
+    # the request must be sent exactly once -- never retransmitted on 0x78
+    assert len(send_calls) == 1
+    # two receive()s: the initial short-P2 wait (pending), then one more
+    assert len(receive_calls) == 2
+
+
+def test_uds_request_with_retry_extends_timeout_after_nrc78():
+    """The wait after a 0x78 must use P2*Server_max, not the original
+    (much shorter) first-attempt timeout."""
+    receive_timeouts = []
+    responses = [bytes([0x7F, 0x10, 0x78]), bytes([0x50, 0x02])]
+
+    def fake_send(can, tx_id, rx_id, data, is_extended_id=False, fc_timeout_s=1.0, **kw):
+        return {"sent": True}
+
+    def fake_receive(can, rx_id, tx_id, timeout_s=1.0, is_extended_id=False, fc_stmin=0, **kw):
+        receive_timeouts.append(timeout_s)
+        return responses.pop(0)
+
+    can = type("FakeCan", (), {"notifier": object()})()
+    mgr = OtaTesterDownloadManager(can, fake_send, fake_receive)
+
+    mgr._uds_request_with_retry(bytearray([0x10, 0x02]), 0.05, "diagnosticSessionControl")
+
+    assert receive_timeouts[0] == 0.05  # first wait: the normal short P2 timeout
+    assert receive_timeouts[1] == mgr._p2_star_can_server_max / 1000.0  # 5.0s by default
+
+
+def test_uds_request_with_retry_raises_after_max_consecutive_pending():
+    send_calls = []
+
+    def fake_send(can, tx_id, rx_id, data, is_extended_id=False, fc_timeout_s=1.0, **kw):
+        send_calls.append(bytes(data))
+        return {"sent": True}
+
+    def fake_receive(can, rx_id, tx_id, timeout_s=1.0, is_extended_id=False, fc_stmin=0, **kw):
+        return bytes([0x7F, 0x10, 0x78])  # always pending, never resolves
+
+    can = type("FakeCan", (), {"notifier": object()})()
+    mgr = OtaTesterDownloadManager(can, fake_send, fake_receive)
+
+    with pytest.raises(Exception) as exc_info:
+        mgr._uds_request_with_retry(bytearray([0x10, 0x02]), 0.05, "diagnosticSessionControl", max_retries=3)
+
+    assert getattr(exc_info.value, "nrc", None) == 0x78
+    # still only ever sent once, even after exhausting every pending retry
+    assert len(send_calls) == 1
+
+
+# ---- P2/P2* timing read from a case's XML (startCommunication step) -------
+#
+# No real-world test-rule sample seen so far actually has a
+# startCommunication step (unlike CAN-SWDL's schema) -- these tests exercise
+# the case where one is present, and confirm the existing hardcoded
+# defaults still apply when it's absent (i.e. every real file so far).
+
+COMM_CONFIG_XML = """<?xml version="1.0" encoding="utf-8"?>
+<xfrm:root xmlns:xfrm="http://gitauto.com/xfrm/">
+  <xfrm:test-rule binaryPath="">
+    <xfrm:rule comment="VersionCheck">
+      <xfrm:startCommunication>
+        <xfrm:config stminTx="0x0A" p2CanServerMax="100" p2StarCanServerMax="8000" NRC78Repetitiontimeout="300" />
+      </xfrm:startCommunication>
+      <xfrm:diagnosticSessionControl diagnosticSessionType="0x81" confirmPositiveResponse="no" />
+    </xfrm:rule>
+  </xfrm:test-rule>
+</xfrm:root>
+"""
+
+
+def test_add_case_reads_p2_timing_from_startcommunication_step(tmp_path):
+    mgr = _mgr()
+    path = _write_xml(tmp_path, "comm.xml", COMM_CONFIG_XML)
+
+    mgr.add_case("hook-1", "VersionCheck", "hook", path, order=0)
+
+    assert mgr._p2_can_server_max == 100.0
+    assert mgr._p2_star_can_server_max == 8000.0
+
+
+def test_add_case_keeps_defaults_when_no_startcommunication_step(tmp_path):
+    """Matches every real test-rule sample seen in practice -- no timing
+    config in the file, so the hardcoded ISO 14229-1-typical defaults
+    (P2=50ms, P2*=5000ms) still apply."""
+    mgr = _mgr()
+    path = _write_xml(tmp_path, "hook.xml", HOOK_XML)
+
+    mgr.add_case("hook-1", "VersionCheck", "hook", path, order=0)
+
+    assert mgr._p2_can_server_max == 50.0
+    assert mgr._p2_star_can_server_max == 5000.0
+
+
+def test_uds_request_with_retry_uses_the_xml_derived_p2_star_value(tmp_path):
+    """End-to-end: once a case with a startCommunication config is loaded,
+    a later NRC 0x78 pending-wait must use that case's P2* value, not the
+    generic hardcoded default."""
+    responses = [bytes([0x7F, 0x10, 0x78]), bytes([0x50, 0x02])]
+    receive_timeouts = []
+
+    def fake_send(can, tx_id, rx_id, data, is_extended_id=False, fc_timeout_s=1.0, **kw):
+        return {"sent": True}
+
+    def fake_receive(can, rx_id, tx_id, timeout_s=1.0, is_extended_id=False, fc_stmin=0, **kw):
+        receive_timeouts.append(timeout_s)
+        return responses.pop(0)
+
+    can = type("FakeCan", (), {"notifier": object()})()
+    mgr = OtaTesterDownloadManager(can, fake_send, fake_receive)
+    path = _write_xml(tmp_path, "comm.xml", COMM_CONFIG_XML)
+    mgr.add_case("hook-1", "VersionCheck", "hook", path, order=0)
+
+    mgr._uds_request_with_retry(bytearray([0x10, 0x02]), 0.05, "diagnosticSessionControl")
+
+    assert receive_timeouts[1] == 8.0  # p2StarCanServerMax="8000" from the XML

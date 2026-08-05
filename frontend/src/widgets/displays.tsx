@@ -2,6 +2,7 @@
 // Both read from canStore and re-render only on the throttled version tick.
 
 import { Fragment, useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { canStore, useCanVersion } from '../store/canStore';
 import { groupedMessages, useApp } from '../store/appContext';
 import type { DbcSummary, FrameEntry, RxFrame, WidgetConfig } from '../types';
@@ -101,6 +102,7 @@ function MessageDisplayCore({ config }: { config: WidgetConfig }) {
   const [snapshot, setSnapshot] = useState<RxFrame[]>([]);
   // IDs currently expanded to show their signal breakdown (fixed mode only)
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
+  const [showFilterPicker, setShowFilterPicker] = useState(false);
 
   const setMode = (m: 'fixed' | 'trace') =>
     updateWidget({ ...config, options: { ...config.options, viewMode: m } });
@@ -118,7 +120,19 @@ function MessageDisplayCore({ config }: { config: WidgetConfig }) {
       return next;
     });
 
-  const frames = [...canStore.frames.values()].sort((a, b) => a.id - b.id);
+  // Pass 필터: 선택한 ID만 표시 (아무것도 선택 안 하면 전체 표시). 선택 목록은
+  // 위젯 config에 저장되어 레이아웃과 함께 저장/복원된다.
+  const passFilterIds = (config.options.passFilterIds as number[] | undefined) ?? [];
+  const filterActive = passFilterIds.length > 0;
+  const filterSet = new Set(passFilterIds);
+  const setPassFilterIds = (ids: number[]) =>
+    updateWidget({ ...config, options: { ...config.options, passFilterIds: ids } });
+
+  const frames = [...canStore.frames.values()]
+    .filter((f) => !filterActive || filterSet.has(f.id))
+    .sort((a, b) => a.id - b.id);
+  const traceRows = filterActive ? canStore.trace.filter((f) => filterSet.has(f.id)) : canStore.trace;
+  const snapshotRows = filterActive ? snapshot.filter((f) => filterSet.has(f.id)) : snapshot;
 
   return (
     <div className="msg-display">
@@ -146,12 +160,19 @@ function MessageDisplayCore({ config }: { config: WidgetConfig }) {
         >
           {paused ? '▶ 재개' : '⏸ 일시중지'}
         </button>
+        <button
+          className={`small-btn ${filterActive ? 'primary' : ''}`}
+          onClick={() => setShowFilterPicker(true)}
+          title="Pass 필터: 선택한 메시지 ID만 표시"
+        >
+          필터{filterActive ? ` (${passFilterIds.length})` : ''}
+        </button>
         <span className="hint">
           {paused
-            ? `일시중지 — 최근 1분 ${snapshot.length}개`
+            ? `일시중지 — 최근 1분 ${snapshotRows.length}개`
             : mode === 'fixed'
               ? `${frames.length} IDs`
-              : `${canStore.trace.length}개 (최근 1분)`}
+              : `${traceRows.length}개 (최근 1분)`}
         </span>
         <span className="spacer" />
         <button className="small-btn" onClick={() => canStore.clearFrames()}>
@@ -159,13 +180,85 @@ function MessageDisplayCore({ config }: { config: WidgetConfig }) {
         </button>
       </div>
       {paused ? (
-        <TraceView rows={snapshot} live={false} />
+        <TraceView rows={snapshotRows} live={false} />
       ) : mode === 'trace' ? (
-        <TraceView rows={canStore.trace} live={true} />
+        <TraceView rows={traceRows} live={true} />
       ) : (
         <FixedTable frames={frames} dbc={dbc} expanded={expanded} onToggle={toggleExpanded} />
       )}
+      {showFilterPicker && (
+        <IdFilterPicker
+          selectedIds={passFilterIds}
+          onSave={(ids) => {
+            setPassFilterIds(ids);
+            setShowFilterPicker(false);
+          }}
+          onClose={() => setShowFilterPicker(false)}
+        />
+      )}
     </div>
+  );
+}
+
+// Pass 필터 메시지 선택 모달 -- DBC에 정의된 메시지뿐 아니라 현재 수신 중인
+// (DBC에 없는) ID도 함께 골라서 필터에 넣을 수 있다. ReplayBox.tsx의
+// MessagePicker와 같은 draft/commit + portal 패턴.
+function IdFilterPicker({
+  selectedIds,
+  onSave,
+  onClose,
+}: {
+  selectedIds: number[];
+  onSave: (ids: number[]) => void;
+  onClose: () => void;
+}) {
+  const { dbc } = useApp();
+  const [draft, setDraft] = useState<Set<number>>(new Set(selectedIds));
+
+  const names = new Map<number, string>();
+  for (const m of dbc.messages ?? []) names.set(m.frame_id, m.name);
+  for (const id of canStore.frames.keys()) {
+    if (!names.has(id)) names.set(id, '(DBC 미정의)');
+  }
+  const items = [...names.entries()].sort((a, b) => a[0] - b[0]);
+
+  const toggle = (id: number) =>
+    setDraft((d) => {
+      const next = new Set(d);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+
+  return createPortal(
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal" onClick={(e) => e.stopPropagation()}>
+        <h3>Pass 필터 메시지 선택</h3>
+        <p className="hint">선택한 메시지 ID만 표시됩니다. 아무것도 선택하지 않으면 전체 표시.</p>
+        <div className="picker-list">
+          {items.map(([id, name]) => (
+            <label key={id} className="picker-item">
+              <input type="checkbox" checked={draft.has(id)} onChange={() => toggle(id)} />
+              <span className="mono">{fmtId(id)}</span>
+              <span>{name}</span>
+            </label>
+          ))}
+          {items.length === 0 && <div className="empty">표시할 메시지가 없습니다</div>}
+        </div>
+        <div className="modal-buttons">
+          <button className="small-btn" onClick={() => setDraft(new Set())}>
+            전체 해제
+          </button>
+          <button className="small-btn" onClick={() => setDraft(new Set(items.map(([id]) => id)))}>
+            전체 선택
+          </button>
+          <span className="spacer" />
+          <button onClick={() => onSave([...draft])}>적용</button>
+          <button onClick={onClose}>취소</button>
+        </div>
+      </div>
+    </div>,
+    document.body,
   );
 }
 

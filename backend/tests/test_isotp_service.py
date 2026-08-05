@@ -244,11 +244,15 @@ def test_send_stays_classic_when_bus_is_classic(stack):
     assert msg.bitrate_switch is False
 
 
-def test_send_explicit_is_fd_overrides_bus_default(stack):
+def test_send_explicit_is_fd_still_forced_classic_when_bus_is_classic(stack):
+    """An explicit is_fd=True request can't make a classic-connected bus emit
+    an FD frame -- CanManager.send() clamps to the connection's actual
+    fd_enabled state, since a classic-mode connection can't transmit FD
+    frames on real hardware."""
     cm, peer = stack
-    isotp_service.send(cm, TX_ID, FC_ID, bytes.fromhex("0102030405"), is_fd=True, bitrate_switch=False)
+    isotp_service.send(cm, TX_ID, FC_ID, bytes.fromhex("0102030405"), is_fd=True, bitrate_switch=True)
     msg = peer.recv(timeout=1.0)
-    assert msg.is_fd is True
+    assert msg.is_fd is False
     assert msg.bitrate_switch is False
 
 

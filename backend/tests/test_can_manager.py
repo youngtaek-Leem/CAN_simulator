@@ -74,3 +74,20 @@ def test_classic_bus_rejects_oversized_payload():
         assert "CAN-FD" in str(exc)
     finally:
         cm.disconnect()
+
+
+def test_classic_bus_forces_classic_frame_even_if_fd_requested():
+    """HS-CAN(classic) 연결에서는 행/DBC의 FD 체크가 켜져 있어도 실제로는
+    classic 프레임으로 나가야 한다 -- 연결 설정이 우선한다."""
+    cm = CanManager()
+    cm.connect("virtual", "t_classic_forced", fd=False)
+    peer = can.Bus(interface="virtual", channel="t_classic_forced")
+    try:
+        cm.send(0x123, b"\x01\x02\x03", is_fd=True, bitrate_switch=True)
+        msg = peer.recv(timeout=1.0)
+        assert msg is not None
+        assert msg.is_fd is False
+        assert msg.bitrate_switch is False
+    finally:
+        peer.shutdown()
+        cm.disconnect()

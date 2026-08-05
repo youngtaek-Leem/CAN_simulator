@@ -140,6 +140,14 @@ class CanManager:
                 f"{len(data)}바이트 페이로드는 CAN-FD 연결에서만 전송할 수 있습니다 "
                 f"(현재 버스는 classic CAN, 최대 {MAX_CLASSIC_DATA_LEN}바이트)"
             )
+        if not self.fd_enabled:
+            # HS-CAN(classic) 연결에서는 행/DBC의 FD 설정과 무관하게 항상
+            # classic 프레임으로 나가도록 강제한다. 그렇지 않으면 classic
+            # 버스로 연결된 상태에서도 is_fd=True 프레임 전송이 시도되어
+            # (예: PCAN classic Write API에 FD 플래그가 실려) 드라이버 오류나
+            # 프레임 손상으로 이어질 수 있다.
+            is_fd = False
+            bitrate_switch = False
         msg = can.Message(
             arbitration_id=arbitration_id,
             data=data,
