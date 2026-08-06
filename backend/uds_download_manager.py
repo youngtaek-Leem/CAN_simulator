@@ -262,7 +262,14 @@ class UdsDownloadManager:
         if thread and thread.is_alive():
             thread.join(timeout=5.0)
             if thread.is_alive():
-                self._log(level="WARN", msg="다운로드 스레드가 5초 내에 종료되지 않았습니다. 강제 종료 중...")
+                self._log(level="WARN", msg="다운로드 스레드가 5초 내에 종료되지 않았습니다. 백그라운드에서 계속 실행 중입니다.")
+                # Thread is still actually running -- leave _running/_state
+                # untouched so a concurrent start() keeps being refused
+                # instead of spinning up a second worker thread that would
+                # race the still-live one over shared state (self._events,
+                # the CAN bus, the ECU session). _run()'s own finally block
+                # resets _running once this thread genuinely finishes.
+                return self.status()
         with self._lock:
             self._running = False
             if self._state not in (STATE_COMPLETED, STATE_ERROR):

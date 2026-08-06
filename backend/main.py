@@ -55,6 +55,7 @@ class _SuppressNoisyAccessLog(logging.Filter):
 
 
 logging.getLogger("uvicorn.access").addFilter(_SuppressNoisyAccessLog())
+logger = logging.getLogger(__name__)
 
 BASE_DIR = Path(__file__).resolve().parent
 UPLOAD_DIR = BASE_DIR / "uploads"
@@ -189,7 +190,12 @@ async def _broadcast_loop() -> None:
         now = time.monotonic()
         if now - last_status >= 0.5:
             last_status = now
-            await _broadcast({"type": "status", **_status()})
+            try:
+                status = _status()
+            except Exception:
+                logger.exception("_status() failed in broadcast loop")
+            else:
+                await _broadcast({"type": "status", **status})
 
 
 @app.websocket("/ws")

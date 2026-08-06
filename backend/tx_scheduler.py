@@ -410,10 +410,16 @@ class TxScheduler:
     def _make_send_job(self, entry: TxEntry) -> Callable[[], None]:
         def send() -> None:
             if entry.message_name:
-                generators = self._value_generators.get(entry.message_name)
-                if generators:
-                    for signal_name, gen in generators.items():
-                        self._dbc.set_raw_signal_value(entry.message_name, signal_name, gen())
+                # Snapshot under the lock -- set_value_generator()/send_invalid()
+                # mutate this same per-message dict (e.g. adding a new signal's
+                # generator) from request-handling threads, and iterating a
+                # dict while another thread inserts into it raises
+                # "dictionary changed size during iteration".
+                with self._lock:
+                    generators = self._value_generators.get(entry.message_name)
+                    generators = list(generators.items()) if generators else []
+                for signal_name, gen in generators:
+                    self._dbc.set_raw_signal_value(entry.message_name, signal_name, gen())
                 data = self._dbc.encode_current(entry.message_name)
                 message = self._dbc.get_message(entry.message_name)
                 is_fd, brs = message.is_fd, message.is_fd

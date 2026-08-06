@@ -67,6 +67,7 @@ def _to_int(val: Any, default: int = 0) -> int:
         try:
             return int(val, 16) if val.lower().startswith("0x") else int(val)
         except ValueError:
+            logger.warning("_to_int: could not parse %r, falling back to %r", val, default)
             return default
     return default
 
