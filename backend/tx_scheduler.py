@@ -57,6 +57,14 @@ class TxScheduler:
         self._dbc = dbc_service
         self._entries: dict[str, TxEntry] = {}       # user TX list
         self._auto_entries: dict[str, TxEntry] = {}  # periodic signal senders
+        # message names armed by the last enable_all_periodic() call -- lets
+        # the "Enable Msg" bulk toggle track its own on/off state separately
+        # from _auto_entries as a whole, since individual widgets arm their
+        # own entries in _auto_entries too just by sending a periodic signal
+        # (existing, intentional behavior) and that must not make "Enable
+        # Msg" look pressed, nor make turning "Enable Msg" off stop auto
+        # sends a widget itself started.
+        self._enable_msg_armed: set[str] = set()
         self._oneshots: list[tuple[float, int, Callable[[], None]]] = []
         # message_name -> signal_name -> generator producing a raw int value
         self._value_generators: dict[str, dict[str, Callable[[], int]]] = {}
@@ -340,14 +348,28 @@ class TxScheduler:
                 continue
             self._upsert_auto(message)
             armed.append(message.name)
+        with self._lock:
+            self._enable_msg_armed.update(armed)
         return {"armed": armed, "failed": failed, **self.status()}
+
+    def disable_all_periodic(self) -> dict:
+        """"Enable Msg" button pressed again to turn it off -- stops only the
+        messages it armed (self._enable_msg_armed), leaving any auto-entry a
+        widget armed independently (by sending a periodic signal) alone."""
+        with self._lock:
+            for name in self._enable_msg_armed:
+                self._auto_entries.pop(name, None)
+            self._enable_msg_armed.clear()
+        return self.status()
 
     def stop_auto(self, message_name: Optional[str] = None) -> dict:
         with self._lock:
             if message_name is None:
                 self._auto_entries.clear()
+                self._enable_msg_armed.clear()
             else:
                 self._auto_entries.pop(message_name, None)
+                self._enable_msg_armed.discard(message_name)
         return self.status()
 
     # ---- scheduler loop ---------------------------------------------------
@@ -410,6 +432,11 @@ class TxScheduler:
             return {
                 "running": self._running,
                 "paused": self._paused,
+                # "Enable Msg" button's own on/off state -- true only while
+                # messages it armed are still auto-resending, independent of
+                # auto_entries a widget armed on its own (see
+                # _enable_msg_armed's docstring above).
+                "periodic_enabled": bool(self._enable_msg_armed),
                 "entries": [
                     {
                         "key": e.key,

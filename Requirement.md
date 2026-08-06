@@ -1286,3 +1286,290 @@ CI/dev"). 백엔드 로직(SCPI 명령 시퀀스, 위상 전환, 삼각파 보�
 정확히 표시되는 것과 미연결 상태에서의 입력/버튼 비활성화, 6개 섹션 전체 스크롤을
 확인했다. 실제 하드웨어로 전압/ACC/IGN 명령이 물리적으로 잘 나가는지, On/Off 반복·삼각파
 스윕이 실제 장비에서 의도대로 동작하는지는 실기 연결 후 별도 확인이 필요하다.
+
+## "CAN-오디오 지연 확인" 위젯 (2026-08-06, 사용자 승인 완료 — Phase 1 개발 완료, 검증 통과)
+
+### 목표/범위
+CAN 신호 전송(트리거) 후 오디오 신호가 반응하기까지의 지연시간을 측정하고 싶다는 요청.
+기존 "CAN 신호 그래프"(`GraphWidget`)와 "오디오 신호 모니터"(`AudioMonitorWidget`)를 한
+화면에서 같은 시간축으로 겹쳐 보여주면 눈으로 델타를 읽을 수 있다는 아이디어였으나, 구현
+전에 두 그래프가 애초에 같은 시간축(클럭 정합성)인지부터 리뷰했다.
+
+- **Phase 1(이번 범위, 승인 완료)**: CAN 신호 그래프 + 오디오 파형을 하나의 위젯에서 같은
+  절대 epoch ms 시간축으로 겹쳐 표시하고, 사용자가 휠 줌/드래그 팬으로 확대해 눈으로
+  델타를 읽는다. 자동 델타 계산은 없음.
+- **Phase 2(범위 밖, 설계 방향만 문서화)**: CAN 신호 트리거 시점 이후 오디오 레벨이
+  임계값을 넘는 첫 지점을 백엔드가 자동 감지해 지연시간(ms)을 계산·누적 통계(평균/최소/
+  최대/표준편차)로 표시. 오디오 원시 샘플은 이미 `_raw_chunks`(30초 순환 버퍼,
+  `audio_service.py`의 `RAW_BUFFER_SECONDS`)에 있으므로 분석 엔드포인트만 추가하면 되어
+  구현량 자체는 크지 않지만, 임계값 튜닝·오검출 처리에 실기 검증이 필요해 별도 승인 후
+  진행한다.
+- **CAN 인터페이스**: Vector/PCAN 둘 다 지원 대상.
+
+### 오차 요인 리뷰 (실제 코드 근거)
+1. **CAN 타임스탬프 출처별 정합성** — `can.Message.timestamp`(초)의 의미가 인터페이스마다
+   다르다.
+   - virtual: 수신/루프백 시 `time.time()`을 그대로 찍는다(python-can
+     `interfaces/virtual.py`). 이미 epoch 정렬, 서브 ms 오차.
+   - Vector CANcase: 연결 시 1회 `xlGetSyncTime`/`xlGetChannelTime`을
+     `time.perf_counter()`와 상관시켜 `_time_offset`을 계산해두고 이후 모든 프레임에
+     더한다(`interfaces/vector/canlib.py`). 하드웨어 타임스탬프 기반, 별도 조치 없이
+     epoch 정렬됨.
+   - PCAN: `uptime` 패키지가 설치돼 있어야 `boottimeEpoch`(부팅 시각의 epoch)를 디바이스
+     타임스탬프(부팅 이후 경과 μs)에 더해 epoch로 만들어준다(`interfaces/pcan/pcan.py`).
+     `uptime`이 없으면 `boottimeEpoch=0`이 되어 타임스탬프가 "기기 부팅 이후 상대값"에
+     불과 — 오디오(epoch 기준)와 아예 다른 시간축이 되어 비교가 무의미해진다. 기존
+     `backend/requirements.txt`에는 `uptime`이 없었다.
+2. **오디오 타임스탬프의 체계적 지연 편향** — `AudioService`의 sounddevice 콜백은
+   `now = time.time()`으로 콜백이 "도착한" 시각을 찍고 그 청크의 모든 샘플 시각을 여기서
+   역산한다(`audio_service.py`). 콜백은 디바이스가 이미 버퍼링해 둔 블록을 넘겨준 뒤에야
+   실행되므로, 실제 음향 이벤트는 이보다 "블록사이즈/샘플레이트 + OS 오디오 스택 지연"만큼
+   먼저 일어났다 — 디바이스에 따라 대략 수~수십 ms(통상 10~30ms대)의 고정 편향이 오디오
+   쪽에만 낀다. 청크 내부 샘플 간 상대 타이밍은 샘플레이트 기반이라 정확하다.
+3. **네트워크/렌더링 지연은 저장된 좌표값을 오염시키지 않는다** — CAN 쪽은
+   `signalHistory`에 백엔드 원시 `ts`를 그대로 저장하고(`canStore.ts`), 오디오 쪽은
+   `GET /api/audio/waveform`이 epoch ms 구간을 그대로 질의해 원본 샘플을 내려준다
+   (`audio_service.py` `get_waveform`). WS 30ms 배치, 프론트 10~60Hz 스로틀, 오디오
+   60ms 폴링은 "화면에 지금 무엇이 그려지는지"에만 영향을 주고 히스토리 데이터 좌표
+   자체는 오염시키지 않는다 — 오차의 지배 요인은 전송 지연이 아니라 타임스탬프 출처의
+   정합성과 오디오 콜백 편향이다.
+4. **예상 총 오차(개략치, 실기 확인 전)**: Vector/virtual + 오디오는 오디오 콜백 편향
+   (대략 10~30ms대, 디바이스 의존)이 지배적, CAN 쪽은 서브 ms. PCAN은 `uptime` 없이는
+   측정 불가, 설치해도 boottime 계산의 실측 정확도는 실기에서 별도 확인 필요. 완전한
+   0 오차는 불가능하지만 대부분의 "CAN 트리거 → 경고음 시작" 지연(보통 수백 ms 이상)
+   비교에는 실용적으로 문제없을 가능성이 높다. 수십 ms 이하 정밀 비교가 필요하면 CAN으로
+   릴레이를 클릭시켜 그 소리를 같은 마이크로 잡는 방식 등으로 1회 보정 측정을 권장(자동
+   보정 로직은 Phase 1에 넣지 않음).
+
+### 모듈 분해
+
+| 모듈 | 책임 | 검증 방법 | 상태 |
+|---|---|---|---|
+| `backend/requirements.txt` | `uptime` 패키지 추가(PCAN 타임스탬프 epoch 정렬용, python-can이 이미 자동으로 사용하는 선택적 의존성) | 설치 확인 | **통과** |
+| `backend/can_manager.py` | `connect()`의 `interface=="pcan"` 분기에서 연결 성공 직후 `can.interfaces.pcan.pcan.boottimeEpoch != 0`을 읽어 `config["epoch_aligned"]`로 노출(virtual/vector는 항상 True) | pytest 1개 추가(`test_virtual_connection_reports_epoch_aligned_timestamps`), `/api/connect` 실제 호출로 `epoch_aligned:true` 응답 확인. PCAN 분기는 실기 필요 | **통과**(virtual만) |
+| `frontend/src/widgets/CanAudioLatencyWidget.tsx`(신규) | CAN 신호(`SignalPicker` 재사용) + 오디오 채널 파형을 절대 epoch ms 공유 X축(`pt.ts*1000` vs 기존 `/api/audio/waveform`)으로 겹쳐 표시, 공유 휠줌/드래그팬, PCAN `epoch_aligned=false` 시 경고 배너 | `tsc -b`/`vite build`/`oxlint` 클린 | **통과**(빌드만, 아래 검증 제약 참고) |
+| `types.ts`/`registry.tsx` | `WidgetType`에 `canAudioLatency` 추가, 라벨/기본크기 등록 | `tsc -b` | **통과** |
+
+기존 `GraphWidget.tsx`/`AudioMonitorWidget.tsx`는 내부 차트 컴포넌트가 export되지 않고
+로컬 상태에 강결합돼 있어 그대로 재사용할 수 없다. 이미 실기 검증을 통과한 두 위젯을
+건드리면 회귀 리스크가 생기므로, 새 위젯 파일 하나로 완결시키고 기존 두 위젯은 수정하지
+않는다(실제로 두 파일 모두 수정하지 않음, `git diff` 확인).
+
+백엔드 전체 220개 테스트 통과(신규 1개), 프론트 `tsc -b`/`vite build`/`oxlint` 클린.
+
+### 검증 제약
+이 개발 환경에는 브라우저 자동화 도구(Playwright/chromium-cli 등)가 준비돼 있지 않아
+(설치를 시도했으나 프로젝트 매니페스트에 없는 패키지의 임시 설치라 자동 승인되지 않음)
+**브라우저에서 실제 클릭·줌/팬까지는 확인하지 못했다** — 타입체크/빌드/린트 통과와
+코드 리뷰(캔버스 드로잉·줌/팬 수학을 이미 실기 검증된 `GraphWidget`/`AudioMonitorWidget`의
+동일 로직에서 그대로 포팅)까지만 확인했다. 또한 이 개발 환경에는 실제 PCAN/Vector
+하드웨어와 마이크로 CAN-오디오 동시 반응을 재현할 DUT가 없다. `epoch_aligned`는 virtual
+경로만 자동화하고, PCAN에서 정렬이 실제로 되는지와 오디오 콜백 편향의 실측값(대략
+10~30ms대로 예측)은 실기 확보 후 별도 확인이 필요하다. 사용자가 브라우저에서
+CAN 신호 선택 → 오디오 장치 선택 → Start → 두 차트가 같은 시간축에서 그려지는지,
+휠 줌/드래그 팬이 두 차트에 동시에 반영되는지를 최초 1회 직접 확인해줄 것을 권장한다.
+
+### 버그 수정 (2026-08-06, 사용자 실사용 확인 — 위 "검증 제약"에서 우려했던 바로 그 종류의 문제)
+사용자가 virtual CAN으로 실사용 확인 중 "Start로 측정 시작 후 Stop을 누르면 파형이
+멈춰야 하는데 계속 스크롤되며 사라진다"고 보고. 원인: `CanSignalChart`/`AudioChannelChart`
+둘 다 줌/팬으로 손대지 않은("라이브") 상태의 롤링 윈도우 오른쪽 끝(`xMax`)을 항상
+`Date.now()`로 계산했다 — 위젯의 Stop은 오디오 스트림만 멈출 뿐 CAN 수신이나 벽시계는
+멈추지 않으므로, Stop 이후에도 `xMax`가 계속 흘러 마지막으로 잡힌 데이터가 `xWindowMs`
+(기본 10초) 밖으로 밀려나며 화면에서 사라진 것 — `AudioMonitorWidget.tsx`의
+`WaveformChart`가 이미 `liveAnchorRef`/`frozenAnchorRef`로 풀어둔 것과 같은 종류의 문제를
+이번엔 두 차트가 시간축을 공유하는데도 그 얼림(freeze) 로직 자체를 빠뜨렸던 것.
+
+수정: 부모 `CanAudioLatencyWidget`에 공유 `nowAnchor()` 함수를 추가해 두 차트 모두
+`Date.now()` 대신 이를 통해 윈도우 오른쪽 끝을 구하도록 변경했다. 오디오가 `active`이면
+`Date.now()`를 그대로 따라가고, Stop으로 `active`가 꺼지는 순간 마지막 값에 고정(freeze)
+된다 — CAN 차트도 같은 앵커를 쓰므로 두 차트가 함께 멈춘다. 단, 오디오를 한 번도 Start한
+적 없는 상태(`audioEverActiveRef`)에서는 항상 라이브로 두어, 이 위젯의 Start/Stop과
+무관하게 계속 흘러야 하는 CAN 차트가 오디오를 켜기 전부터 멈춰 보이는 일이 없게 했다.
+`active` 값은 클로저가 아니라 ref(`activeRef`)로 참조해, 자식 컴포넌트가 과거 렌더의
+`nowAnchor` 클로저를 들고 있어도 항상 최신 상태를 반영하도록 했다.
+
+검증: `tsc -b`/`vite build`/`oxlint` 클린(백엔드 변경 없음, 프론트 전용 수정). 실제
+브라우저 재확인은 사용자가 다음에 Start→Stop을 눌러 파형이 그 시점에 고정되는지 확인
+필요(이 환경엔 여전히 브라우저 자동화 도구가 없음, 위 "검증 제약" 참고).
+
+### 버그 수정 2건 (2026-08-06, 사용자 실사용 확인 4건 보고 — 위 "검증 제약"에서
+우려했던 바로 그 종류의 문제, 브라우저 자동화 도구 부재로 코드 리뷰만으로 원인 특정)
+
+사용자가 virtual CAN + 위젯 실사용 중 4가지를 보고: ① Start→Stop→줌 확인→다시 Start를
+누르면 동작하지 않음, ② 파형이 왼쪽→오른쪽 시간 흐름인데 시간 눈금이 가장 왼쪽을 0으로
+증가하는 형태가 아님, ③ 확대/축소 후 ⟲(리셋) 아이콘을 눌러도 최초 상태로 안 돌아감,
+④ 상단 시간창 +/− 버튼을 눌러도 파형·시간축이 갱신 안 됨. 브라우저에서 직접 재현할 수
+없어 코드를 정독해 원인을 특정했다 — 4건 모두 근본 원인은 두 가지로 수렴한다.
+
+1. **X축 눈금이 "오른쪽 끝 기준 경과(음수)"였다** (②): 처음엔 "몇 초 전"을 쉽게 읽도록
+   `t - xMax`(0 at 오른쪽, 나머지 음수)로 그렸는데, 사용자가 원한 건 "왼쪽=0, 오른쪽으로
+   갈수록 증가"였다. `fmtXTick` 호출을 `t - xMin`으로 바꿔 왼쪽 끝이 항상 0이 되도록
+   수정(`CanSignalChart`/`AudioChannelChart` 양쪽 draw effect). 데이터가 그려지는
+   좌우 순서(왼쪽=과거, 오른쪽=현재) 자체는 원래도 맞았다 — 눈금 라벨만 잘못됐었다.
+2. **한 번이라도 휠 줌/드래그 팬을 하면(`xViewRef.current`가 null이 아닌 고정값이 됨)
+   그 뒤로 Start·+/−·⟲가 전부 무력화됐다** (①③④의 공통 원인): 세 기능 모두
+   "`xViewRef.current.xMin === null`일 때만" 자신의 로직이 반영되도록 짜여 있었다 —
+   즉 라이브(자동) 모드일 때만 동작하고, 사용자가 한 번이라도 확대/축소한 뒤(요청 ①의
+   실사용 시나리오 자체가 "확대/축소로 확인 후"라 거의 항상 이 상태)에는 아무 반응이
+   없어 보였다.
+   - **Start (①)**: `start()`가 `xViewRef`를 건드리지 않아, Stop 전에 확대해둔 고정
+     구간이 재시작 후에도 그대로 남아 새 데이터가 전혀 안 보였다. 오디오 스트림이
+     비활성→활성으로 전환되는 순간(rising edge)을 감지해 자동으로 뷰를 라이브로
+     되돌리는 effect를 추가했다(`prevActiveRef`로 전이만 감지, 이미 라이브인 동안
+     사용자의 수동 줌/팬과 충돌하지 않음).
+   - **+/− 시간창 버튼 (④)**: `zoomXWindow`가 `xWindowMs`(라이브 모드의 기본 창 크기)만
+     바꿨는데, 고정 뷰에서는 그 값이 아예 안 쓰였다. 현재 뷰가 고정 상태면 오른쪽 끝을
+     기준으로 `xViewRef.current`를 직접 리사이즈하도록 수정해, 라이브·고정 어느
+     상태에서나 버튼이 항상 보이는 효과를 내도록 했다.
+   - **⟲ 리셋 (③)**: 상단 툴바의 리셋은 공유 X만 초기화하고 각 차트의 로컬 Y축 줌은
+     그대로 남겨 "절반만 리셋"됐다(Y축이 이전 확대 상태로 고정된 채라 새 데이터가
+     찌그러지거나 잘려 보임). 상단 리셋·차트별 리셋 버튼 3개를 모두 `resetEverything()`
+     하나로 통일해 공유 X + 양쪽 차트의 Y를 전부 자동 맞춤으로 되돌리도록 했다
+     (`resetToken` state를 부모가 올리면 각 차트가 자신의 `yViewRef`를 지우는 effect로
+     구독).
+   - 부수적으로 발견: `CanSignalChart`의 "신호가 조용해도 창이 계속 흐르게" 하는
+     `LIVE_TICK_MS`(200ms) 인터벌이 `notifyChange`를 의존성 배열에 넣고 있었는데,
+     `notifyChange`는 부모가 렌더될 때마다 새로 만들어지는 클로저라 오디오 폴링(60ms)이
+     돌고 있는 동안은 이 인터벌이 200ms를 채우기 전에 계속 해제·재등록되어 사실상 한 번도
+     발화하지 못했다(오디오 채널이 있을 때는 오디오 쪽 폴링이 대신 리드로우를 유발해
+     가려져 있었을 뿐). `notifyChange`를 의존성에서 빼(과거 클로저를 들고 있어도 결국
+     같은 `setSharedVersion`을 호출하므로 안전) 인터벌이 실제로 살아남도록 고쳤다.
+
+검증: `tsc -b`/`vite build`/`oxlint` 클린, 백엔드 전체 220개 테스트(무관, 회귀 없음
+재확인). 브라우저 재확인은 여전히 사용자 몫 — 이 환경엔 브라우저 자동화 도구가 없다(위
+"검증 제약" 참고). 사용자가 다음에 확인할 때 정확히 보고했던 4가지 재현 절차(Start→
+확대/축소→Stop→다시 Start, +/− 버튼, ⟲ 버튼)를 그대로 다시 밟아 확인해 줄 것을 권장한다.
+
+### 버그 수정: 위젯 사용 후 CAN Simulator 전역 Start가 먹통 되는 심각한 렉 (2026-08-06,
+사용자 실사용 확인)
+
+사용자가 위젯에서 파형 취득→분석을 마친 뒤 상단 바의 전역 "CAN Simulator" Start 버튼을
+누르면 반응이 없고 "내부적으로 매우 긴 렉"이 걸린다고 보고. 원인: `AudioChannelChart`의
+파형 폴링(`WAVEFORM_POLL_MS=60ms`)과 부모의 오디오 레벨 폴링(`LEVEL_POLL_MS=100ms`)이
+둘 다 `setInterval`로 구현돼 있어, 이전 요청이 아직 응답하지 않았어도 다음 요청을
+무조건 새로 쏘고 있었다. 이 위젯은 (Requirement.md의 이전 항목에서 이미 확인했듯)
+Stop 이후에도 채널 목록이 비지 않아(`AudioService`가 `_level_trackers`를 Stop 시
+비우지 않음) 폴링이 절대 멈추지 않고 위젯이 마운트돼 있는 한 계속 도는데,
+`GET /api/audio/waveform`(`backend/audio_service.py`의 `get_waveform()`)은 최대
+30초치 원시 오디오 청크를 스캔·디시메이션하는 실제 연산 비용이 있는 요청이다 — 위젯을
+오래 켜둔 채로 있다가 이 처리가 60ms보다 살짝이라도 느려지는 순간부터, 밀린 요청 위에
+또 새 요청이 계속 쌓이며 눈덩이처럼 불어난다.
+
+**왜 하필 전역 Start가 먹통이 되는가**: `backend/main.py`를 확인한 결과
+`/api/audio/waveform`과 `/api/run/start` 둘 다 `async def`가 아니라 동기 `def`
+핸들러 — FastAPI/Starlette는 동기 핸들러를 공유 스레드풀에서 실행하므로, 밀린
+`/api/audio/waveform` 요청 수백 개가 스레드풀 슬롯을 다 차지하면 그 뒤에 들어온
+`/api/run/start` 요청도 같은 큐에서 자기 차례를 기다리게 된다 — 이것이 "Start를
+눌러도 반응이 없고 렉이 걸린다"의 정확한 메커니즘.
+
+수정: 두 폴링 모두 `setInterval` 대신 "요청이 끝난 뒤에만 다음 요청을 예약하는"
+자기재스케줄 `setTimeout` 방식으로 변경(`AudioChannelChart`의 파형 폴링,
+부모의 오디오 레벨 폴링). 채널당·용도당 항상 최대 1개의 요청만 동시에 떠 있도록
+보장되므로, 백엔드가 아무리 느려져도 요청이 쌓이는 일 자체가 원천적으로 불가능해진다.
+이 문제는 원래 있던 `AudioMonitorWidget.tsx`의 `WaveformChart`도 동일한 `setInterval`
+패턴을 쓰고 있어 잠재적으로 같은 위험이 있으나(이번 작업 범위는 새 위젯으로 한정,
+`AudioMonitorWidget.tsx`는 수정하지 않음), 사용자가 그쪽에서도 유사 증상을 보면 같은
+원인일 가능성이 높다는 점을 기록해둔다.
+
+검증: `tsc -b`/`vite build`/`oxlint` 클린, 백엔드 전체 220개 테스트 통과(무관, 회귀
+없음). 실제로 장시간 방치 후 요청이 정말 쌓이지 않는지, 전역 Start가 즉시 반응하는지는
+이 환경에 브라우저 자동화 도구가 없어 직접 재현·확인하지 못했다 — 사용자가 이전과 같은
+방식(위젯 사용 후 한동안 열어두고 전역 Start)으로 재확인해줄 것을 권장한다.
+
+### CAN periodic 신호 영향 점검 (2026-08-06, 사용자 요청 — 실측 후 백엔드 최적화 1건 적용)
+
+사용자가 "위 렉 문제가 CAN periodic 메시지 송신에도 영향을 미치는 것 같다"고 추가로
+요청해 점검했다.
+
+**직접적인 연결고리는 없음**: 주기 송신은 `backend/tx_scheduler.py`의 전용 백그라운드
+스레드(`_loop()`, `time.sleep(0.001)`로 ~1ms 틱)에서 완전히 인프로세스로 처리되고
+FastAPI의 HTTP 요청 스레드풀을 전혀 거치지 않는다. 오디오 쪽 락(`_level_lock` 등)과
+CAN 쪽 락(`CanManager._lock`, `TxScheduler._lock`)도 서로 다른 객체라 직접적인 락
+경합은 없다.
+
+**간접적인 연결고리(GIL)는 실제로 있고, 실측으로 확인됨**: CPython은 GIL 때문에 한
+순간에 파이썬 바이트코드를 실행하는 스레드가 하나뿐이다. `audio_service.py`의
+`waveform_slice()`(오디오 파형 요청마다 호출, 최대 30초치 원시 청크를 파이썬 레벨로
+순회하며 numpy 연산)가 GIL을 오래 쥐고 있으면, 같은 시간에 `tx_scheduler`의 1ms 틱
+루프가 GIL을 못 받아 지연될 수 있다 — 즉 "CAN periodic 메시지에도 영향을 미친다"는
+사용자의 의심은 메커니즘상 타당하다. 실제로 측정해봤다(`_ChannelLevelTracker`에 합성
+오디오 30초를 채운 뒤 `waveform_slice()` 1회 호출 시간):
+
+| 콜백 블록사이즈(샘플) | 30초 전체 스캔 | 최근 10초(라이브 창) |
+|---|---|---|
+| 256 | ~90ms | ~31ms |
+| 441 | ~59ms | ~21ms |
+| 1024 | ~38ms | ~14ms |
+| 2048 | ~28ms | ~11ms |
+
+라이브(최근 10초) 요청 하나에도 10~30ms가 걸린다 — 바로 위 항목에서 고친 요청 폭주
+버그가 없더라도, 이 위젯이 켜져 있는 한 매 폴링 주기(원래 60ms)마다 이 정도 시간을
+GIL을 쥔 채로 쓰는 셈이라 `tx_scheduler`가 주기적으로 밀릴 여지가 실측으로도 확인된다.
+
+**적용한 조치**:
+1. **`waveform_slice()` 최적화**(`backend/audio_service.py`): 청크 목록이 시간순으로
+   쌓이는(append-only) 점을 이용해 `bisect`로 `[from_s, to_s]`와 겹칠 수 없는 앞쪽
+   청크를 건너뛰고, 뒤쪽은 `chunk_start > to_s`가 되는 순간 `break`하도록 바꿨다.
+   실측 결과 "과거 시점을 확대해서 보는" 시나리오(뒤쪽에 청크가 많이 남아있는 경우)는
+   유의미하게 빨라지지만, 가장 흔한 "라이브(최근 N초)" 요청은 애초 비용의 대부분이
+   "관련 없는 청크를 건너뛰는 것"이 아니라 "관련 있는 청크 각각의 numpy 연산" 자체라
+   개선폭이 작다(21ms→21ms 수준, 실측으로 확인) — 그래도 기존 동작과 100% 동일한
+   결과를 내면서(기존 `test_waveform_slice_*` 전부 통과) 공짜로 얻는 이득이라 반영했다.
+   더 큰 폭의 개선(청크별 파이썬 루프+`np.unique` 자체를 없애는 벡터화 재작성)은 이번
+   범위를 넘는 더 큰 리스크의 변경이라 하지 않았다 — 필요하면 별도 승인 후 진행.
+2. **`WAVEFORM_POLL_MS` 60→100ms**(`frontend/src/widgets/CanAudioLatencyWidget.tsx`):
+   `LEVEL_POLL_MS`와 동일한 값으로 늘려, 이 위젯이 만드는 GIL 점유 빈도 자체를
+   줄였다(사람 눈에는 여전히 실시간처럼 보이는 수준을 유지하면서). `AudioMonitorWidget.tsx`는
+   건드리지 않았다(이번 범위 아님).
+
+**참고로 원래 `AudioMonitorWidget.tsx`의 `WaveformChart`도 같은 `waveform_slice()`를
+동일한 폴링 방식(원래 60ms)으로 호출**하므로, 그쪽 위젯을 켜둔 채로도 동일한 GIL 경합이
+있을 수 있다 — 이번엔 `waveform_slice()` 자체(공용 함수)는 개선했지만
+`AudioMonitorWidget.tsx`의 폴링 주기는 건드리지 않았다.
+
+검증: `tests/test_audio_service.py` 44개 전부 통과(동작 동일성 확인), 백엔드 전체
+220개 테스트 통과, 프론트 `tsc -b`/`vite build`/`oxlint` 클린. tx_scheduler의 실제
+주기 송신 타이밍이 이 변경으로 얼마나 개선되는지는(예: 실기에서 주기 메시지의 실제
+전송 간격 지터를 오실로스코프/CAN 애널라이저로 측정) 이 환경에서 직접 확인할 방법이
+없다 — 실기로 오디오 위젯을 켜둔 채 주기 신호의 CAN 메시지 표시창 카운트/간격이
+안정적인지 사용자가 확인해줄 것을 권장한다.
+
+### 후속 요청 2건 (2026-08-06, 사용자 확인 — 위 수정이 잘 됐다고 확인 후 추가 요청)
+
+1. **"CAN-오디오 지연 확인" 위젯의 시간창 +/− 스텝을 5초 고정 → 10% 비례로 변경**:
+   `X_WINDOW_STEP_MS = 5_000`(고정 델타)를 `X_WINDOW_STEP_FACTOR = 1.1`(현재 창 크기의
+   ±10%, 곱셈 방식)로 교체했다. 고정 초 단위 스텝은 창이 이미 좁을 때(예: 500ms)
+   5초를 더하면 창 크기가 10배 이상 뛰는 반면 창이 넓을 때(예: 5분)는 티도 안 나는
+   문제가 있어, 어느 확대 수준에서도 일관되게 "10% 만큼" 늘고 줄게 했다
+   (`frontend/src/widgets/CanAudioLatencyWidget.tsx`).
+
+2. **"Enable Msg" 버튼이 위젯의 개별 Periodic 신호 송신과 얽혀 있던 문제 분리**:
+   상단바 "Enable Msg"는 DBC의 모든 Periodic 메시지를 일괄 On/Off 하는 버튼인데,
+   그 On/Off 표시가 `tx.auto_entries.length > 0`(즉 "무엇이든 하나라도 주기 재전송
+   중이면 켜짐")으로 계산되고 있었다. 그런데 위젯에서 Periodic 신호 하나만 건드려도
+   그 메시지가 개별적으로 auto_entries에 등록되는 것은 원래 의도된 동작(확정 사양
+   5번)이라, 사용자가 위젯만 썼을 뿐인데 "Enable Msg"가 눌린 것처럼 보이는 문제가
+   있었다. `backend/tx_scheduler.py`에 `_enable_msg_armed`(Enable Msg로 켠 메시지
+   이름만 추적하는 집합)를 추가하고, `status()`에 `periodic_enabled` 필드로 노출,
+   신규 `disable_all_periodic()`(Enable Msg가 켠 것만 끄고 위젯이 개별적으로 켠
+   건 건드리지 않음)을 추가했다. `stop_auto()`(전역 Start/Stop이 호출)는 전체
+   클리어 시 이 집합도 같이 비우고, 단일 메시지 클리어 시(위젯 삭제 시 다른 위젯이
+   안 쓰는 메시지 정리) 그 이름만 집합에서도 제거한다. 신규 엔드포인트
+   `POST /api/tx/periodic/disable_all`. 프론트 `App.tsx`의 `periodicOn`은 이제
+   `tx.periodic_enabled`를 읽고, 끌 때 `api.disableAllPeriodic()`을 호출한다(기존
+   `api.txAutoStop()`은 위젯 삭제 시 개별 메시지 정리 용도로 그대로 유지).
+   - 주의할 점(문서화): Enable Msg를 누르면 이미 위젯이 개별적으로 켜둔 메시지도
+     포함해 "전체"를 다시 무장하므로(`enable_all_periodic()`은 DBC의 모든 Periodic
+     메시지를 대상으로 함), 그 상태에서 Enable Msg를 다시 꺼서 전체를 멈추면 그
+     위젯이 개별적으로 켰던 메시지도 같이 멈춘다 — Enable Msg 버튼의 "전체 On/Off"
+     의미상 의도된 동작이다. 이번에 고친 것은 반대 방향(위젯 조작 → Enable Msg가
+     저절로 눌린 것처럼 보이는 것)이다.
+
+검증: `backend/tests/test_tx_scheduler.py`에 5개 신규 테스트(위젯 단독 조작 시
+플래그 안 켜짐, enable_all이 플래그 켜고 disable_all이 그것만 끔, disable_all이
+위젯이 독자적으로 켠 신호는 안 건드림, 전역 stop_auto가 플래그도 전체 리셋, 단일
+메시지 stop_auto가 그 이름만 집합에서 제거), `test_api.py`에 REST 왕복 테스트 1개
+추가. 백엔드 전체 226개 테스트 통과. 프론트 `tsc -b`/`vite build`/`oxlint` 클린.
+브라우저에서 실제로 위젯 조작 시 "Enable Msg" 버튼 표시가 더 이상 자동으로 바뀌지
+않는지는 이 환경에 브라우저 자동화 도구가 없어 직접 확인하지 못했다 — 사용자가
+다음 실사용 시 확인해줄 것을 권장한다.

@@ -83,6 +83,7 @@ export const api = {
     post('/api/tx/auto/stop', { message_name: message_name ?? null }),
   enableAllPeriodic: (rx_node: string) =>
     post<{ armed: string[] }>('/api/tx/periodic/enable_all', { rx_node }),
+  disableAllPeriodic: () => post('/api/tx/periodic/disable_all'),
   setValueGenerator: (
     message_name: string,
     signal_name: string,

@@ -628,11 +628,16 @@ function TopBar(props: TopBarProps) {
     }
   };
 
-  const periodicOn = (canStore.status?.tx.auto_entries.length ?? 0) > 0;
+  // Own on/off state, independent of auto_entries as a whole -- a widget
+  // sending one periodic signal also creates an auto_entries entry (existing,
+  // intentional behavior), which must not make this button look pressed, nor
+  // make turning it off here stop auto-resends a widget started on its own
+  // (see tx_scheduler.py's _enable_msg_armed / periodic_enabled).
+  const periodicOn = canStore.status?.tx.periodic_enabled ?? false;
   const toggleEnableMsg = async () => {
     try {
       if (periodicOn) {
-        await api.txAutoStop();
+        await api.disableAllPeriodic();
         props.notify('Periodic 메시지 주기 송신 중지');
       } else {
         const r = await api.enableAllPeriodic(canStore.getRxNode());

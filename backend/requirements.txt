@@ -19,3 +19,10 @@ scikit-learn>=1.4    # cosine similarity for MFCC comparison
 
 # samples/xlsx_to_script.py: CAN_Test_Script_Editor xlsx -> test runner JSON
 openpyxl>=3.1
+
+# python-can's PCAN interface only aligns Message.timestamp to wall-clock
+# epoch when this is importable (see can/interfaces/pcan/pcan.py); without
+# it, PCAN timestamps are relative to device boot time instead, which breaks
+# any comparison against another epoch-based timeline (e.g. the CAN-audio
+# latency widget). Harmless no-op for virtual/Vector connections.
+uptime>=3.0.1

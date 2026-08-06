@@ -76,6 +76,19 @@ def test_classic_bus_rejects_oversized_payload():
         cm.disconnect()
 
 
+def test_virtual_connection_reports_epoch_aligned_timestamps():
+    """virtual (and Vector) timestamps are always wall-clock epoch seconds,
+    unlike PCAN without the `uptime` package -- widgets that compare CAN
+    timestamps against another epoch-based timeline (e.g. the CAN-audio
+    latency widget) rely on this flag."""
+    cm = CanManager()
+    status = cm.connect("virtual", "t_epoch_aligned")
+    try:
+        assert status["config"]["epoch_aligned"] is True
+    finally:
+        cm.disconnect()
+
+
 def test_classic_bus_forces_classic_frame_even_if_fd_requested():
     """HS-CAN(classic) 연결에서는 행/DBC의 FD 체크가 켜져 있어도 실제로는
     classic 프레임으로 나가야 한다 -- 연결 설정이 우선한다."""

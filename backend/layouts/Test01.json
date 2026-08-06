@@ -88,6 +88,16 @@
           "type": "canMessageDisplay",
           "title": "CAN 메시지 표시창",
           "options": {}
+        },
+        {
+          "id": "w1785985982417",
+          "type": "canAudioLatency",
+          "title": "CAN-오디오 지연 확인",
+          "options": {},
+          "binding": {
+            "message": "CLU_AMP_01_200ms",
+            "signal": "Warn_Sound_FCW"
+          }
         }
       ],
       "layout": [
@@ -143,6 +153,17 @@
           "h": 11,
           "minW": 3,
           "minH": 2,
+          "moved": true,
+          "static": false
+        },
+        {
+          "i": "w1785985982417",
+          "x": 6,
+          "y": 11,
+          "w": 9,
+          "h": 17,
+          "minW": 3,
+          "minH": 3,
           "moved": true,
           "static": false
         }

@@ -44,6 +44,9 @@ def test_full_api_flow():
         assert r.json()["signals"]["EngineSpeed"] == "periodic"
         status = client.get("/api/status").json()
         assert len(status["tx"]["auto_entries"]) == 1
+        # a widget-armed periodic signal must not look like "Enable Msg" was
+        # pressed (see tx_scheduler.py's _enable_msg_armed)
+        assert status["tx"]["periodic_enabled"] is False
         client.post("/api/tx/auto/stop", json={})
 
         # configure + start/stop TX list
@@ -651,3 +654,39 @@ def test_ota_tester_case_steps_and_selected_steps_endpoints():
         assert r.status_code == 400
 
         client.post("/api/ota_tester/cases/clear")
+
+
+def test_periodic_enable_disable_all_wiring_and_flag_independent_of_widget_sends():
+    """/api/tx/periodic/enable_all + /disable_all REST wiring, and that the
+    "Enable Msg" on/off flag stays decoupled from a widget's own periodic
+    signal sends (the reported bug: sending a periodic signal from a widget
+    used to make the "Enable Msg" button look pressed)."""
+    with make_client() as client:
+        client.post("/api/connect", json={"interface": "virtual", "channel": "t_api_periodic"})
+        client.post(
+            "/api/dbc/upload",
+            files={"file": ("sample.dbc", (SAMPLES_DIR / "sample.dbc").read_bytes())},
+        )
+        client.post("/api/run/start")
+
+        # widget sends a periodic signal on its own -- must not flip the flag
+        client.post(
+            "/api/tx/signal",
+            json={"message_name": "EngineData", "values": {"EngineSpeed": 1500}},
+        )
+        assert client.get("/api/status").json()["tx"]["periodic_enabled"] is False
+
+        # "Enable Msg" pressed -- flag on, all periodic messages armed
+        r = client.post("/api/tx/periodic/enable_all", json={"rx_node": ""})
+        assert r.status_code == 200
+        assert set(r.json()["armed"]) >= {"EngineData", "VehicleSpeed", "BodyStatus"}
+        assert client.get("/api/status").json()["tx"]["periodic_enabled"] is True
+
+        # "Enable Msg" pressed again -- flag off, those entries stop
+        r = client.post("/api/tx/periodic/disable_all")
+        assert r.status_code == 200
+        status = client.get("/api/status").json()
+        assert status["tx"]["periodic_enabled"] is False
+        assert status["tx"]["auto_entries"] == []
+
+        client.post("/api/run/stop")

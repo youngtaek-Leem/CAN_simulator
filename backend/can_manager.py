@@ -110,8 +110,24 @@ class CanManager:
             "receive_own_messages": receive_own_messages,
             "fd": fd,
             "data_bitrate": data_bitrate if fd else None,
+            "epoch_aligned": self._check_epoch_aligned(interface),
         }
         return self.status()
+
+    @staticmethod
+    def _check_epoch_aligned(interface: str) -> bool:
+        """Whether Message.timestamp on this connection is wall-clock epoch
+        seconds (required for comparing it against another epoch-based
+        timeline, e.g. the CAN-audio latency widget's audio waveform, which
+        is stamped with time.time()). virtual/Vector always are (see module
+        docstring). PCAN only is if the optional `uptime` package resolved a
+        real boot-time epoch at import time -- otherwise its timestamps are
+        relative to device boot and this returns False."""
+        if interface != "pcan":
+            return True
+        import can.interfaces.pcan.pcan as _pcan_mod
+
+        return _pcan_mod.boottimeEpoch != 0
 
     def disconnect(self) -> None:
         if self.notifier is not None:

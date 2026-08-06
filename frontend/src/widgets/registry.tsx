@@ -22,6 +22,7 @@ import UdsSwdlWidget from './UdsSwdlWidget';
 import OtaTesterWidget from './OtaTesterWidget';
 import { AudioMonitorWidget } from './AudioMonitorWidget';
 import { PowerControlWidget } from './PowerControlWidget';
+import { CanAudioLatencyWidget } from './CanAudioLatencyWidget';
 
 interface WidgetMeta {
   label: string;
@@ -159,5 +160,10 @@ export const WIDGET_REGISTRY: Record<WidgetType, WidgetMeta> = {
     label: '전원 컨트롤',
     component: PowerControlWidget,
     defaultSize: { w: 6, h: 14, minW: 3, minH: 6 },
+  },
+  canAudioLatency: {
+    label: 'CAN-오디오 지연 확인',
+    component: CanAudioLatencyWidget,
+    defaultSize: { w: 8, h: 10, minW: 3, minH: 3 },
   },
 };

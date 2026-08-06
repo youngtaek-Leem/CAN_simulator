@@ -463,6 +463,11 @@ def tx_periodic_enable_all(req: EnablePeriodicRequest):
         raise HTTPException(status_code=400, detail=str(exc))
 
 
+@app.post("/api/tx/periodic/disable_all")
+def tx_periodic_disable_all():
+    return tx_scheduler.disable_all_periodic()
+
+
 class AutoStopRequest(BaseModel):
     message_name: str | None = None
 

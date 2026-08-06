@@ -59,6 +59,11 @@ export interface BackendStatus {
   can: { connected: boolean; config: Record<string, unknown>; counters: { rx: number; tx: number; errors: number } };
   tx: {
     running: boolean;
+    // "Enable Msg" bulk toggle's own on/off state -- independent of whether
+    // any auto_entries exist, since a widget sending one periodic signal
+    // also creates an auto_entries entry on its own (see tx_scheduler.py's
+    // _enable_msg_armed).
+    periodic_enabled: boolean;
     entries: {
       key: string;
       arbitration_id: number;
@@ -357,7 +362,8 @@ export type WidgetType =
   | 'udsSwdl'
   | 'otaTester'
   | 'audioMonitor'
-  | 'powerControl';
+  | 'powerControl'
+  | 'canAudioLatency';
 
 export interface SignalBinding {
   message: string;

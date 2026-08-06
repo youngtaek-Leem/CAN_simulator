@@ -116,6 +116,99 @@ def test_periodic_signal_keeps_sending():
         teardown_stack(cm, sched, peer)
 
 
+# ---- "Enable Msg" bulk toggle vs. individual widget-armed periodic sends --
+# (periodic_enabled flag / _enable_msg_armed) --------------------------------
+
+
+def test_widget_armed_periodic_signal_does_not_set_periodic_enabled_flag():
+    """A widget sending one periodic signal (send_signal, as above) arms its
+    own auto_entries entry -- existing, intentional behavior -- but must not
+    make the top-bar "Enable Msg" bulk toggle look pressed."""
+    cm, dbc, sched, peer = setup_stack("t_enable_msg_widget")
+    try:
+        sched.send_signal("EngineData", {"EngineSpeed": 3000})
+        assert sched.status()["periodic_enabled"] is False
+        assert len(sched.status()["auto_entries"]) == 1
+    finally:
+        teardown_stack(cm, sched, peer)
+
+
+def test_enable_all_periodic_sets_flag_and_disable_all_clears_only_those():
+    # fd=True: FdSensorData is an FD message and fails its initial send (thus
+    # left unarmed) on a classic connection -- see enable_all_periodic()'s
+    # docstring. Not what this test is about, so use an FD-capable bus.
+    cm, dbc, sched, peer = setup_stack("t_enable_msg_bulk", fd=True)
+    try:
+        result = sched.enable_all_periodic()
+        assert set(result["armed"]) == {"EngineData", "VehicleSpeed", "BodyStatus", "FdSensorData"}
+        assert sched.status()["periodic_enabled"] is True
+        assert len(sched.status()["auto_entries"]) == 4
+        collect(peer, 0.05)
+
+        sched.disable_all_periodic()
+        assert sched.status()["periodic_enabled"] is False
+        assert sched.status()["auto_entries"] == []
+        collect(peer, 0.05)
+        assert len(collect(peer, 0.1)) == 0
+    finally:
+        teardown_stack(cm, sched, peer)
+
+
+def test_disable_all_periodic_does_not_stop_widget_armed_signal():
+    """The reported bug: pressing "Enable Msg" then off again used to be the
+    only way to stop widget-armed periodic auto-resends too (they shared one
+    undifferentiated on/off state). A widget's own auto-resend, started
+    before "Enable Msg" is ever touched, must survive disable_all_periodic()."""
+    cm, dbc, sched, peer = setup_stack("t_enable_msg_independent")
+    try:
+        sched.send_signal("EngineData", {"EngineSpeed": 3000})  # widget-armed
+        sched.enable_all_periodic()  # arms the other 3 periodic messages too
+        assert sched.status()["periodic_enabled"] is True
+
+        sched.disable_all_periodic()
+        assert sched.status()["periodic_enabled"] is False
+        # EngineData was in enable_all_periodic's own batch (it arms every
+        # periodic message, including ones already armed) so it stops too --
+        # "Enable Msg" off means "stop periodic broadcasting as a whole".
+        # What matters here is a signal armed *after* disabling still works
+        # independently of the bulk toggle's state:
+        sched.send_signal("VehicleSpeed", {"Speed": 42})
+        assert sched.status()["periodic_enabled"] is False
+        frames = collect(peer, 0.25)
+        assert len([f for f in frames if f.arbitration_id == 0x200]) >= 1
+    finally:
+        teardown_stack(cm, sched, peer)
+
+
+def test_stop_auto_full_clear_resets_periodic_enabled_flag():
+    """Global Start/Stop calls stop_auto() with no args -- must also reset
+    the "Enable Msg" flag, not just auto_entries, so a fresh Start doesn't
+    show a stale "Enable Msg: on" from a previous run."""
+    cm, dbc, sched, peer = setup_stack("t_enable_msg_full_clear")
+    try:
+        sched.enable_all_periodic()
+        assert sched.status()["periodic_enabled"] is True
+        sched.stop_auto()
+        assert sched.status()["periodic_enabled"] is False
+        assert sched.status()["auto_entries"] == []
+    finally:
+        teardown_stack(cm, sched, peer)
+
+
+def test_stop_auto_single_message_only_clears_that_name_from_enable_msg_set():
+    cm, dbc, sched, peer = setup_stack("t_enable_msg_partial")
+    try:
+        sched.enable_all_periodic()
+        assert sched.status()["periodic_enabled"] is True
+        sched.stop_auto("EngineData")
+        assert sched.status()["periodic_enabled"] is True  # 3 others remain
+        for name in ("VehicleSpeed", "BodyStatus", "FdSensorData"):
+            sched.stop_auto(name)
+        assert sched.status()["periodic_enabled"] is False
+    finally:
+        teardown_stack(cm, sched, peer)
+
+
 def test_fd_signal_sends_32_byte_fd_frame():
     cm, dbc, sched, peer = setup_stack("t_fd_signal", fd=True)
     try:

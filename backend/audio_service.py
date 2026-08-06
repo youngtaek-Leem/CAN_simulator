@@ -17,6 +17,7 @@ and has no stable baseline across separate test runs.
 
 import threading
 import time
+from bisect import bisect_left
 from collections import deque
 from datetime import datetime
 from pathlib import Path
@@ -148,22 +149,42 @@ class _ChannelLevelTracker:
 
         `chunks` defaults to the live ring buffer (for direct/test use);
         AudioService.get_waveform() passes a snapshot_chunks() copy instead
-        so this decimation work runs without holding _level_lock."""
+        so this decimation work runs without holding _level_lock.
+
+        Profiled at ~30-90ms for a full 30s buffer scan depending on device
+        blocksize (see Requirement.md's "CAN periodic 신호 영향 점검" entry) --
+        long enough, called this often (every audio-waveform poll, up to
+        every 60ms while any audio widget is open), to visibly starve other
+        threads of the GIL (e.g. tx_scheduler's periodic CAN send loop). Most
+        of that cost was scanning chunks nowhere near [from_s, to_s] just to
+        `continue` past them, so `chunks` (append-only, oldest-first) is
+        first narrowed with a bisect to the chunks that could possibly
+        overlap the requested range, and the loop below `break`s the moment
+        it passes to_s instead of continuing to the end."""
         if to_s <= from_s or max_points <= 0 or samplerate <= 0:
             return []
-        if chunks is None:
-            chunks = self._raw_chunks
+        # list(): chunks defaults to self._raw_chunks, a deque -- doesn't
+        # support the slicing used below to skip to start_idx.
+        chunks = list(self._raw_chunks if chunks is None else chunks)
+        if not chunks:
+            return []
         column_width = (to_s - from_s) / max_points
         col_min = [None] * max_points
         col_max = [None] * max_points
 
-        for chunk_start, arr in chunks:
+        starts = [c[0] for c in chunks]
+        max_chunk_dur = max(len(c[1]) for c in chunks) / samplerate
+        start_idx = bisect_left(starts, from_s - max_chunk_dur)
+
+        for chunk_start, arr in chunks[start_idx:]:
             n = len(arr)
             if n == 0:
                 continue
             chunk_end = chunk_start + n / samplerate
-            if chunk_end < from_s or chunk_start > to_s:
+            if chunk_end < from_s:
                 continue
+            if chunk_start > to_s:
+                break
             idx0 = max(0, int((from_s - chunk_start) * samplerate))
             idx1 = min(n, int((to_s - chunk_start) * samplerate) + 1)
             if idx0 >= idx1:
