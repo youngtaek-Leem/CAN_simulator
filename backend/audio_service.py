@@ -326,6 +326,15 @@ class AudioService:
         # existing monitor-only stream in place instead of opening a second
         # one (see start()).
         self._stream_owner: Optional[str] = None
+        # Guards the stream-lifecycle transitions below (start/start_monitor/
+        # start_widget_recording/stop/stop_monitor/stop_widget_recording) --
+        # without it, two near-simultaneous requests (e.g. a test-runner
+        # Start and the widget's Record button) can both read
+        # _stream_owner == "monitor" before either writes, then both mutate
+        # self._stream/_stream_owner/_wav_name, corrupting stream ownership.
+        # RLock because stop_widget_recording() calls self.stop() while
+        # already holding it.
+        self._stream_lock = threading.RLock()
         self._level_lock = threading.Lock()
         self._level_trackers = [_ChannelLevelTracker() for _ in DEFAULT_CHANNELS]
         # How many channels the currently- (or most-recently-) opened stream
@@ -526,49 +535,53 @@ class AudioService:
         already has a monitor-only stream open, upgrade it in place (same
         device stream, now also buffering to a WAV) instead of opening a
         second stream on the same device, which would fail."""
-        if self._stream is not None and self._stream_owner == "monitor":
-            with self._audio_data_lock:
-                self._audio_data = []
-            self._wav_name = filename
-            self._stream_owner = "recording"
-            self._is_recording = True
-            self._stream_started_at = time.time()
+        with self._stream_lock:
+            if self._stream is not None and self._stream_owner == "monitor":
+                with self._audio_data_lock:
+                    self._audio_data = []
+                self._wav_name = filename
+                self._stream_owner = "recording"
+                self._is_recording = True
+                self._stream_started_at = time.time()
+                return {"ok": True, "filename": filename}
+            if self._stream is not None:
+                return {"ok": False, "reason": "이미 실행 중입니다"}
+            result = self._open_stream(filename, "recording")
+            if not result["ok"]:
+                return result
             return {"ok": True, "filename": filename}
-        if self._stream is not None:
-            return {"ok": False, "reason": "이미 실행 중입니다"}
-        result = self._open_stream(filename, "recording")
-        if not result["ok"]:
-            return result
-        return {"ok": True, "filename": filename}
 
     def stop(self) -> dict:
-        if not self._is_recording:
-            return {"ok": False, "reason": "녹음 중이 아닙니다"}
-        try:
-            self._stream.stop()
-            self._stream.close()
-            samplerate = self._active_samplerate or int(sd.query_devices(self.device_index)["default_samplerate"])
-            with self._audio_data_lock:
-                audio_data = self._audio_data
-                self._audio_data = []
-            audio = (
-                np.concatenate(audio_data, axis=0)
-                if audio_data
-                else np.zeros((0, self._active_channels), dtype="int16")
-            )
-            path = self._rec_dir / self._wav_name
-            wav_write(str(path), samplerate, audio)
-            result = {"ok": True, "filename": self._wav_name, "frames": int(len(audio))}
-        except Exception as exc:
-            result = {"ok": False, "reason": str(exc)}
-        finally:
-            self._stream = None
-            self._stream_owner = None
-            self._is_recording = False
-            self._wav_name = None
-            self._stream_started_at = None
-            self._segment_started_at = None
-        return result
+        with self._stream_lock:
+            if not self._is_recording:
+                return {"ok": False, "reason": "녹음 중이 아닙니다"}
+            try:
+                try:
+                    self._stream.stop()
+                finally:
+                    self._stream.close()
+                samplerate = self._active_samplerate or int(sd.query_devices(self.device_index)["default_samplerate"])
+                with self._audio_data_lock:
+                    audio_data = self._audio_data
+                    self._audio_data = []
+                audio = (
+                    np.concatenate(audio_data, axis=0)
+                    if audio_data
+                    else np.zeros((0, self._active_channels), dtype="int16")
+                )
+                path = self._rec_dir / self._wav_name
+                wav_write(str(path), samplerate, audio)
+                result = {"ok": True, "filename": self._wav_name, "frames": int(len(audio))}
+            except Exception as exc:
+                result = {"ok": False, "reason": str(exc)}
+            finally:
+                self._stream = None
+                self._stream_owner = None
+                self._is_recording = False
+                self._wav_name = None
+                self._stream_started_at = None
+                self._segment_started_at = None
+            return result
 
     # ---- 오디오 신호 모니터 (live level monitor) --------------------------------
 
@@ -576,9 +589,10 @@ class AudioService:
         """Start (or piggyback on an already-open) live level stream for the
         모니터 widget. Never opens a second stream if a test-runner recording
         is already active -- the level trackers are already being fed by it."""
-        if self._stream is not None:
-            return {"ok": True, "already_active": True}
-        return self._open_stream(None, "monitor")
+        with self._stream_lock:
+            if self._stream is not None:
+                return {"ok": True, "already_active": True}
+            return self._open_stream(None, "monitor")
 
     def stop_monitor(self) -> dict:
         """Stop the monitor-only stream. A no-op (not an error) if nothing
@@ -586,49 +600,54 @@ class AudioService:
         recording (test-runner or the widget's own Record) -- the plain
         Stop-the-waveform-only path must never cut a recording off before it
         saves; use stop_widget_recording() for that."""
-        if self._stream is None:
+        with self._stream_lock:
+            if self._stream is None:
+                return {"ok": True}
+            if self._stream_owner in ("recording", "widget_record"):
+                return {"ok": False, "reason": "녹음이 진행 중이라 모니터를 끌 수 없습니다"}
+            try:
+                try:
+                    self._stream.stop()
+                finally:
+                    self._stream.close()
+            except Exception as exc:
+                return {"ok": False, "reason": str(exc)}
+            finally:
+                self._stream = None
+                self._stream_owner = None
+                self._stream_started_at = None
             return {"ok": True}
-        if self._stream_owner in ("recording", "widget_record"):
-            return {"ok": False, "reason": "녹음이 진행 중이라 모니터를 끌 수 없습니다"}
-        try:
-            self._stream.stop()
-            self._stream.close()
-        except Exception as exc:
-            return {"ok": False, "reason": str(exc)}
-        finally:
-            self._stream = None
-            self._stream_owner = None
-            self._stream_started_at = None
-        return {"ok": True}
 
     def start_widget_recording(self, filename: str) -> dict:
         """오디오 신호 모니터 위젯의 Record 버튼. 이미 위젯이 연 모니터 스트림이
         있으면 그 자리에서 녹음으로 업그레이드(재오픈 없이); 테스트 러너 녹음 등
         다른 소유자의 스트림이 이미 열려 있으면 거부."""
-        if self._stream is not None and self._stream_owner == "monitor":
-            with self._audio_data_lock:
-                self._audio_data = []
-            self._wav_name = filename
-            self._stream_owner = "widget_record"
-            self._is_recording = True
-            now = time.time()
-            self._stream_started_at = now
-            self._segment_started_at = now
+        with self._stream_lock:
+            if self._stream is not None and self._stream_owner == "monitor":
+                with self._audio_data_lock:
+                    self._audio_data = []
+                self._wav_name = filename
+                self._stream_owner = "widget_record"
+                self._is_recording = True
+                now = time.time()
+                self._stream_started_at = now
+                self._segment_started_at = now
+                return {"ok": True, "filename": filename}
+            if self._stream is not None:
+                return {"ok": False, "reason": "이미 다른 프로세스가 오디오 스트림을 사용 중입니다"}
+            result = self._open_stream(filename, "widget_record")
+            if not result["ok"]:
+                return result
+            self._segment_started_at = self._stream_started_at
             return {"ok": True, "filename": filename}
-        if self._stream is not None:
-            return {"ok": False, "reason": "이미 다른 프로세스가 오디오 스트림을 사용 중입니다"}
-        result = self._open_stream(filename, "widget_record")
-        if not result["ok"]:
-            return result
-        self._segment_started_at = self._stream_started_at
-        return {"ok": True, "filename": filename}
 
     def stop_widget_recording(self) -> dict:
         """위젯의 Record 중지 -- 위젯이 직접 시작한 녹음일 때만 저장하고 닫는다
         (테스트 러너의 녹음은 절대 건드리지 않는다)."""
-        if self._stream_owner != "widget_record":
-            return {"ok": False, "reason": "위젯이 시작한 녹음이 아닙니다"}
-        return self.stop()
+        with self._stream_lock:
+            if self._stream_owner != "widget_record":
+                return {"ok": False, "reason": "위젯이 시작한 녹음이 아닙니다"}
+            return self.stop()
 
     def get_level(self) -> dict:
         with self._level_lock:
