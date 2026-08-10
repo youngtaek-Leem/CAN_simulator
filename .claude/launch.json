@@ -10,7 +10,17 @@
     {
       "name": "backend",
       "runtimeExecutable": "backend/.venv/bin/uvicorn",
-      "runtimeArgs": ["main:app", "--host", "127.0.0.1", "--port", "8000", "--app-dir", "backend"],
+      "runtimeArgs": [
+        "main:app",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "8000",
+        "--app-dir",
+        "backend",
+        "--timeout-graceful-shutdown",
+        "5"
+      ],
       "port": 8000,
       "autoPort": false
     }

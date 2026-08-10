@@ -1730,3 +1730,56 @@ Windows에서 실제로 로그가 읽을 수 있는 수준으로 줄고 Ctrl-C�
 사용자가 다음 실사용 시 확인해줄 것을 권장한다 -- 특히 Ctrl-C가 여전히 안 먹히면
 그건 오디오 스트림이 원인이 아니라는 뜻이므로(이제 최대 3초 안에 포기하게 만들어
 뒀으니), 그 시점의 스레드 덤프나 어느 지점에서 멈춰 있는지가 다음 조사에 필요하다.
+
+### Ctrl-C 종료 안 됨, 3번째 확인 (2026-08-10, 사용자가 로그 폭주는 해결됐다고
+확인했지만 "여전히 Ctrl-C로 종료가 안된다"고 재보고) -- uvicorn 자체의 무제한
+graceful-shutdown 대기가 진짜 원인으로 확인됨
+
+로그 폭주는 rate limiter로 확실히 해결됐지만(사용자가 붙여준 새 로그가 2초당 1회로
+정상적으로 억제되고 있는 것으로 확인), `AudioService.shutdown()`(3초 bound)을 추가한
+뒤에도 Ctrl-C가 여전히 안 먹힌다는 재보고를 받아 uvicorn 자체의 종료 시퀀스를
+소스코드로 직접 확인했다(`uvicorn.server.Server.shutdown()`/`_wait_tasks_to_complete()`):
+
+1. Ctrl-C(SIGINT) 시 uvicorn은 새 연결만 막고, **기존 연결/백그라운드 task가 전부
+   끝날 때까지** `asyncio.wait_for(self._wait_tasks_to_complete(), timeout=self.config
+   .timeout_graceful_shutdown)`로 대기한다.
+2. `timeout_graceful_shutdown`의 **기본값이 `None`**이다(`uvicorn.config.Config.
+   __init__` 확인) -- 즉 기본 설정으로는 **무제한 대기**. 이 대기가 끝나야만(또는
+   타임아웃돼야만) 비로소 `self.lifespan.shutdown()`(우리 `main.py`의 `lifespan`
+   종료 코드, `audio_service.shutdown()` 호출 포함)이 실행된다 -- **직전 항목에서
+   추가한 `AudioService.shutdown()`의 3초 bound가 전혀 발동하지 못한 이유**: 그
+   코드에 도달하기도 전에 이 무제한 대기에서 멈춰 있었을 가능성이 높다.
+3. 이 서버는 프론트가 `/ws`로 WebSocket을 계속 열어두고(상태 브로드캐스트),
+   오디오 위젯이 열려 있으면 `/api/audio/level`·`/api/audio/waveform`도 계속
+   폴링한다 -- 브라우저 탭을 열어둔 채 백엔드만 Ctrl-C로 끄려고 하면 이 연결/요청들이
+   실제로 "아직 안 끝난 연결"로 잡혀 무제한 대기의 대상이 될 수 있다.
+
+**적용한 수정**: `--timeout-graceful-shutdown 5`를 uvicorn 실행 커맨드에 추가해
+1번 단계의 대기 자체를 5초로 제한했다 -- 이 시점 이후엔 남은 연결/task를 강제
+취소하고 무조건 `lifespan.shutdown()`으로 넘어간다(이제 `AudioService.shutdown()`의
+3초 bound가 실제로 발동할 기회를 얻음). `backend/run_windows.bat`(사용자가 실제
+쓰는 실행 스크립트), `backend/run_mac.txt`, `.claude/launch.json`(이 개발 환경의
+백엔드 실행 설정) 세 곳 모두에 반영.
+
+**검증 중 발견한, 솔직히 밝혀야 할 제약**: 이 mac 환경에서 실제로 `/ws`에 진짜
+WebSocket 연결을 열어둔 채(raw 소켓으로 핸드셰이크 성공 확인) uvicorn에 SIGINT를
+보내는 시뮬레이션을 해봤는데, **이 환경에서는 연결이 열려 있어도 uvicorn이 즉시
+종료됐다**(`connection.shutdown()`이 진행 중인 연결도 강제로 닫는 것으로 보임) --
+즉 "브라우저 탭을 열어두면 연결이 안 끊겨서 무한 대기한다"는 이론을 이 환경에서는
+재현하지 못했다. `--timeout-graceful-shutdown` 추가는 표준적으로 권장되는 안전한
+조치라 그대로 반영했지만(부작용 없음, 있으면 무조건 도움이 됨), Windows에서
+여전히 Ctrl-C가 안 먹힌다면 이건 이 앱 코드의 문제가 아니라 **Windows의 asyncio
+`ProactorEventLoop`가 SIGINT/Ctrl-C 전달 자체를 지연시키거나 놓치는, 잘 알려진
+플랫폼 특성**일 가능성이 더 높다 -- 이 경우 uvicorn 쪽 타임아웃 설정과 무관하게
+신호 자체가 제대로 전달되지 않는 문제라 이 앱에서 고칠 수 있는 범위를 벗어난다.
+
+**사용자가 다음에 확인해줄 것**:
+1. Ctrl-C를 눌렀을 때 터미널에 `Shutting down` / `Waiting for connections/
+   background tasks to complete` 같은 메시지가 **찍히는지** -- 안 찍히면 신호
+   자체가 uvicorn에 전달이 안 된 것(위 3번 플랫폼 문제), 찍히는데 그 다음에
+   멈추면 이번 타임아웃 수정으로 5~8초 안에는 해결될 것으로 예상.
+2. Ctrl-C를 **두 번** 눌러보기 -- uvicorn 자체가 "두 번째 Ctrl-C는 강제 종료"라고
+   안내하는 메시지를 준다(`force_exit`); 이게 되는지 확인되면 신호 전달 자체는
+   되고 있다는 뜻.
+3. 급할 때 임시 대응: 브라우저 탭을 먼저 닫고 Ctrl-C, 또는 작업 관리자/`taskkill
+   /F /IM python.exe`로 강제 종료.
