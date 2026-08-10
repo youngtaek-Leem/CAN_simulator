@@ -21,6 +21,8 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Optional
 
+import diag_log
+
 EVENT_INVALID_DELAY_S = 0.030
 MAX_TX_ENTRIES = 20
 DEFAULT_AUTO_PERIOD_MS = 100.0
@@ -29,7 +31,9 @@ DEFAULT_AUTO_PERIOD_MS = 100.0
 # 느려진다" 조사 (Requirement.md의 "CAN periodic 신호 영향 점검" 항목에서 이미 GIL
 # 경합 메커니즘 자체는 실측 확인됨 -- 여기서는 실사용 중 실제로 얼마나 밀리는지
 # 드러내기 위한 로그). "cansim." 네임스페이스 + main.py의 전용 핸들러로, 임계값을
-# 넘을 때만 경고해 평상시엔 조용하다.
+# 넘을 때만 경고해 평상시엔 조용하다. diag_log로 반복 발생 시 폭주도 막는다(같은
+# 조건이 계속 참이면 -- 예: 오디오 위젯이 켜진 동안 매 틱마다 지연 -- 로그가 끝없이
+# 쏟아지는 것을 실사용에서 실제로 겪음).
 logger = logging.getLogger("cansim.tx_scheduler")
 _SLOW_TICK_MS = 10.0  # loop targets ~1ms; this much drift is a real stall
 _SLOW_LOCK_WAIT_MS = 5.0
@@ -401,18 +405,23 @@ class TxScheduler:
             now = time.perf_counter()
             tick_gap_ms = (now - last_tick) * 1000.0
             if tick_gap_ms > _SLOW_TICK_MS:
-                logger.warning(
-                    "tick delayed %.1fms (target ~1ms) -- periodic CAN sends are "
-                    "late/jittery this cycle (GIL contention from another thread?)",
-                    tick_gap_ms,
-                )
+                n = diag_log.should_log("tx.tick_delay")
+                if n >= 0:
+                    logger.warning(
+                        "tick delayed %.1fms (target ~1ms) -- periodic CAN sends are "
+                        "late/jittery this cycle (GIL contention from another thread?)%s",
+                        tick_gap_ms,
+                        diag_log.suffix(n),
+                    )
             last_tick = now
             jobs: list[Callable[[], None]] = []
             lock_wait_start = time.perf_counter()
             with self._lock:
                 lock_wait_ms = (time.perf_counter() - lock_wait_start) * 1000.0
                 if lock_wait_ms > _SLOW_LOCK_WAIT_MS:
-                    logger.warning("waited %.1fms to acquire _lock", lock_wait_ms)
+                    n = diag_log.should_log("tx.lock_wait")
+                    if n >= 0:
+                        logger.warning("waited %.1fms to acquire _lock%s", lock_wait_ms, diag_log.suffix(n))
                 paused = self._paused
                 if not paused:
                     while self._oneshots and self._oneshots[0][0] <= now:
@@ -432,11 +441,14 @@ class TxScheduler:
                     pass  # bus errors are counted by CanManager
                 job_ms = (time.perf_counter() - job_start) * 1000.0
                 if job_ms > _SLOW_JOB_MS:
-                    logger.warning(
-                        "a single send job took %.1fms -- CanManager.send() blocking, "
-                        "not GIL contention, if this repeats",
-                        job_ms,
-                    )
+                    n = diag_log.should_log("tx.job_slow")
+                    if n >= 0:
+                        logger.warning(
+                            "a single send job took %.1fms -- CanManager.send() blocking, "
+                            "not GIL contention, if this repeats%s",
+                            job_ms,
+                            diag_log.suffix(n),
+                        )
             time.sleep(0.001)
 
     def _make_send_job(self, entry: TxEntry) -> Callable[[], None]:

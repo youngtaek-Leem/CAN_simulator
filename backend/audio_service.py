@@ -27,18 +27,26 @@ from typing import Optional
 
 import numpy as np
 
+import diag_log
+
 # Diagnostic logging for the Windows "오디오 위젯 사용 중 CAN 전송이 느려지고 Stop이
 # 지연되며 전역 Stop이 Failed to fetch로 실패한다" 조사 (Requirement.md 참고). Every
 # entry below is gated behind a threshold so normal operation stays silent --
 # only genuinely slow calls (candidates for the reported lag) get logged.
 # "cansim." namespace + explicit handler in main.py so these show up
 # regardless of uvicorn's own logging config (which leaves the root logger
-# unconfigured).
+# unconfigured). Each site is additionally rate-limited via diag_log
+# (see there) -- a condition that's continuously true (e.g. every
+# get_waveform() call being slow while a widget is open) would otherwise log
+# on every occurrence and flood the terminal, exactly as a user reported.
 logger = logging.getLogger("cansim.audio")
 _SLOW_CALLBACK_MS = 20.0
 _SLOW_LOCK_WAIT_MS = 50.0
 _SLOW_STREAM_STOP_MS = 300.0
 _SLOW_WAVEFORM_MS = 20.0
+# shutdown() gives up waiting for the stream close this long before letting
+# the process exit anyway -- see shutdown()'s docstring.
+_SHUTDOWN_CLOSE_TIMEOUT_S = 3.0
 
 
 @contextmanager
@@ -51,7 +59,9 @@ def _timed_lock(lock, label: str):
     lock.acquire()
     wait_ms = (time.perf_counter() - t0) * 1000.0
     if wait_ms > _SLOW_LOCK_WAIT_MS:
-        logger.warning("%s: waited %.1fms to acquire lock", label, wait_ms)
+        n = diag_log.should_log(f"audio.lock_wait.{label}")
+        if n >= 0:
+            logger.warning("%s: waited %.1fms to acquire lock%s", label, wait_ms, diag_log.suffix(n))
     try:
         yield
     finally:
@@ -245,15 +255,18 @@ class _ChannelLevelTracker:
         ]
         dur_ms = (time.perf_counter() - t0) * 1000.0
         if dur_ms > _SLOW_WAVEFORM_MS:
-            logger.warning(
-                "waveform_slice: scanned %d/%d chunks in %.1fms (window=%.2fs, max_points=%d) "
-                "-- held the GIL for this long",
-                len(chunks) - start_idx,
-                len(chunks),
-                dur_ms,
-                to_s - from_s,
-                max_points,
-            )
+            n = diag_log.should_log("audio.waveform_slice_slow")
+            if n >= 0:
+                logger.warning(
+                    "waveform_slice: scanned %d/%d chunks in %.1fms (window=%.2fs, max_points=%d) "
+                    "-- held the GIL for this long%s",
+                    len(chunks) - start_idx,
+                    len(chunks),
+                    dur_ms,
+                    to_s - from_s,
+                    max_points,
+                    diag_log.suffix(n),
+                )
         return result
 
     def snapshot(self, index: int) -> dict:
@@ -477,7 +490,9 @@ class AudioService:
                 # while this same process is busy elsewhere) is a plausible
                 # cause of choppy audio, distinct from the GIL-contention
                 # theory below.
-                logger.warning("sounddevice callback status flags: %s", _status)
+                n = diag_log.should_log("audio.callback_status")
+                if n >= 0:
+                    logger.warning("sounddevice callback status flags: %s%s", _status, diag_log.suffix(n))
             now = time.time()
             with self._level_lock:
                 for i, tracker in enumerate(self._level_trackers):
@@ -489,12 +504,15 @@ class AudioService:
                     self._audio_data.append(indata.copy())
             dur_ms = (time.perf_counter() - cb_start) * 1000.0
             if dur_ms > _SLOW_CALLBACK_MS:
-                logger.warning(
-                    "audio callback took %.1fms (frames=%d) -- risks glitches and/or "
-                    "starves tx_scheduler's tick loop of the GIL while this runs",
-                    dur_ms,
-                    _frames,
-                )
+                n = diag_log.should_log("audio.callback_slow")
+                if n >= 0:
+                    logger.warning(
+                        "audio callback took %.1fms (frames=%d) -- risks glitches and/or "
+                        "starves tx_scheduler's tick loop of the GIL while this runs%s",
+                        dur_ms,
+                        _frames,
+                        diag_log.suffix(n),
+                    )
 
         return callback
 
@@ -684,6 +702,69 @@ class AudioService:
                 self._segment_started_at = None
             return result
 
+    def shutdown(self) -> None:
+        """Best-effort, bounded-time stream close for app shutdown
+        (`main.py`'s lifespan). Previously the shutdown path never touched
+        `AudioService` at all -- a stream left open (Start/Record pressed,
+        never Stopped) just stayed open through server shutdown, which on
+        Windows is a candidate for the reported "Ctrl-C 눌러도 종료가 안 된다"
+        symptom if `stream.stop()`/`close()` itself stalls there (the same
+        stall `_close_stream_timed()` was added to catch). Snapshots and
+        clears all stream state under `_stream_lock` first -- so any request
+        racing shutdown sees "idle" immediately -- then runs the actual
+        blocking close on a daemon thread using that snapshot (no lock held,
+        so it can never deadlock against `_stream_lock`) and gives up
+        waiting after `_SHUTDOWN_CLOSE_TIMEOUT_S`: the process must still be
+        able to exit even if PortAudio itself never returns."""
+        with _timed_lock(self._stream_lock, "shutdown"):
+            stream = self._stream
+            is_recording = self._is_recording
+            wav_name = self._wav_name
+            samplerate = self._active_samplerate
+            channels = self._active_channels
+            self._stream = None
+            self._stream_owner = None
+            self._is_recording = False
+            self._wav_name = None
+            self._stream_started_at = None
+            self._segment_started_at = None
+        if stream is None:
+            return
+
+        done = threading.Event()
+
+        def _do_close() -> None:
+            try:
+                t0 = time.perf_counter()
+                try:
+                    stream.stop()
+                finally:
+                    stream.close()
+                logger.info("shutdown: stream closed in %.0fms", (time.perf_counter() - t0) * 1000.0)
+                if is_recording and wav_name:
+                    with self._audio_data_lock:
+                        audio_data = self._audio_data
+                        self._audio_data = []
+                    audio = (
+                        np.concatenate(audio_data, axis=0)
+                        if audio_data
+                        else np.zeros((0, channels), dtype="int16")
+                    )
+                    wav_write(str(self._rec_dir / wav_name), samplerate, audio)
+            except Exception:
+                logger.warning("audio stream close on shutdown failed", exc_info=True)
+            finally:
+                done.set()
+
+        threading.Thread(target=_do_close, daemon=True).start()
+        if not done.wait(timeout=_SHUTDOWN_CLOSE_TIMEOUT_S):
+            logger.warning(
+                "audio stream did not close within %.0fs on shutdown -- abandoning it so the "
+                "process can still exit (matches the Windows PortAudio stop()/close() stall "
+                "these diagnostics are trying to catch)",
+                _SHUTDOWN_CLOSE_TIMEOUT_S,
+            )
+
     # ---- 오디오 신호 모니터 (live level monitor) --------------------------------
 
     def start_monitor(self) -> dict:
@@ -806,13 +887,16 @@ class AudioService:
         ]
         dur_ms = (time.perf_counter() - t0) * 1000.0
         if dur_ms > _SLOW_WAVEFORM_MS:
-            logger.warning(
-                "get_waveform: %.1fms total for %d channel(s), window=%.2fs, max_points=%d",
-                dur_ms,
-                len(channels),
-                to_s - from_s,
-                max_points,
-            )
+            n = diag_log.should_log("audio.get_waveform_slow")
+            if n >= 0:
+                logger.warning(
+                    "get_waveform: %.1fms total for %d channel(s), window=%.2fs, max_points=%d%s",
+                    dur_ms,
+                    len(channels),
+                    to_s - from_s,
+                    max_points,
+                    diag_log.suffix(n),
+                )
         return {
             "active": self._stream is not None,
             "samplerate": samplerate,

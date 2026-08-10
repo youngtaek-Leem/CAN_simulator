@@ -1668,3 +1668,65 @@ CAN 전송/전역 Stop이 더는 느려지지 않는지는 이 환경에 브라�
 추가한 진단 로그는 그대로 남아있으니, 이 수정 이후에도 같은 증상이 재현되면
 로그를 보면 다른 원인(GIL 경합 또는 PortAudio stop/close 블로킹)이 지배적임을
 바로 알 수 있다.
+
+### 후속 버그 2건 (2026-08-10, 사용자가 Windows에서 위 진단 로그를 실제로 받아본 뒤
+보고): 로그 폭주 + Ctrl-C로 서버가 종료되지 않음
+
+사용자가 위에서 추가한 진단 로그를 켜고 Windows에서 실사용하다가 터미널에 같은
+경고가 끝없이 쏟아지고, 그 상태에서 백엔드를 Ctrl-C로 종료해도 멈추지 않는다고
+보고. 사용자가 붙여준 실제 로그가 결정적인 증거였다:
+
+```
+WARNING cansim.tx_scheduler: tick delayed 11.7ms (target ~1ms) ...
+WARNING cansim.audio: waveform_slice: scanned 186/962 chunks in 89.8ms (window=5.00s, max_points=781) -- held the GIL for this long
+WARNING cansim.audio: get_waveform: 217.3ms total for 2 channel(s), window=5.00s, max_points=781
+WARNING cansim.audio: waveform_slice: scanned 151/962 chunks in 46.6ms (window=0.23s, max_points=947) -- held the GIL for this long
+... (수백 줄 반복, 20~40ms 간격)
+```
+
+**이 로그로 확인된 것 (가설이 아니라 실측)**: `waveform_slice()`/`get_waveform()`이
+윈도우에서 macOS 프로파일링(같은 5초 창에서 ~14-31ms 추정)보다 훨씬 느리게(90~220ms)
+걸리고 있고, `window=5.00s`와 `window=0.23s` 두 종류의 요청이 동시에 20~40ms
+간격으로 계속 들어오고 있다 -- 바로 위에서 지목한 대로 `AudioMonitorWidget`
+(기본 5초 창)과 `CanAudioLatencyWidget`(줌 인해서 0.23초 창)이 실제로 동시에
+열려 있었다는 뜻이다. `tick delayed 11.7ms`도 한 번 확인되어 GIL 경합이
+`tx_scheduler`에도 실제로 영향을 준다는 것 역시 실측으로 확인됐다.
+
+**로그 폭주 자체는 새 버그가 아니라, 진단 로그에 빠뜨린 안전장치였다**: 임계값
+초과라는 조건이 폴링 주기(60~100ms)보다 계속 오래 참으로 유지되니, 매 요청마다
+경고가 찍혀 사실상 매 60~100ms 스팸이 된 것 -- 조건 자체는 정확했지만 사용할 수
+없을 정도로 로그가 넘쳤다.
+
+**Ctrl-C 종료 안 됨은 별도 원인**: `main.py`의 `lifespan` 종료 블록을 다시 확인한
+결과 `audio_service`를 아예 건드리지 않고 있었다 -- 스트림이 열려 있는 상태로
+서버가 종료되면 PortAudio `InputStream`이 닫히지 않은 채 남는다. Windows에서
+`stream.stop()`/`close()`가 멈춰버리는 경우(이전 항목에서 후보로 지목한 것과 동일한
+현상) 이게 그대로 프로세스 종료를 막을 수 있다.
+
+**수정**:
+1. **`backend/diag_log.py`(신규)**: 로그 지점(key)별로 최소 2초에 한 번만 실제로
+   찍고, 그 사이 억제된 횟수를 다음 로그에 "(+N more suppressed in the last 2s)"로
+   붙여주는 공용 rate limiter. `audio_service.py`/`tx_scheduler.py`/`main.py`의
+   반복 가능성이 있는 경고 지점(콜백 지연/오버플로우, `waveform_slice`/
+   `get_waveform` 소요시간, 락 대기, 틱 지연, job 지연, HTTP 느린 요청 -- 경로별로
+   따로 제한해 특정 엔드포인트가 다른 엔드포인트를 가리지 않게 함, 브로드캐스트
+   루프 지연)에 전부 적용했다. 1회성인 스트림 open/stop 타이밍 로그(Start/Stop
+   클릭당 한 번뿐)는 제한 없이 그대로 둠.
+2. **`AudioService.shutdown()`(신규, `backend/audio_service.py`)**: 앱 종료
+   시(`main.py`의 lifespan) 열려 있는 스트림을 정리하는 경로가 아예 없던 빈틈을
+   메움. `_stream_lock`으로 스트림 상태를 스냅샷하고 즉시 idle로 비운 뒤, 실제
+   블로킹 close는 락 밖에서 별도 데몬 스레드로 실행하고 최대 3초(`_SHUTDOWN_CLOSE_
+   TIMEOUT_S`)만 기다린다 -- PortAudio의 `stop()`/`close()`가 Windows에서 정말로
+   멈춰버려도 그 스레드만 버려두고 프로세스는 계속 종료될 수 있게 했다(같은
+   스레드에서 `_stream_lock`을 다시 잡지 않으므로 데드락 불가능). `main.py`의
+   `lifespan` 종료 블록에 `audio_service.shutdown()` 호출 추가.
+
+검증: 백엔드 전체 226개 테스트 통과(회귀 없음). `diag_log.should_log()`를 직접
+호출해 버스트 억제 및 억제 횟수 리포트 동작 확인. `AudioService.shutdown()`을
+(a) 스트림 없음(즉시 no-op), (b) 0.5초 걸리는 가짜 스트림(정상 대기 후 완료), (c)
+5초간 멈추는 가짜 스트림(타임아웃을 0.3초로 낮춰서 테스트 -- 실제로 306ms 만에
+포기하고 반환, 스트림 상태는 즉시 비워짐)로 직접 시뮬레이션해 동작 확인.
+Windows에서 실제로 로그가 읽을 수 있는 수준으로 줄고 Ctrl-C가 즉시 먹히는지는
+사용자가 다음 실사용 시 확인해줄 것을 권장한다 -- 특히 Ctrl-C가 여전히 안 먹히면
+그건 오디오 스트림이 원인이 아니라는 뜻이므로(이제 최대 3초 안에 포기하게 만들어
+뒀으니), 그 시점의 스레드 덤프나 어느 지점에서 멈춰 있는지가 다음 조사에 필요하다.

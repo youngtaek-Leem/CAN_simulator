@@ -21,6 +21,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+import diag_log
 import timer_util
 import isotp_service
 from audio_service import AudioService, generate_monitor_filename
@@ -147,6 +148,11 @@ async def lifespan(app: FastAPI):
     tx_scheduler.shutdown()
     can_manager.disconnect()
     power_supply_service.disconnect()
+    # Previously missing entirely -- a stream left open (Start/Record never
+    # Stopped) just stayed open through shutdown. audio_service.shutdown()
+    # is itself bounded-time (see its docstring), so it can't turn into the
+    # very "Ctrl-C doesn't exit" symptom this is meant to prevent.
+    audio_service.shutdown()
     timer_util.disable_1ms_timer()
 
 
@@ -187,13 +193,20 @@ async def _diag_timing_middleware(request, call_next):
         _inflight_requests -= 1
     dur_ms = (time.perf_counter() - start) * 1000.0
     if dur_ms > _SLOW_REQUEST_MS:
-        http_diag_logger.warning(
-            "slow request: %s %s took %.0fms (in-flight now=%d)",
-            request.method,
-            request.url.path,
-            dur_ms,
-            _inflight_requests,
-        )
+        # Rate-limited per path (not globally) -- otherwise a busy audio
+        # endpoint throttling itself could hide /api/tx/signal or
+        # /api/run/stop *also* going slow behind it, which is the exact
+        # thing this log is meant to catch.
+        n = diag_log.should_log(f"http.slow.{request.url.path}")
+        if n >= 0:
+            http_diag_logger.warning(
+                "slow request: %s %s took %.0fms (in-flight now=%d)%s",
+                request.method,
+                request.url.path,
+                dur_ms,
+                _inflight_requests,
+                diag_log.suffix(n),
+            )
     return response
 
 
@@ -238,13 +251,16 @@ async def _broadcast_loop() -> None:
         now_tick = time.monotonic()
         drift_ms = (now_tick - last_tick) * 1000.0 - settings["ws_flush_ms"]
         if drift_ms > _SLOW_BROADCAST_DRIFT_MS:
-            http_diag_logger.warning(
-                "broadcast loop tick delayed %.0fms beyond target %dms -- event loop "
-                "starved (GIL held elsewhere, e.g. audio_service numpy work in a "
-                "threadpool worker)",
-                drift_ms,
-                settings["ws_flush_ms"],
-            )
+            n = diag_log.should_log("http.broadcast_drift")
+            if n >= 0:
+                http_diag_logger.warning(
+                    "broadcast loop tick delayed %.0fms beyond target %dms -- event loop "
+                    "starved (GIL held elsewhere, e.g. audio_service numpy work in a "
+                    "threadpool worker)%s",
+                    drift_ms,
+                    settings["ws_flush_ms"],
+                    diag_log.suffix(n),
+                )
         last_tick = now_tick
         frames = can_manager.drain_rx()
         if not run_state["running"]:
