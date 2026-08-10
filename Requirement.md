@@ -1964,3 +1964,85 @@ push되지 않아 사용자 환경에 반영되지 못한 상태였다(로그에
 위젯 사용) 그대로 다시 테스트 -- 그래도 안 되면 이번에 추가한 `cansim.power`
 로그가 PyVISA 쪽이 실제로 얼마나 걸리는지 보여줄 것이고, `cansim.audio`/
 `cansim.shutdown`과 함께 대조하면 어느 쪽이 실제 원인인지 좁혀질 것이다.
+
+### 원인 확정: PyVISA(NI-VISA 등) 드라이버가 Windows 콘솔의 Ctrl+C 전달 자체를
+막는 것으로 보임 -- 오디오 쪽은 `WindowsSelectorEventLoopPolicy`로 완전히
+해결됨 (2026-08-10, 사용자가 `WindowsSelectorEventLoopPolicy` 적용 후 재테스트)
+
+사용자가 지난 수정을 반영한 뒤 6가지를 테스트: **① 전원 연결 후 Ctrl-C 안 됨,
+② 전원 연결 해제 후 Ctrl-C 안 됨(①②모두 로그가 전혀 없음), ③ 오디오 디바이스
+연결 후 Ctrl-C 정상, ④ 오디오 연결+Start/Stop 후 Ctrl-C 정상, ⑤ 오디오
+Start+CAN 신호 Start 후 Ctrl-C 정상, ⑥ 오디오 레코딩+CAN 동작 전후 Ctrl-C
+정상.**
+
+**오디오 쪽은 완전히 해결됐다** -- `WindowsSelectorEventLoopPolicy`(지난 항목)가
+실제로 오디오/CAN 관련 모든 시나리오에서 Ctrl-C를 정상화시켰다. 이제 남은 건
+**전원(PyVISA) 연결 관련 동작뿐**이고, 그 경우 `cansim.shutdown`도
+`cansim.power`도 **전혀 로그가 안 찍힌다** -- `Shutting down`조차 안 뜬다는
+이전 확인과 결합하면, SIGINT가 Python 프로세스에 도달하기 전에 뭔가가 그 자체를
+막고 있다는 뜻이다.
+
+**유력한 원인(가설, 이 환경엔 실제 VISA 장비가 없어 직접 검증 불가)**: PyVISA가
+기본으로 로드하는 벤더 백엔드(NI-VISA 등 `visa32.dll`/`visa64.dll` 같은 네이티브
+드라이버)가 초기화될 때 **자체적으로 Windows 콘솔 컨트롤 핸들러
+(`SetConsoleCtrlHandler`)를 등록**해 Ctrl+C 콘솔 이벤트를 자기가 먼저 가로채고,
+Python 런타임에 아예 전달하지 않는 경우가 산업용 계측 드라이버에서 실제로
+보고된 바 있다 -- 이건 애플리케이션 코드(이 프로젝트의 파이썬 코드)가 아니라
+**설치된 VISA 드라이버 자체의 동작**이라, `asyncio` 이벤트루프 정책이나 우리
+쪽 신호 핸들링을 아무리 고쳐도 닿지 않는 영역이다. 오디오(sounddevice/
+PortAudio)는 콘솔 핸들러를 건드리지 않는 종류의 콜백 방식이라 이 문제가 없었던
+것으로 보인다.
+
+**제안하는 대응 두 갈래(사용자 확인 후 진행)**:
+1. **우회책(권장, 확실히 동작)**: Ctrl+C와 무관하게 HTTP 요청으로 서버를 종료시키는
+   `POST /api/shutdown` 엔드포인트 + 프론트 종료 버튼을 추가한다. HTTP 요청 경로는
+   콘솔 신호 경로를 전혀 타지 않으므로(전원 연결 상태에서도 `/api/power/disconnect`
+   자체는 정상 응답했던 것처럼) 드라이버가 콘솔 Ctrl+C를 가로채더라도 영향받지
+   않는다. 가능한 범위에서 기존 정리 로직(`audio_service.shutdown()` 등)을 최선껏
+   실행한 뒤 `os.kill(os.getpid(), signal.SIGTERM)`(Windows에서는 `TerminateProcess`
+   로 매핑됨, 콘솔 핸들러 경로를 타지 않는 별도의 강제 종료 경로)로 마무리.
+2. **근본 원인 시도(불확실, 실기 확인 필요)**: `pyvisa.ResourceManager()` 대신
+   `pyvisa.ResourceManager('@py')`(순수 파이썬 `pyvisa-py` 백엔드, 벤더 네이티브
+   드라이버 DLL을 전혀 로드하지 않음)로 바꾸면 이 문제가 근본적으로 사라질 수
+   있다 -- 단, 사용 중인 계측기의 연결 방식(USB/Serial/TCPIP는 보통 호환, GPIB는
+   추가 설정 필요)에 따라 아예 연결이 안 될 수도 있어 실기 확인 없이는 적용할 수
+   없다.
+
+사용자에게 확인 요청 후 진행할 예정 -- 두 방법을 어떻게 조합할지(우회책만 먼저,
+또는 백엔드 전환도 같이 시도)는 다음 턴에서 결정.
+
+### 우회책 구현: `POST /api/shutdown` + "필수 설정 > 전원 연결" 아래 "서버 종료"
+버튼 (2026-08-10, 사용자 선택 — 우회책만 진행, `pyvisa-py` 전환은 보류)
+
+사용자가 "1번 우회책을 구현하고 서버종료 버튼은 필수설정 메뉴에 전원연결 아래에
+추가"하는 쪽을 선택했다.
+
+- **`backend/main.py`**: `POST /api/shutdown` 추가. 응답을 먼저 클라이언트에
+  흘려보낼 시간(0.3초)을 준 뒤 백그라운드 스레드에서 `tx_scheduler.shutdown()` →
+  `can_manager.disconnect()`/`power_supply_service.disconnect()`(둘 다
+  `_run_bounded()`로 감싸 하드웨어 쪽이 멈춰도 최대 3초 후 포기) →
+  `audio_service.shutdown()` 순으로 정리한 뒤 `os.kill(os.getpid(), signal.
+  SIGTERM)`으로 프로세스를 끝낸다. Windows에서 `os.kill`은 공식 문서 기준
+  "프로세스를 무조건 종료"(`TerminateProcess`로 처리됨)라 콘솔 컨트롤 핸들러
+  경로를 전혀 타지 않는다 -- PyVISA/NI-VISA 드라이버가 콘솔의 Ctrl+C 전달
+  자체를 가로채고 있다는 이번 조사 결과와 무관하게 항상 프로세스를 끝낼 수
+  있다(이 요청 자체가 이미 정상 동작하는 일반 HTTP 경로이기 때문).
+- **`frontend/src/api/client.ts`**: `shutdownServer()` 추가.
+- **`frontend/src/App.tsx`**: "필수 설정" 패널의 "전원 연결" 섹션 바로 아래에
+  "서버 종료" 섹션 추가(사용자 지시대로 위치). 클릭 시 `window.confirm()`으로
+  한 번 확인 후 `api.shutdownServer()` 호출, 결과를 `notify()` 토스트로 표시.
+
+검증: `backend/tests/test_api.py`에 신규 테스트 1개
+(`test_shutdown_endpoint_cleans_up_then_kills_process`) -- `tx_scheduler.
+shutdown`/`can_manager.disconnect`/`power_supply_service.disconnect`/
+`audio_service.shutdown`/`os.kill`을 전부 `monkeypatch`로 교체해(모듈 전역
+싱글턴을 실제로 건드리거나 테스트 프로세스를 실제로 죽이지 않도록) 응답이
+즉시 오고, 그 뒤 배경 스레드에서 네 서비스 정리가 전부 호출되고 마지막에
+`os.kill(getpid(), SIGTERM)`이 정확한 인자로 호출되는지 확인. 백엔드 전체
+227개 테스트 통과(+1). 프론트 `tsc -b --noEmit`/`vite build`/`oxlint` 클린.
+
+브라우저에서 실제로 "서버 종료" 버튼을 눌러 확인 다이얼로그가 뜨고, 확인 시
+서버가 실제로 종료되는지는(특히 파워서플라이 연결 상태에서 Ctrl+C가 안 먹히던
+바로 그 상황에) 사용자가 다음에 확인해줄 것을 권장한다 -- 이 환경엔 실제
+VISA 하드웨어가 없어 그 시나리오까지는 재현하지 못했다. `pyvisa-py` 백엔드
+전환(근본 원인 시도)은 사용자가 보류를 선택해 이번엔 진행하지 않았다.

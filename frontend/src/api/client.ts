@@ -161,6 +161,9 @@ export const api = {
 
   powerConnect: () => post<import('../types').PowerStatus>('/api/power/connect'),
   powerDisconnect: () => post<import('../types').PowerStatus>('/api/power/disconnect'),
+  // Ctrl-C가 통하지 않는 환경(Requirement.md -- PyVISA/NI-VISA 드라이버가 Windows
+  // 콘솔의 SIGINT 전달을 가로채는 것으로 보이는 사례) 대안 종료 경로.
+  shutdownServer: () => post<{ ok: boolean; message: string }>('/api/shutdown'),
   powerSetBattery: (voltage: number, current: number) =>
     post<{ ok: boolean; reason?: string }>('/api/power/battery', { voltage, current }),
   powerSetAccIgn: (command: string) =>

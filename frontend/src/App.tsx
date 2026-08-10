@@ -598,6 +598,22 @@ function TopBar(props: TopBarProps) {
     }
   };
 
+  // Ctrl-C가 통하지 않는 환경(Requirement.md -- 파워서플라이 연결 시 PyVISA/
+  // NI-VISA 드라이버가 Windows 콘솔의 Ctrl+C 전달 자체를 가로채는 것으로 보이는
+  // 사례가 확인됨)을 위한 대안 종료 버튼. 콘솔 신호 경로를 타지 않는 일반 HTTP
+  // 요청이라 그 문제와 무관하게 항상 동작한다.
+  const shutdownBackend = async () => {
+    if (!window.confirm('백엔드 서버를 종료합니다. Ctrl+C가 통하지 않을 때의 대안입니다. 계속할까요?')) {
+      return;
+    }
+    try {
+      await api.shutdownServer();
+      props.notify('서버 종료를 요청했습니다. 잠시 후 연결이 끊어집니다.');
+    } catch (e) {
+      props.notify(`서버 종료 요청 오류: ${(e as Error).message}`);
+    }
+  };
+
   const uploadDbc = async (file: File) => {
     try {
       await api.uploadDbc(file);
@@ -825,6 +841,18 @@ function TopBar(props: TopBarProps) {
                   {powerConnected
                     ? '✅ 연결됨'
                     : `⚠️ 미연결${canStore.status?.power.error ? ` (${canStore.status.power.error})` : ''}`}
+                </span>
+              </div>
+            </div>
+
+            <div className="topbar-more-section">
+              <div className="topbar-more-heading">서버 종료</div>
+              <div className="topbar-more-row">
+                <button className="small-btn danger" onClick={shutdownBackend}>
+                  서버 종료
+                </button>
+                <span className="hint">
+                  Ctrl+C가 통하지 않을 때(파워서플라이 연결 시 드라이버가 콘솔 신호를 가로채는 사례) 대안 종료
                 </span>
               </div>
             </div>

@@ -1,4 +1,5 @@
 import json
+import signal
 import threading
 import time
 
@@ -690,3 +691,36 @@ def test_periodic_enable_disable_all_wiring_and_flag_independent_of_widget_sends
         assert status["tx"]["auto_entries"] == []
 
         client.post("/api/run/stop")
+
+
+def test_shutdown_endpoint_cleans_up_then_kills_process(monkeypatch):
+    """POST /api/shutdown is the alternate exit path for the Windows PyVISA/
+    Ctrl-C issue (Requirement.md) -- it must respond immediately, then clean
+    up each service and kill the process from a background thread. Every
+    service call and os.kill() are monkeypatched (not the real singletons'
+    methods) so this test can't affect the shared module-level tx_scheduler/
+    can_manager/power_supply_service/audio_service used by every other test
+    in this session, and so it never actually terminates the test process."""
+    calls: list[str] = []
+    monkeypatch.setattr(main.tx_scheduler, "shutdown", lambda: calls.append("tx"))
+    monkeypatch.setattr(main.can_manager, "disconnect", lambda: calls.append("can"))
+    monkeypatch.setattr(main.power_supply_service, "disconnect", lambda: calls.append("power"))
+    monkeypatch.setattr(main.audio_service, "shutdown", lambda: calls.append("audio"))
+
+    killed = threading.Event()
+    kill_args: dict = {}
+
+    def fake_kill(pid, sig):
+        kill_args["pid"], kill_args["sig"] = pid, sig
+        killed.set()
+
+    monkeypatch.setattr(main.os, "kill", fake_kill)
+
+    with make_client() as client:
+        r = client.post("/api/shutdown")
+        assert r.status_code == 200
+        assert r.json() == {"ok": True, "message": "서버를 종료합니다"}
+        assert killed.wait(timeout=2.0)
+
+    assert set(calls) >= {"tx", "can", "power", "audio"}
+    assert kill_args == {"pid": main.os.getpid(), "sig": signal.SIGTERM}

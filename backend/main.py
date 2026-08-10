@@ -11,6 +11,8 @@ Run:  uvicorn main:app --host 127.0.0.1 --port 8000
 import asyncio
 import json
 import logging
+import os
+import signal
 import sys
 import threading
 import time
@@ -1060,6 +1062,44 @@ def power_disconnect():
 @app.get("/api/power/status")
 def power_status():
     return power_supply_service.info()
+
+
+# ---- 서버 종료 (Ctrl+C가 막히는 환경을 위한 대안 종료 경로) -----------------------
+#
+# Requirement.md 참고: PyVISA(NI-VISA 등 벤더 드라이버)가 파워서플라이 연결 시
+# Windows 콘솔의 Ctrl+C(SIGINT) 전달 자체를 가로채는 것으로 보이는 사례가 실사용
+# 중 확인됨(cansim.shutdown/cansim.power 로그가 전혀 안 찍히고 "Shutting down"도
+# 안 뜸 -- 신호가 프로세스에 도달하기 전에 막힘). 이 엔드포인트는 콘솔 신호
+# 경로를 전혀 타지 않는 일반 HTTP 요청이라 그 문제와 무관하게 항상 동작한다.
+
+
+@app.post("/api/shutdown")
+def shutdown_server():
+    """가능한 범위에서 정리(lifespan의 종료 블록과 동일한 순서)한 뒤 프로세스를
+    종료한다. 응답을 먼저 흘려보낼 시간을 준 뒤(0.3초) 백그라운드 스레드에서
+    실행 -- 이 핸들러 자체가 즉시 프로세스를 죽이면 클라이언트가 응답을 못 받는다.
+    `os.kill(getpid(), SIGTERM)`은 Windows에서 `TerminateProcess`로 처리돼(공식
+    문서 기준 "프로세스를 무조건 종료") 콘솔 컨트롤 핸들러 경로를 전혀 타지 않으므로
+    위 드라이버 문제와 무관하게 항상 프로세스를 끝낼 수 있다."""
+
+    def _cleanup_and_exit() -> None:
+        time.sleep(0.3)
+        shutdown_logger.info("shutdown requested via /api/shutdown")
+        try:
+            tx_scheduler.shutdown()
+        except Exception:
+            shutdown_logger.warning("tx_scheduler.shutdown() failed", exc_info=True)
+        _run_bounded(can_manager.disconnect, "can_manager.disconnect()")
+        _run_bounded(power_supply_service.disconnect, "power_supply_service.disconnect()")
+        try:
+            audio_service.shutdown()
+        except Exception:
+            shutdown_logger.warning("audio_service.shutdown() failed", exc_info=True)
+        shutdown_logger.info("terminating process now")
+        os.kill(os.getpid(), signal.SIGTERM)
+
+    threading.Thread(target=_cleanup_and_exit, daemon=True, name="api-shutdown").start()
+    return {"ok": True, "message": "서버를 종료합니다"}
 
 
 class PowerBatteryRequest(BaseModel):
