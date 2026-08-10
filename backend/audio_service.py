@@ -15,15 +15,47 @@ centroid difference), and compares each recording against a fixed per-case
 and has no stable baseline across separate test runs.
 """
 
+import logging
 import threading
 import time
 from bisect import bisect_left
 from collections import deque
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
 import numpy as np
+
+# Diagnostic logging for the Windows "오디오 위젯 사용 중 CAN 전송이 느려지고 Stop이
+# 지연되며 전역 Stop이 Failed to fetch로 실패한다" 조사 (Requirement.md 참고). Every
+# entry below is gated behind a threshold so normal operation stays silent --
+# only genuinely slow calls (candidates for the reported lag) get logged.
+# "cansim." namespace + explicit handler in main.py so these show up
+# regardless of uvicorn's own logging config (which leaves the root logger
+# unconfigured).
+logger = logging.getLogger("cansim.audio")
+_SLOW_CALLBACK_MS = 20.0
+_SLOW_LOCK_WAIT_MS = 50.0
+_SLOW_STREAM_STOP_MS = 300.0
+_SLOW_WAVEFORM_MS = 20.0
+
+
+@contextmanager
+def _timed_lock(lock, label: str):
+    """threading.Lock/RLock context manager that logs how long the caller
+    waited to acquire `lock` -- if _stream_lock is ever held for a long time
+    (e.g. by a slow stream.stop()/close() on Windows), this shows up here on
+    whichever other call was blocked behind it, instead of being invisible."""
+    t0 = time.perf_counter()
+    lock.acquire()
+    wait_ms = (time.perf_counter() - t0) * 1000.0
+    if wait_ms > _SLOW_LOCK_WAIT_MS:
+        logger.warning("%s: waited %.1fms to acquire lock", label, wait_ms)
+    try:
+        yield
+    finally:
+        lock.release()
 
 try:
     import sounddevice as sd
@@ -168,6 +200,7 @@ class _ChannelLevelTracker:
         chunks = list(self._raw_chunks if chunks is None else chunks)
         if not chunks:
             return []
+        t0 = time.perf_counter()
         column_width = (to_s - from_s) / max_points
         col_min = [None] * max_points
         col_max = [None] * max_points
@@ -205,11 +238,23 @@ class _ChannelLevelTracker:
                 col_min[ci] = vmin if col_min[ci] is None else min(col_min[ci], vmin)
                 col_max[ci] = vmax if col_max[ci] is None else max(col_max[ci], vmax)
 
-        return [
+        result = [
             {"t": from_s + (i + 0.5) * column_width, "min": col_min[i], "max": col_max[i]}
             for i in range(max_points)
             if col_min[i] is not None
         ]
+        dur_ms = (time.perf_counter() - t0) * 1000.0
+        if dur_ms > _SLOW_WAVEFORM_MS:
+            logger.warning(
+                "waveform_slice: scanned %d/%d chunks in %.1fms (window=%.2fs, max_points=%d) "
+                "-- held the GIL for this long",
+                len(chunks) - start_idx,
+                len(chunks),
+                dur_ms,
+                to_s - from_s,
+                max_points,
+            )
+        return result
 
     def snapshot(self, index: int) -> dict:
         return {
@@ -425,6 +470,14 @@ class AudioService:
         # opened the stream); only buffers raw audio into _audio_data while
         # a WAV filename is set (i.e. an actual test-runner recording).
         def callback(indata, _frames, _time, _status):
+            cb_start = time.perf_counter()
+            if _status:
+                # PortAudio reports input overflow/underflow through this
+                # flag -- on Windows, a host API buffering under load (e.g.
+                # while this same process is busy elsewhere) is a plausible
+                # cause of choppy audio, distinct from the GIL-contention
+                # theory below.
+                logger.warning("sounddevice callback status flags: %s", _status)
             now = time.time()
             with self._level_lock:
                 for i, tracker in enumerate(self._level_trackers):
@@ -434,6 +487,14 @@ class AudioService:
             if self._wav_name is not None:
                 with self._audio_data_lock:
                     self._audio_data.append(indata.copy())
+            dur_ms = (time.perf_counter() - cb_start) * 1000.0
+            if dur_ms > _SLOW_CALLBACK_MS:
+                logger.warning(
+                    "audio callback took %.1fms (frames=%d) -- risks glitches and/or "
+                    "starves tx_scheduler's tick loop of the GIL while this runs",
+                    dur_ms,
+                    _frames,
+                )
 
         return callback
 
@@ -510,6 +571,17 @@ class AudioService:
                     for tracker in self._level_trackers:
                         tracker.reset()
 
+            logger.info(
+                "opening input stream: device=%s(%s) samplerate=%d channels=%d owner=%s "
+                "default_blocksize=%s",
+                self.device_index,
+                device_info.get("name"),
+                samplerate,
+                channel_count,
+                owner,
+                device_info.get("default_low_input_latency"),
+            )
+            t0 = time.perf_counter()
             self._stream = sd.InputStream(
                 samplerate=samplerate,
                 device=self.device_index,
@@ -518,24 +590,56 @@ class AudioService:
                 callback=self._make_callback(),
             )
             self._stream.start()
+            open_ms = (time.perf_counter() - t0) * 1000.0
+            logger.info("input stream started in %.0fms (owner=%s)", open_ms, owner)
             self._stream_owner = owner
             self._active_channels = channel_count
             self._active_samplerate = samplerate
             self._stream_started_at = time.time()
             return {"ok": True}
         except Exception as exc:
+            logger.warning("failed to open input stream (owner=%s): %s", owner, exc)
             self._stream = None
             self._stream_owner = None
             self._is_recording = False
             self._wav_name = None
             return {"ok": False, "reason": str(exc)}
 
+    def _close_stream_timed(self) -> None:
+        """self._stream.stop()/close() -- both are blocking PortAudio calls
+        that wait for the device to actually release, and on Windows this is
+        a documented spot for host-API-dependent multi-second stalls
+        (exactly the "Stop 클릭 후 10여초 후에 멈춘다" symptom being
+        investigated). Timed separately so the log pinpoints which of the two
+        calls is slow."""
+        t0 = time.perf_counter()
+        try:
+            self._stream.stop()
+        finally:
+            stop_ms = (time.perf_counter() - t0) * 1000.0
+            t1 = time.perf_counter()
+            try:
+                self._stream.close()
+            finally:
+                close_ms = (time.perf_counter() - t1) * 1000.0
+        total_ms = stop_ms + close_ms
+        if total_ms > _SLOW_STREAM_STOP_MS:
+            logger.warning(
+                "stream stop()+close() took %.0fms (stop=%.0fms, close=%.0fms) -- "
+                "this is the widget's Stop button actually returning",
+                total_ms,
+                stop_ms,
+                close_ms,
+            )
+        else:
+            logger.info("stream stopped in %.0fms (stop=%.0fms, close=%.0fms)", total_ms, stop_ms, close_ms)
+
     def start(self, filename: str) -> dict:
         """Start a test-runner recording. If the 오디오 신호 모니터 widget
         already has a monitor-only stream open, upgrade it in place (same
         device stream, now also buffering to a WAV) instead of opening a
         second stream on the same device, which would fail."""
-        with self._stream_lock:
+        with _timed_lock(self._stream_lock, "start"):
             if self._stream is not None and self._stream_owner == "monitor":
                 with self._audio_data_lock:
                     self._audio_data = []
@@ -552,14 +656,11 @@ class AudioService:
             return {"ok": True, "filename": filename}
 
     def stop(self) -> dict:
-        with self._stream_lock:
+        with _timed_lock(self._stream_lock, "stop"):
             if not self._is_recording:
                 return {"ok": False, "reason": "녹음 중이 아닙니다"}
             try:
-                try:
-                    self._stream.stop()
-                finally:
-                    self._stream.close()
+                self._close_stream_timed()
                 samplerate = self._active_samplerate or int(sd.query_devices(self.device_index)["default_samplerate"])
                 with self._audio_data_lock:
                     audio_data = self._audio_data
@@ -589,7 +690,7 @@ class AudioService:
         """Start (or piggyback on an already-open) live level stream for the
         모니터 widget. Never opens a second stream if a test-runner recording
         is already active -- the level trackers are already being fed by it."""
-        with self._stream_lock:
+        with _timed_lock(self._stream_lock, "start_monitor"):
             if self._stream is not None:
                 return {"ok": True, "already_active": True}
             return self._open_stream(None, "monitor")
@@ -600,16 +701,13 @@ class AudioService:
         recording (test-runner or the widget's own Record) -- the plain
         Stop-the-waveform-only path must never cut a recording off before it
         saves; use stop_widget_recording() for that."""
-        with self._stream_lock:
+        with _timed_lock(self._stream_lock, "stop_monitor"):
             if self._stream is None:
                 return {"ok": True}
             if self._stream_owner in ("recording", "widget_record"):
                 return {"ok": False, "reason": "녹음이 진행 중이라 모니터를 끌 수 없습니다"}
             try:
-                try:
-                    self._stream.stop()
-                finally:
-                    self._stream.close()
+                self._close_stream_timed()
             except Exception as exc:
                 return {"ok": False, "reason": str(exc)}
             finally:
@@ -622,7 +720,7 @@ class AudioService:
         """오디오 신호 모니터 위젯의 Record 버튼. 이미 위젯이 연 모니터 스트림이
         있으면 그 자리에서 녹음으로 업그레이드(재오픈 없이); 테스트 러너 녹음 등
         다른 소유자의 스트림이 이미 열려 있으면 거부."""
-        with self._stream_lock:
+        with _timed_lock(self._stream_lock, "start_widget_recording"):
             if self._stream is not None and self._stream_owner == "monitor":
                 with self._audio_data_lock:
                     self._audio_data = []
@@ -644,7 +742,7 @@ class AudioService:
     def stop_widget_recording(self) -> dict:
         """위젯의 Record 중지 -- 위젯이 직접 시작한 녹음일 때만 저장하고 닫는다
         (테스트 러너의 녹음은 절대 건드리지 않는다)."""
-        with self._stream_lock:
+        with _timed_lock(self._stream_lock, "stop_widget_recording"):
             if self._stream_owner != "widget_record":
                 return {"ok": False, "reason": "위젯이 시작한 녹음이 아닙니다"}
             return self.stop()
@@ -697,6 +795,7 @@ class AudioService:
             channels = [{"index": i, "points": []} for i in range(len(self._level_trackers))]
             return {"active": self._stream is not None, "samplerate": samplerate, "channels": channels}
 
+        t0 = time.perf_counter()
         with self._level_lock:
             snapshots = [t.snapshot_chunks() for t in self._level_trackers]
 
@@ -705,6 +804,15 @@ class AudioService:
             {"index": i, "points": t.waveform_slice(from_s, to_s, max_points, samplerate, chunks=snapshots[i])}
             for i, t in enumerate(self._level_trackers)
         ]
+        dur_ms = (time.perf_counter() - t0) * 1000.0
+        if dur_ms > _SLOW_WAVEFORM_MS:
+            logger.warning(
+                "get_waveform: %.1fms total for %d channel(s), window=%.2fs, max_points=%d",
+                dur_ms,
+                len(channels),
+                to_s - from_s,
+                max_points,
+            )
         return {
             "active": self._stream is not None,
             "samplerate": samplerate,

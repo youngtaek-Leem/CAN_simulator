@@ -57,6 +57,28 @@ class _SuppressNoisyAccessLog(logging.Filter):
 logging.getLogger("uvicorn.access").addFilter(_SuppressNoisyAccessLog())
 logger = logging.getLogger(__name__)
 
+# Diagnostic logging for the Windows "오디오 지연 확인 위젯 Start 후 CAN 전송이
+# 매우 느려지고, Stop이 10여초 지연되며, 전역 Stop이 Failed to fetch로 실패한다"
+# 조사 (Requirement.md 참고). uvicorn's own logging setup (run via `uvicorn
+# main:app`) never configures the root logger, so a plain
+# logging.getLogger(__name__).info(...)/.warning(...) elsewhere in this app
+# would otherwise only surface WARNING+ through Python's silent
+# last-resort handler -- give every "cansim.*" logger (audio_service,
+# tx_scheduler, and this module's own diagnostics below) an explicit handler
+# so both INFO and WARNING entries are always visible in the server console,
+# independent of uvicorn's config.
+_diag_handler = logging.StreamHandler()
+_diag_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+diag_logger = logging.getLogger("cansim")
+diag_logger.setLevel(logging.INFO)
+diag_logger.addHandler(_diag_handler)
+diag_logger.propagate = False
+
+http_diag_logger = logging.getLogger("cansim.http")
+_SLOW_REQUEST_MS = 300.0
+_SLOW_BROADCAST_DRIFT_MS = 100.0
+_inflight_requests = 0
+
 BASE_DIR = Path(__file__).resolve().parent
 UPLOAD_DIR = BASE_DIR / "uploads"
 LAYOUT_DIR = BASE_DIR / "layouts"
@@ -143,6 +165,38 @@ app.add_middleware(
 )
 
 
+@app.middleware("http")
+async def _diag_timing_middleware(request, call_next):
+    """Diagnostic-only: logs any request that takes longer than
+    _SLOW_REQUEST_MS, with the in-flight request count at that moment.
+    Sync `def` endpoints (every audio/tx/run endpoint in this file) run on
+    Starlette's shared thread pool -- if that pool is ever saturated by piled-
+    up audio polling requests, a manual CAN send (/api/tx/signal) or the
+    global Stop (/api/run/stop) queues behind them and looks "stuck" from the
+    browser's side. This surfaces exactly that queuing in the server log
+    instead of it being invisible. Global counter is safe unaudited here: only
+    the single asyncio event-loop thread ever touches it (this coroutine
+    always runs there, even though call_next may await a threadpool-run sync
+    handler)."""
+    global _inflight_requests
+    _inflight_requests += 1
+    start = time.perf_counter()
+    try:
+        response = await call_next(request)
+    finally:
+        _inflight_requests -= 1
+    dur_ms = (time.perf_counter() - start) * 1000.0
+    if dur_ms > _SLOW_REQUEST_MS:
+        http_diag_logger.warning(
+            "slow request: %s %s took %.0fms (in-flight now=%d)",
+            request.method,
+            request.url.path,
+            dur_ms,
+            _inflight_requests,
+        )
+    return response
+
+
 # ---- WebSocket: RX stream + status ------------------------------------
 
 
@@ -178,8 +232,20 @@ async def _broadcast(payload: dict) -> None:
 
 async def _broadcast_loop() -> None:
     last_status = 0.0
+    last_tick = time.monotonic()
     while True:
         await asyncio.sleep(settings["ws_flush_ms"] / 1000.0)
+        now_tick = time.monotonic()
+        drift_ms = (now_tick - last_tick) * 1000.0 - settings["ws_flush_ms"]
+        if drift_ms > _SLOW_BROADCAST_DRIFT_MS:
+            http_diag_logger.warning(
+                "broadcast loop tick delayed %.0fms beyond target %dms -- event loop "
+                "starved (GIL held elsewhere, e.g. audio_service numpy work in a "
+                "threadpool worker)",
+                drift_ms,
+                settings["ws_flush_ms"],
+            )
+        last_tick = now_tick
         frames = can_manager.drain_rx()
         if not run_state["running"]:
             frames = []  # discard RX while globally stopped

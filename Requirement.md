@@ -1573,3 +1573,98 @@ GIL을 쥔 채로 쓰는 셈이라 `tx_scheduler`가 주기적으로 밀릴 여�
 브라우저에서 실제로 위젯 조작 시 "Enable Msg" 버튼 표시가 더 이상 자동으로 바뀌지
 않는지는 이 환경에 브라우저 자동화 도구가 없어 직접 확인하지 못했다 — 사용자가
 다음 실사용 시 확인해줄 것을 권장한다.
+
+### Windows 실사용 버그 조사: 오디오 위젯 Start 후 CAN 전송 지연 + Stop 10여초
+지연 + 전역 Stop 시 Failed to fetch (2026-08-10, 사용자 보고 — 로그 추가만 진행,
+Windows 실기가 없어 코드 리뷰로 원인 후보를 특정하고 재현 시 확증할 진단 로그를
+심음)
+
+사용자가 Windows에서 "CAN-오디오 지연 확인" 위젯의 Start를 누른 후 CAN 신호 전송이
+매우 느려지고, 위젯의 Stop을 눌러도 10여초 후에야 멈추며, 그 뒤 전체 시뮬레이터
+Start/Stop 바의 Stop을 누르면 "Failed to fetch"가 뜬다고 보고. 이 개발 환경(macOS)엔
+Windows도, 사용자와 같은 다채널 오디오 인터페이스도 없어 직접 재현할 수 없었다 --
+코드 리뷰로 원인 후보를 좁히고, 재현 시 정확히 어디서 시간이 새는지 드러낼 진단
+로그를 추가했다.
+
+**가장 유력한 원인 후보 (기존에 이미 알고 있던, 아직 안 고친 버그와 정확히 일치)**:
+`backend/layouts/Test01.json`을 보면 사용자 레이아웃에 `audioMonitor`
+(`AudioMonitorWidget.tsx`, 오디오 신호 모니터)와 `canAudioLatency`
+(`CanAudioLatencyWidget.tsx`, 이번에 문제가 보고된 위젯)가 **동시에** 배치돼 있다.
+그런데 위 "위젯 사용 후 CAN Simulator 전역 Start가 먹통 되는 심각한 렉" 항목에서 이미
+`CanAudioLatencyWidget.tsx`의 폴링을 `setInterval`(고정 주기, 이전 요청 완료 여부와
+무관하게 계속 발사)에서 "요청이 끝난 뒤에만 다음 요청을 예약"하는 자기재스케줄
+`setTimeout`으로 고쳤지만, 그 항목에 명시적으로 적어둔 대로 **`AudioMonitorWidget.tsx`는
+이번 범위가 아니라 고치지 않았다** -- 그리고 실제로 지금도
+`AudioMonitorWidget.tsx`의 파형 폴링(60ms, 372번째 줄 근처 `setInterval(poll,
+WAVEFORM_POLL_MS)`)과 레벨 폴링(100ms)이 여전히 옛 `setInterval` 패턴이다. 두 위젯이
+동시에 열려 있으면: 백엔드가 아주 잠깐이라도(예: Windows에서 이 사용자의 오디오
+인터페이스가 macOS보다 큰 blocksize/샘플레이트를 쓰거나 GIL 경합으로) 60ms/100ms보다
+느려지는 순간부터 `AudioMonitorWidget`의 요청이 무한정 쌓이고, `/api/audio/waveform`·
+`/api/audio/level`과 `/api/tx/signal`(CAN 신호 전송)·`/api/run/start`·`/api/run/stop`이
+전부 `main.py`에서 `async def`가 아닌 동기 `def` 핸들러라 Starlette의 같은
+스레드풀을 공유하므로 -- 밀린 오디오 요청이 스레드풀을 다 차지하면 CAN 신호 전송도
+전역 Stop도 그 뒤에서 자기 차례를 기다리게 된다(이전에 전역 Start가 먹통 됐던 것과
+동일한 메커니즘, 이번엔 CAN 전송/Stop/전역 Stop에도 적용). 오래 쌓이면 브라우저의
+호스트당 동시 연결 제한에 걸려 이후 요청이 아예 나가지도 못하고 "Failed to fetch"로
+실패할 수 있다.
+
+**추가로 실측으로 이미 확인된 보조 원인(기존 항목)**: "CAN periodic 신호 영향 점검"
+항목에서 `waveform_slice()`가 GIL을 오래 쥐고 있으면 `tx_scheduler`의 1ms 틱 루프가
+지연될 수 있음을 실측으로 확인해뒀다 -- Windows에서 오디오 인터페이스의 콜백
+블록사이즈가 더 크면(또는 이 사용자의 다채널 장치가 더 무거우면) 이 효과가 더 크게
+나타날 수 있다. "Stop 클릭 후 10여초 지연"은 별도 후보로, `sd.InputStream.stop()`/
+`close()`는 블로킹 PortAudio 호출이라 Windows의 특정 host API(WASAPI/WDM-KS 등)에서
+디바이스 반환 대기가 길어지는 경우가 있다고 알려져 있다 -- 이번 로그로 이 세 가지
+후보(스레드풀 정체, GIL 경합, PortAudio stop/close 블로킹) 중 실제로 어느 것이
+지배적인지 구분할 수 있다.
+
+**이번엔 로그만 추가(사용자 요청 범위)** -- `AudioMonitorWidget.tsx`를 고치지는
+않았다. 위 분석이 맞다면 그쪽에도 동일한 자기재스케줄 `setTimeout` 수정이 필요하지만,
+이는 사용자가 재현·로그 확인 후 별도로 결정할 일이라 판단해 이번엔 진단 로그만
+심었다.
+
+**추가한 진단 로그** (모두 `logging` 표준 모듈, 평상시엔 조용하고 임계값을 넘을 때만
+WARNING으로 찍힘 -- uvicorn이 root logger를 직접 설정하지 않는 환경이라
+`backend/main.py`에 `cansim` 네임스페이스 전용 핸들러를 새로 달아 INFO/WARNING이
+콘솔에 항상 보이게 함):
+- `backend/audio_service.py`: 콜백 처리 시간(>20ms 시 경고, `_status` 오버플로우
+  플래그도 즉시 경고), 스트림 open 소요시간, **`stream.stop()`/`close()` 각각의
+  소요시간을 분리해서 측정**(>300ms 시 경고 -- "Stop 10여초 지연"의 정확한 위치를
+  집어냄), `_stream_lock` 대기시간(>50ms 경고), `waveform_slice()`/`get_waveform()`
+  소요시간(>20ms 경고, 스캔한 청크 수 포함).
+- `backend/tx_scheduler.py`: 틱 루프 실제 주기(목표 ~1ms 대비 >10ms 지연 시 경고),
+  `_lock` 대기시간(>5ms 경고), 개별 송신 job 소요시간(>5ms 경고 -- GIL 경합이 아니라
+  `CanManager.send()`(드라이버) 자체가 느린 경우와 구분).
+- `backend/main.py`: 모든 HTTP 요청에 대해 300ms 넘는 요청을 in-flight 요청 수와
+  함께 경고(스레드풀 정체 여부 직접 확인), asyncio 브로드캐스트 루프(WS 상태/RX
+  스트림)의 틱 지연을 100ms 넘을 때 경고(이벤트 루프 자체가 GIL에 굶주렸는지 확인).
+
+검증: 백엔드 전체 226개 테스트 통과(동작 변경 없음, 로그만 추가 -- 순수 부가 기능
+확인). `waveform_slice()`에 30초치 합성 오디오(콜백 블록사이즈 256, 가장 무거운
+프로파일링 시나리오)를 채운 뒤 직접 호출해 경고 로그가 실제로 찍히는지 수동
+확인(`scanned 5625/5625 chunks in 76.3ms ... -- held the GIL for this long`) --
+임계값 로직 자체는 동작 확인됨. Windows에서 실제로 세 후보 중 무엇이 지배적인지,
+그리고 `AudioMonitorWidget.tsx` 동시 사용이 정말 원인인지는 사용자가 다음 실사용
+시(가능하면 문제 재현 직후) 서버 콘솔 로그를 확인·공유해줄 것을 권장한다 --
+`cansim.audio`/`cansim.tx_scheduler`/`cansim.http` 로거 이름으로 필터링하면 관련
+줄만 볼 수 있다.
+
+**추가 조치 (사용자 확인 후, 같은 세션에서 진행): `AudioMonitorWidget.tsx`에도
+동일한 자기재스케줄 수정 적용** -- 위에서 가장 유력한 원인으로 지목한 것이 바로
+이 파일의 옛 `setInterval` 폴링이라, 사용자가 "지금 같이 고친다"를 선택해 로그
+추가에 더해 실제 수정도 반영했다. `WaveformChart`의 파형 폴링(`WAVEFORM_POLL_MS`,
+기존 60ms `setInterval`)과 `AudioMonitorWidget`의 레벨 폴링(`LEVEL_POLL_MS`, 기존
+100ms `setInterval`) 둘 다 `CanAudioLatencyWidget.tsx`와 동일한 패턴(요청이 끝난
+뒤에만 다음 요청을 `setTimeout`으로 예약, 채널/용도당 항상 최대 1개 요청만
+동시 진행)으로 교체했다. 이제 두 위젯을 동시에 열어둬도 어느 쪽 폴링도 무한정
+쌓일 수 없다.
+
+검증: `tsc -b --noEmit`/`vite build`/`oxlint` 클린(수정한 두 폴링 지점 관련 경고
+없음, `dist/`에 대한 기존 oxlint 경고는 이번 변경과 무관한 기존 상태). 백엔드는
+변경 없음(프론트 전용 수정). 실제로 두 위젯을 동시에 켜둔 채 장시간 방치해도
+CAN 전송/전역 Stop이 더는 느려지지 않는지는 이 환경에 브라우저 자동화 도구가 없어
+직접 재현·확인하지 못했다 -- 사용자가 Windows에서 이전과 동일한 재현 절차(두 위젯
+동시 사용 중 Start→CAN 전송→Stop→전역 Stop)로 확인해줄 것을 권장한다. 위에서
+추가한 진단 로그는 그대로 남아있으니, 이 수정 이후에도 같은 증상이 재현되면
+로그를 보면 다른 원인(GIL 경합 또는 PortAudio stop/close 블로킹)이 지배적임을
+바로 알 수 있다.

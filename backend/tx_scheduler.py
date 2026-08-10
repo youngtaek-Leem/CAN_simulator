@@ -14,6 +14,7 @@ A single daemon thread ticks with ~1 ms resolution and handles:
 
 import heapq
 import itertools
+import logging
 import random
 import threading
 import time
@@ -23,6 +24,16 @@ from typing import Any, Callable, Optional
 EVENT_INVALID_DELAY_S = 0.030
 MAX_TX_ENTRIES = 20
 DEFAULT_AUTO_PERIOD_MS = 100.0
+
+# Diagnostic logging for the Windows "오디오 위젯 사용 중 CAN periodic 전송이 매우
+# 느려진다" 조사 (Requirement.md의 "CAN periodic 신호 영향 점검" 항목에서 이미 GIL
+# 경합 메커니즘 자체는 실측 확인됨 -- 여기서는 실사용 중 실제로 얼마나 밀리는지
+# 드러내기 위한 로그). "cansim." 네임스페이스 + main.py의 전용 핸들러로, 임계값을
+# 넘을 때만 경고해 평상시엔 조용하다.
+logger = logging.getLogger("cansim.tx_scheduler")
+_SLOW_TICK_MS = 10.0  # loop targets ~1ms; this much drift is a real stall
+_SLOW_LOCK_WAIT_MS = 5.0
+_SLOW_JOB_MS = 5.0  # a single message send() taking this long is unusual for virtual/most hardware
 
 
 def _signal_raw_bounds(signal) -> tuple[int, int]:
@@ -385,10 +396,23 @@ class TxScheduler:
         return due
 
     def _loop(self) -> None:
+        last_tick = time.perf_counter()
         while not self._shutdown:
             now = time.perf_counter()
+            tick_gap_ms = (now - last_tick) * 1000.0
+            if tick_gap_ms > _SLOW_TICK_MS:
+                logger.warning(
+                    "tick delayed %.1fms (target ~1ms) -- periodic CAN sends are "
+                    "late/jittery this cycle (GIL contention from another thread?)",
+                    tick_gap_ms,
+                )
+            last_tick = now
             jobs: list[Callable[[], None]] = []
+            lock_wait_start = time.perf_counter()
             with self._lock:
+                lock_wait_ms = (time.perf_counter() - lock_wait_start) * 1000.0
+                if lock_wait_ms > _SLOW_LOCK_WAIT_MS:
+                    logger.warning("waited %.1fms to acquire _lock", lock_wait_ms)
                 paused = self._paused
                 if not paused:
                     while self._oneshots and self._oneshots[0][0] <= now:
@@ -401,10 +425,18 @@ class TxScheduler:
                         if entry.next_due <= now:
                             entry.next_due = now + period_s
             for job in jobs:
+                job_start = time.perf_counter()
                 try:
                     job()
                 except Exception:
                     pass  # bus errors are counted by CanManager
+                job_ms = (time.perf_counter() - job_start) * 1000.0
+                if job_ms > _SLOW_JOB_MS:
+                    logger.warning(
+                        "a single send job took %.1fms -- CanManager.send() blocking, "
+                        "not GIL contention, if this repeats",
+                        job_ms,
+                    )
             time.sleep(0.001)
 
     def _make_send_job(self, entry: TxEntry) -> Callable[[], None]:

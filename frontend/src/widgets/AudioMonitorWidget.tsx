@@ -173,9 +173,23 @@ function WaveformChart({
   // RAW_BUFFER_SECONDS of audio (still served by the backend after Stop --
   // see get_waveform() in audio_service.py); gated on hasEverStartedRef
   // instead, so a chart that was never Start/Record'ed doesn't poll at all.
+  // Self-rescheduling (setTimeout after each request settles) instead of a
+  // plain setInterval: get_waveform() does real per-chunk numpy work and a
+  // plain setInterval fires a new request every WAVEFORM_POLL_MS regardless
+  // of whether the previous one has resolved, so if the backend is ever even
+  // briefly slower than that (a busy backend, a slow moment, another widget)
+  // requests pile up faster than they drain and the queue only grows from
+  // there. This chart never unmounts on its own once started, so that
+  // backlog would keep growing the longer the widget is left open, until
+  // the piled-up requests exhaust the same thread pool
+  // /api/tx/signal|/api/run/start|/api/run/stop also run on -- see
+  // CanAudioLatencyWidget.tsx (which hit exactly this) and Requirement.md's
+  // "위젯 사용 후 CAN Simulator 전역 Start가 먹통 되는 심각한 렉" entry; this
+  // widget was originally left out of that fix's scope.
   useEffect(() => {
     if (!active && !hasEverStartedRef.current) return;
     let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
     const poll = async () => {
       let xMin = viewRef.current.xMin;
       let xMax = viewRef.current.xMax;
@@ -196,13 +210,14 @@ function WaveformChart({
         redraw();
       } catch {
         /* ignore -- keep showing the last good frame */
+      } finally {
+        if (!cancelled) timer = setTimeout(poll, WAVEFORM_POLL_MS);
       }
     };
     poll();
-    const id = setInterval(poll, WAVEFORM_POLL_MS);
     return () => {
       cancelled = true;
-      clearInterval(id);
+      if (timer) clearTimeout(timer);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [channelIndex, xWindowMs, active, size.w, streamStartedAtMs]);
@@ -437,13 +452,18 @@ export function AudioMonitorWidget(_: { config: WidgetConfig }) {
   const [error, setError] = useState<string | null>(null);
   const [savedMsg, setSavedMsg] = useState<string | null>(null);
   const [xWindowMs, setXWindowMs] = useState(DEFAULT_X_WINDOW_MS);
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   // Tracks the widget's own Record filename across polls so a 30-minute
   // segment rotation (server-side, see audio_service.py's rotation timer)
   // can be surfaced as an activity line instead of happening silently.
   const lastFilenameRef = useRef<string | null>(null);
 
+  // Self-rescheduling (setTimeout after each request settles) instead of a
+  // plain setInterval -- same rationale as WaveformChart's poll above: caps
+  // this at one in-flight /api/audio/level request at a time so a slow
+  // backend moment can never turn into a growing backlog.
   useEffect(() => {
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
     const poll = () =>
       api.audioLevel().then((lvl) => {
         setLevel(lvl);
@@ -456,11 +476,13 @@ export function AudioMonitorWidget(_: { config: WidgetConfig }) {
         } else {
           lastFilenameRef.current = null;
         }
-      }).catch(() => {});
+      }).catch(() => {}).finally(() => {
+        if (!cancelled) timer = setTimeout(poll, LEVEL_POLL_MS);
+      });
     poll();
-    pollRef.current = setInterval(poll, LEVEL_POLL_MS);
     return () => {
-      if (pollRef.current) clearInterval(pollRef.current);
+      cancelled = true;
+      if (timer) clearTimeout(timer);
     };
   }, []);
 
