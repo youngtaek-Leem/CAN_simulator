@@ -11,11 +11,28 @@ Run:  uvicorn main:app --host 127.0.0.1 --port 8000
 import asyncio
 import json
 import logging
+import sys
 import threading
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Callable, Optional
+
+if sys.platform == "win32":
+    # Windows Ctrl-C/SIGINT delivery to asyncio's default ProactorEventLoop
+    # is a well-documented weak spot, especially when the loop is kept
+    # continuously busy (this app's WS broadcast loop ticks every 30ms, plus
+    # constant HTTP polling from open widgets) -- confirmed on this project:
+    # no "Shutting down" log and no cansim.shutdown log ever appeared despite
+    # pressing Ctrl-C multiple times (Requirement.md). WindowsSelectorEvent
+    # LoopPolicy's select()-based loop cooperates with Python's signal
+    # checking far more reliably. Must be set before uvicorn creates its
+    # event loop; uvicorn imports this module before starting the loop, so
+    # module-import time (here, before any other asyncio use) is early
+    # enough. This app doesn't use asyncio subprocesses anywhere (grepped),
+    # so the one real limitation of the selector loop on Windows doesn't
+    # apply here.
+    asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 from fastapi import FastAPI, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware

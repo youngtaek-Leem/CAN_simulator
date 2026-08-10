@@ -16,9 +16,12 @@ test_runner_service's Phase-1 handling of unimplemented step types).
 동시 실행은 막는다 (start_* 쪽에서 서로를 거부).
 """
 
+import logging
 import threading
 import time
 from typing import Optional
+
+import diag_log
 
 try:
     import pyvisa
@@ -26,6 +29,15 @@ try:
     _PYVISA_AVAILABLE = True
 except ImportError:  # pragma: no cover - exercised via _PYVISA_AVAILABLE branch
     _PYVISA_AVAILABLE = False
+
+# Diagnostic logging for the Windows Ctrl-C investigation (Requirement.md):
+# the user found Ctrl-C only fails to stop the backend after power-supply or
+# audio activity, never with CAN-only usage -- audio already has extensive
+# timing logs (audio_service.py); this gives the same visibility into PyVISA
+# round-trips (write()/query()/close()), gated behind a threshold and rate-
+# limited via diag_log so normal operation stays silent.
+logger = logging.getLogger("cansim.power")
+_SLOW_VISA_MS = 100.0
 
 # ACC/IGN bitmask transitions, ported as-is from AppTest.py's
 # PowerSupply.setPower (bit0 = ACC, bit1 = IGN).
@@ -84,6 +96,26 @@ class PowerSupplyService:
         self._auto_thread = threading.Thread(target=self._auto_loop, daemon=True)
         self._auto_thread.start()
 
+    def _timed_visa_call(self, label: str, fn, *args):
+        """Runs a PyVISA call (write/query/close) with timing -- logs (rate-
+        limited) if it takes longer than _SLOW_VISA_MS. VISA round-trips
+        block the calling thread for however long the instrument/driver
+        takes to respond, with no timeout of their own."""
+        t0 = time.perf_counter()
+        result = fn(*args)
+        dur_ms = (time.perf_counter() - t0) * 1000.0
+        if dur_ms > _SLOW_VISA_MS:
+            n = diag_log.should_log(f"power.visa.{label}")
+            if n >= 0:
+                logger.warning("%s took %.0fms%s", label, dur_ms, diag_log.suffix(n))
+        return result
+
+    def _write(self, cmd: str) -> None:
+        self._timed_visa_call(f"write({cmd!r})", self._inst.write, cmd)
+
+    def _query(self, cmd: str) -> str:
+        return self._timed_visa_call(f"query({cmd!r})", self._inst.query, cmd)
+
     def connect(self) -> dict:
         if not _PYVISA_AVAILABLE:
             self.error = "pyvisa가 설치되어 있지 않습니다"
@@ -97,9 +129,9 @@ class PowerSupplyService:
                 self.initialized = False
                 return self.info()
             self._inst = rm.open_resource(resources[0])
-            idn = self._inst.query("*IDN?")
-            self._inst.write("APPLy 14.4, 10")
-            self._inst.write(f":SOURce:DIGital:OUTPut:DATA {self.status}")
+            idn = self._query("*IDN?")
+            self._write("APPLy 14.4, 10")
+            self._write(f":SOURce:DIGital:OUTPut:DATA {self.status}")
             self.initialized = True
             self.error = None
             self._battery_voltage, self._battery_current = 14.4, 10.0
@@ -114,7 +146,7 @@ class PowerSupplyService:
         self._sweep_enabled = False
         if self._inst is not None:
             try:
-                self._inst.close()
+                self._timed_visa_call("close()", self._inst.close)
             except Exception:
                 pass
         self._inst = None
@@ -160,10 +192,10 @@ class PowerSupplyService:
         cmd = block.get("command")
         try:
             if cmd == "BATT":
-                self._inst.write(f"APPLy {block['voltage']}")
+                self._write(f"APPLy {block['voltage']}")
             else:
                 new_status = _STATUS_COMMANDS.get(cmd, lambda _s: 0x3)(self.status)
-                self._inst.write(f":SOURce:DIGital:OUTPut:DATA {new_status}")
+                self._write(f":SOURce:DIGital:OUTPut:DATA {new_status}")
                 self.status = new_status
             return {"ok": True, "status_bits": self.status}
         except Exception as exc:
@@ -176,7 +208,7 @@ class PowerSupplyService:
         button, on/off repeat, sweep) -- also tracks the last-commanded
         values for the widget's display, since there's no read-back
         command."""
-        self._inst.write(f"APPLy {voltage},{current}")
+        self._write(f"APPLy {voltage},{current}")
         self._battery_voltage = voltage
         self._battery_current = current
 

@@ -1881,3 +1881,86 @@ ProactorEventLoop의 SIGINT 전달 문제)이 원인이라는 뜻이고, ② 특
 `cansim.shutdown`으로 시작하는 줄만 필터링해서 마지막 줄을 확인해 공유해줄 것을
 권장한다. 또한 Ctrl-C를 누른 시점에 터미널에 `Shutting down` 메시지가 찍히는지,
 두 번째 Ctrl-C(`force_exit`)는 되는지도 여전히 미확인 상태다.
+
+### Ctrl-C 종료 안 됨, 5번째 확인 — 실제 원인 확정: Windows asyncio
+`ProactorEventLoop`가 SIGINT 자체를 놓침 (2026-08-10, 사용자가 위 3가지 확인 질문에
+답변)
+
+사용자 답변: **① `cansim.shutdown` 로그 전혀 안 찍힘, ② `Shutting down` 메시지도
+안 뜸, ③ Ctrl-C를 여러 번 눌러도 안 됨.** 이번엔 브라우저를 완전히 종료한
+뒤에도 백엔드 터미널이 오디오 경고 로그를 마지막으로 찍은 채 그대로 멈춰 있었다.
+
+**이걸로 원인이 확정됐다**: `Shutting down`은 uvicorn이 SIGINT 핸들러에서 가장
+먼저 찍는 로그다(`uvicorn.server.Server.shutdown()`의 첫 줄). 이게 안 찍혔다는
+것은 uvicorn/우리 앱 코드에 도달하기도 전에, **SIGINT 신호 자체가 프로세스에
+전달·처리되지 않고 있다**는 뜻이다 -- 지금까지 추가한 `AudioService.shutdown()`,
+`--timeout-graceful-shutdown`, `_run_bounded()`, `shutdown_logger` 전부 SIGINT가
+일단 처리되기 시작한 *이후*에나 의미가 있는 조치라 애초에 발동할 기회가 없었다.
+
+이건 잘 알려진 Windows 플랫폼 특성이다: Windows의 asyncio 기본 이벤트루프는
+Python 3.8부터 `ProactorEventLoop`(IOCP 기반)인데, 이 루프가 계속 바쁜 상태로
+돌고 있으면(이 앱은 WS 브로드캐스트 루프가 30ms마다 틱하고, 오디오 위젯이 열려
+있으면 HTTP 폴링도 계속 들어옴) Ctrl-C의 `KeyboardInterrupt`를 체크할 기회
+자체를 거의 못 얻어 신호가 통째로 씹히는 경우가 있다고 널리 보고돼 있다 -- 이번
+증상(로그도 전혀 안 찍히고 여러 번 눌러도 안 됨)이 정확히 그 패턴과 일치한다.
+
+**적용한 수정**: `backend/main.py` 최상단(다른 import보다 먼저, uvicorn이 이
+모듈을 import한 뒤에야 이벤트루프를 만들므로 이 시점이면 충분히 이르다)에
+`sys.platform == "win32"`일 때만 `asyncio.set_event_loop_policy(asyncio.
+WindowsSelectorEventLoopPolicy())`를 설정했다. `select()` 기반의 Selector
+루프는 Python의 신호 체크와 훨씬 안정적으로 맞물려 동작한다고 알려진, 바로 이
+증상에 대한 표준적인 해결책이다. 이 앱은 `asyncio.create_subprocess_*`를 쓰는
+곳이 없어(grep 확인) Selector 루프의 유일한 실질적 제약(비동기 서브프로세스
+미지원)이 해당되지 않는다. macOS/Linux는 원래 Selector 계열 루프를 쓰므로 이
+분기는 아무 영향이 없다(no-op).
+
+검증: 백엔드 전체 226개 테스트 통과(macOS라 `win32` 분기 자체는 실행되지 않음,
+문법과 나머지 동작에 회귀 없음만 확인 -- **이 macOS 환경에는 Windows가 없어
+실제 효과는 검증하지 못했다**, 사용자가 Windows에서 확인해야 하는 부분). 만약
+이 수정 이후에도 Ctrl-C가 안 먹히면, `WindowsSelectorEventLoopPolicy`로도
+안 되는 것이므로 다음엔 프로세스를 어떻게 실행 중인지(터미널 종류, 콘솔
+창 포커스 여부, `run_windows.bat`을 더블클릭했는지 vs 터미널에서 직접
+실행했는지)를 확인해야 한다 -- 더블클릭으로 실행한 `.bat`은 새 콘솔 창을 열고
+그 창에 포커스가 있어야 Ctrl-C가 그 프로세스로 전달된다.
+
+### 재현 조건 추가 확인 (2026-08-10, 사용자 추가 테스트) — CAN 단독은 문제 없음,
+Power/Audio 관련 동작에서만 재현
+
+사용자가 세 가지를 확인: ① 서버만 켜둔 상태로 Ctrl-C → 됨. ② 브라우저로
+시뮬레이터 연결만 한 상태로 Ctrl-C → 됨. ③ Start→Stop(+ 파워서플라이 연결/ACC_IGN
+조작 반복) 후 Ctrl-C → **안 됨**. 이어서 별도로: **CAN 신호만 테스트하면 문제
+없음, 파워서플라이를 연결해서 테스트하면 문제 발생, 오디오 관련 동작을 해도
+문제 발생**이라고 확인.
+
+단, ③ 테스트 시점엔 지난 항목의 `WindowsSelectorEventLoopPolicy` 수정이 아직
+push되지 않아 사용자 환경에 반영되지 못한 상태였다(로그에 여전히
+`_ProactorBasePipeTransport` 관련 예외가 찍힘 -- 그 수정이 적용됐다면 이 경로 자체를
+안 씀). 즉 ③은 그 수정 이전 코드로 얻은 결과다.
+
+**CAN 단독이 문제없다는 것이 주는 의미**: `tx_scheduler`(1ms 틱 스레드)와
+`can_manager`(python-can Notifier 스레드)도 블로킹 드라이버 호출을 쓰지만 순수
+파이썬 스레딩 + 일반적인 블로킹 I/O(호출 중 GIL을 정상적으로 반납)라 문제가 안
+된다는 뜻이다. 반면 Power/Audio 둘 다 **네이티브 코드와의 경계가 다른 방식** --
+`audio_service.py`의 sounddevice/PortAudio는 콜백 기반(PortAudio가 관리하는
+네이티브 스레드가 매 오디오 버퍼마다 파이썬 콜백을 호출, `PyGILState_Ensure`류
+진입/해제가 반복됨)이고, `power_supply_service.py`의 PyVISA도 드라이버(NI-VISA
+등) 백엔드에 따라 유사하게 일반적인 "블로킹 후 GIL 반납" 패턴과 다르게 동작할
+여지가 있다 -- 이게 Windows에서 SIGINT 체크 기회 자체를 놓치게 만드는 진짜
+차이일 가능성이 높다(가설, 실기 확인 필요).
+
+**추가 조치**: `power_supply_service.py`에도 `audio_service.py`와 동일한 패턴의
+진단 로그를 추가했다 -- PyVISA `write()`/`query()`/`close()` 호출을
+`_timed_visa_call()`로 감싸 100ms 넘게 걸리면(rate-limited) `cansim.power`
+로거로 경고. `connect()`/`set_power()`/`_apply_battery()`(수동 전압 설정, On/Off
+반복, 스윕이 전부 공유)의 모든 VISA 호출 지점에 적용. 기존 fake-instrument
+기반 테스트(`_inst.writes` 리스트 검사)는 래핑 후에도 동일하게 `fn(*args)`로
+그대로 호출되므로 변경 없이 통과.
+
+검증: 백엔드 전체 226개 테스트 통과. `_timed_visa_call`에 150ms 걸리는 가짜
+인스턴스를 직접 넣어 경고가 실제로 찍히는지 수동 확인.
+
+**다음에 확인할 것**: 아직 push하지 않은 `WindowsSelectorEventLoopPolicy` 수정을
+반영한 뒤, 이번에 사용자가 찾아낸 깔끔한 재현 절차(Power 연결+조작, 또는 오디오
+위젯 사용) 그대로 다시 테스트 -- 그래도 안 되면 이번에 추가한 `cansim.power`
+로그가 PyVISA 쪽이 실제로 얼마나 걸리는지 보여줄 것이고, `cansim.audio`/
+`cansim.shutdown`과 함께 대조하면 어느 쪽이 실제 원인인지 좁혀질 것이다.
