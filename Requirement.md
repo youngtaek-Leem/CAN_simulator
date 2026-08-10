@@ -2046,3 +2046,58 @@ shutdown`/`can_manager.disconnect`/`power_supply_service.disconnect`/
 바로 그 상황에) 사용자가 다음에 확인해줄 것을 권장한다 -- 이 환경엔 실제
 VISA 하드웨어가 없어 그 시나리오까지는 재현하지 못했다. `pyvisa-py` 백엔드
 전환(근본 원인 시도)은 사용자가 보류를 선택해 이번엔 진행하지 않았다.
+
+## 오디오 신호 모니터 + CAN-오디오 지연 확인 위젯: 파형차트/폴링 공용 컴포넌트로
+추출 (2026-08-10, 사용자 요청 — 위젯 통합의 장단점을 먼저 리뷰한 뒤, "위젯 자체를
+합치기보다 중복 로직만 공용 컴포넌트로" 쪼갠다는 절충안으로 진행)
+
+사용자가 두 위젯을 합치고 싶다고 해서 먼저 장단점을 리뷰했다: 두 위젯이 캔버스
+드로잉/줌팬/폴링을 거의 동일하게(각자 원래 GraphWidget.tsx의 내부 컴포넌트가
+export되지 않아 재사용 못하고 복제했던 코드) 중복 구현하고 있어 합치면 유지보수
+이득이 크지만, 실제 용도(녹음+장시간 모니터링 vs CAN 오버레이+지연 비교)가
+달라서 위젯 자체를 합치면 컨트롤이 늘어난 무거운 위젯이 되고, 두 위젯 다 이미
+여러 차례 실기 검증을 거쳐 안정화된 코드라 합치는 과정에서 회귀 위험이 있다고
+판단해 "위젯은 그대로 두고 중복 로직만 공용 컴포넌트로 추출"을 추천했고, 사용자가
+동의해 그 방향으로 진행했다.
+
+### 설계
+
+`frontend/src/widgets/AudioWaveformChart.tsx`(신규)에 두 위젯의 오디오 채널
+미니차트(`AudioMonitorWidget.tsx`의 `WaveformChart`, `CanAudioLatencyWidget.tsx`의
+`AudioChannelChart`)를 하나의 `AudioWaveformChart` 컴포넌트로 합쳤다. 두 원본이
+실제로 다르게 동작하던 지점은 전부 prop으로 남겨 동작을 그대로 보존했다(코드를
+나란히 대조해서 찾은 것들 -- 처음엔 놓쳤다가 재대조로 잡은 것도 있음):
+
+| 차이 | AudioMonitorWidget | CanAudioLatencyWidget | 처리 방식 |
+|---|---|---|---|
+| X뷰 소유 | 차트가 각자 소유 | 부모와 형제 차트끼리 공유 | `shared?: {xViewRef, xVersion, notifyChange}` (없으면 standalone) |
+| 휠 줌 시 스팬 제한 | 없음(무제한) | `[MIN,MAX]_X_WINDOW_MS`로 클램프 | `wheelZoomSpanClamp?: {min,max}` (옵션) |
+| X축 눈금 기준점 | 스트림 시작 시각(값이 계속 증가) | 현재 뷰의 왼쪽 끝(항상 0부터) | `xTickMode: 'sinceStreamStart' \| 'sinceWindowLeft'` |
+| X축 눈금 소수점 | 2자리(`1.23s`) | 1자리(`1.2s`) | `xTickDecimals: number` — 나란히 비교하다 뒤늦게 발견한 차이 |
+| streamStartedAt 클램프 | 있음(스트림 시작 전으로 스크롤 불가) | 없음 | `streamStartedAtMs: number \| null` |
+| "라이브 중 계속 스크롤" 틱 | 차트 자신의 200ms 인터벌 | 형제 CAN차트의 인터벌에 의존(자체 틱 없음) | `shared`가 없을 때만 내부 200ms 인터벌 실행 |
+| 폴링 시작 게이팅 | `active`가 한 번이라도 true였어야 폴링(그 전엔 무기한 대기 안 함) | 항상 폴링(부모가 채널 없으면 마운트 자체를 안 함) | `pollEnabled` + 컴포넌트 내부 `hasEverEnabledRef` 래치 |
+
+`niceTicks`/`orFallback`/`Geom` 타입도 공용 파일에서 export해 `CanAudioLatencyWidget.tsx`의
+CAN 신호 차트(`CanSignalChart`, 다른 데이터소스라 이번엔 통합하지 않음)가 그대로
+재사용하도록 바꿔 그쪽의 중복도 같이 줄였다.
+
+`AudioMonitorWidget.tsx`는 이제 `AudioWaveformChart`를 standalone 모드(각 채널
+차트가 독립 X뷰 + 독립 200ms 라이브 틱)로 쓰고, `CanAudioLatencyWidget.tsx`는
+공유 모드(부모의 `sharedXRef`/`sharedVersion`을 CAN 차트와 함께 씀)로 쓴다.
+
+### 검증
+
+프론트 `tsc -b --noEmit`/`vite build`/`oxlint` 클린(빌드 산출물 크기 410.59KB →
+406.65KB로 줄어든 것으로 중복 제거가 실제 반영됐음을 확인). `AudioWaveformChart.tsx`가
+컴포넌트 외에 헬퍼 함수/타입도 export해서 `react(only-export-components)` 린트
+경고가 새로 2개 뜨는데, 이미 `UdsGlobalControls.tsx`/`controls.tsx`에도 동일한
+패턴(과 동일한 경고)이 있어 이 코드베이스에서 이미 받아들여진 컨벤션이라 그대로
+둠. 백엔드는 이번 변경과 무관(프론트 전용), 227개 테스트 그대로 통과.
+
+이 환경엔 브라우저 자동화 도구가 없어(반복적으로 명시된 제약, 위 여러 항목 참고)
+실제 브라우저에서 두 위젯의 Start/Stop, 줌/팬, 리셋, 30분 세그먼트 표시 등이 전과
+동일하게 동작하는지는 코드 대조로만 확인했고 직접 클릭 테스트는 못 했다 --
+**사용자가 다음 실사용 시 두 위젯 모두(특히 CanAudioLatencyWidget의 공유 X뷰
+줌/팬이 CAN 차트와 함께 움직이는지, AudioMonitorWidget의 X축 눈금이 스트림
+시작부터 계속 증가하는지) 확인해줄 것을 권장한다.**
