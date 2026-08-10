@@ -404,15 +404,6 @@ class TxScheduler:
         while not self._shutdown:
             now = time.perf_counter()
             tick_gap_ms = (now - last_tick) * 1000.0
-            if tick_gap_ms > _SLOW_TICK_MS:
-                n = diag_log.should_log("tx.tick_delay")
-                if n >= 0:
-                    logger.warning(
-                        "tick delayed %.1fms (target ~1ms) -- periodic CAN sends are "
-                        "late/jittery this cycle (GIL contention from another thread?)%s",
-                        tick_gap_ms,
-                        diag_log.suffix(n),
-                    )
             last_tick = now
             jobs: list[Callable[[], None]] = []
             lock_wait_start = time.perf_counter()
@@ -423,6 +414,20 @@ class TxScheduler:
                     if n >= 0:
                         logger.warning("waited %.1fms to acquire _lock%s", lock_wait_ms, diag_log.suffix(n))
                 paused = self._paused
+                # Only warn about tick drift while actually sending -- while
+                # paused (global Stop) no periodic sends are happening at
+                # all, so "periodic CAN sends are late" would be a false
+                # alarm (this was reported: the warning kept firing after
+                # Stop even though nothing was actually being sent).
+                if tick_gap_ms > _SLOW_TICK_MS and not paused:
+                    n = diag_log.should_log("tx.tick_delay")
+                    if n >= 0:
+                        logger.warning(
+                            "tick delayed %.1fms (target ~1ms) -- periodic CAN sends are "
+                            "late/jittery this cycle (GIL contention from another thread?)%s",
+                            tick_gap_ms,
+                            diag_log.suffix(n),
+                        )
                 if not paused:
                     while self._oneshots and self._oneshots[0][0] <= now:
                         jobs.append(heapq.heappop(self._oneshots)[2])

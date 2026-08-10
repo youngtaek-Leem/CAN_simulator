@@ -1809,3 +1809,75 @@ OTA Tester의 test-rule XML 스키마는 securityAccess를 requestSeed/sendKey
 `last[1] == 0x01`을 더 이상 만나지 못해 RequestSeed도 SendKey 응답(`67 02`)으로
 잘못 처리했을 것(실제로 처음엔 이 불일치로 실패했고, 두 곳을 맞춰 통과시켰다).
 백엔드 전체 226개 테스트 통과.
+
+### Ctrl-C 종료 안 됨, 4번째 확인 (2026-08-10, `--timeout-graceful-shutdown 5` 추가
+후에도 여전히 재현) + 전역 Stop 후에도 경고 로그가 계속 나오는 문제
+
+사용자가 두 가지를 다시 보고: ① 시뮬레이터의 전역 Stop을 눌러도 진단 경고
+로그가 계속 나오고, 브라우저를 완전히 종료해야 멈춤. ② `--timeout-graceful-
+shutdown 5`를 추가했는데도 Ctrl-C가 여전히 안 먹힘 -- 이번엔 브라우저를 강제로
+닫는 순간 아래 예외까지 같이 찍혔다:
+
+```
+Exception in callback _ProactorBasePipeTransport._call_connection_lost(None)
+...
+ConnectionResetError: [WinError 10054] An existing connection was forcibly closed by the remote host
+```
+
+**①은 버그가 아니라 현재 설계상 당연한 동작**: 전역 Stop(`/api/run/stop`)은
+`tx_scheduler`를 pause하고 CAN 관련 처리를 멈출 뿐, "CAN-오디오 지연 확인"/
+"오디오 신호 모니터" 위젯이 연 오디오 스트림은 별개로 계속 켜져 있다(위젯 자체의
+Stop 버튼을 눌러야 꺼짐) -- 그래서 오디오 관련 경고(`cansim.audio`)는 전역 Stop과
+무관하게 계속 나오는 게 맞다. 다만 `cansim.tx_scheduler`의 "tick delayed... 
+periodic CAN sends are late" 경고는 **pause 중에도(`_paused=True`, 실제로는 아무
+CAN도 안 보내는 중) 계속 찍히고 있어 오해를 부르는 것**이었다 -- 이건 진단 로그
+자체의 결함이라 고쳤다(`tx_scheduler.py`: `paused` 여부를 확인한 뒤에만 이 경고를
+찍도록 순서 변경, 락 대기/job 지연 경고는 그대로 둠 -- 그건 pause 여부와 무관하게
+유효한 신호).
+
+**②의 `ConnectionResetError`는 별개의, 대체로 무해한 Windows asyncio 노이즈**:
+`_ProactorBasePipeTransport._call_connection_lost`가 이미 리셋된 소켓에
+`shutdown(SHUT_RDWR)`을 호출하다 나는 예외로, Windows의 `ProactorEventLoop`가
+피어(브라우저)로부터 RST로 끊긴 연결을 뒤늦게 정리할 때 흔히 나는 잘 알려진
+로그다 -- asyncio가 콜백 예외를 개별적으로 잡아 로그만 남기고 이벤트 루프
+자체는 계속 돌아가므로, 이 예외 자체가 프로세스를 멈추게 하는 원인은 아닐 가능성이
+높다.
+
+**`--timeout-graceful-shutdown`으로도 안 됐다는 것에서 확인한 것**: uvicorn의
+"연결/작업 대기" 단계가 5초로 막혔더라도, 그 다음 우리 앱의 `lifespan` 종료
+코드(`main.py`) 자체가 어디서 멈추는지는 여전히 안 보였다 -- 그 블록을 다시
+훑어보니 `can_manager.disconnect()`(`bus.shutdown()`, 실제 하드웨어 드라이버
+호출)와 `power_supply_service.disconnect()`(VISA `instrument.close()`)에
+**타임아웃이 전혀 없었다** -- Windows에서 실제 PCAN/Vector/전원공급장치가
+연결돼 있다면 이 두 곳도 무한 대기 후보다. (`AudioService.shutdown()`은 이미
+3초로 막아뒀었다.)
+
+**적용한 조치**:
+1. **`main.py`에 `_run_bounded(fn, label, timeout_s=3.0)` 추가**: 별도 데몬
+   스레드에서 `fn()`을 실행하고 최대 3초만 기다리는, `AudioService.shutdown()`과
+   동일한 패턴의 범용 헬퍼. `can_manager.disconnect()`/`power_supply_service.
+   disconnect()` 호출을 이걸로 감쌌다.
+2. **`lifespan` 종료 블록 각 단계에 `shutdown_logger`(`cansim.shutdown`) 진행
+   로그 추가**: "이 단계 시작" 로그 없이 어디서 멈췄는지 전혀 알 수 없었던
+   문제를 고침 -- 다음에 멈추면 마지막으로 찍힌 줄이 정확히 어느 단계인지
+   알려준다.
+3. **`tx_scheduler.py`의 tick-delay 경고를 `paused`일 때는 찍지 않도록 수정**
+   (위 ① 참고).
+
+검증: 백엔드 전체 226개 테스트 통과(회귀 없음). 이 mac 환경(virtual 버스,
+전원공급장치 미연결)에서 실제 앱을 띄우고 SIGINT를 보내 `cansim.shutdown` 로그가
+`lifespan shutdown starting` → 각 단계 → `can_manager.disconnect() done in 1ms`
+→ `power_supply_service.disconnect() done in 0ms` → `lifespan shutdown complete`
+순서로 정확히 찍히고 0초 안에 정상 종료되는 것을 직접 확인했다 -- 다만 이 환경엔
+실제 하드웨어가 없어 `_run_bounded`의 타임아웃 발동 자체(하드웨어 드라이버가
+정말 멈췄을 때)는 여기서 재현하지 못했다(개념은 `AudioService.shutdown()`과
+동일한 방식으로 이미 별도 검증됨).
+
+**여전히 남은 불확실성 (사용자 확인 필요)**: 이번에도 Ctrl-C가 안 먹히면, 이제는
+`cansim.shutdown` 로그의 **마지막 줄이 정확히 어디인지**가 결정적인 정보다 --
+① `lifespan shutdown starting`조차 안 찍히면 uvicorn/OS 레벨(Windows
+ProactorEventLoop의 SIGINT 전달 문제)이 원인이라는 뜻이고, ② 특정 단계 이름에서
+멈추면 그 서비스의 disconnect/stop 자체가 원인. 사용자가 다음에 재현할 때
+`cansim.shutdown`으로 시작하는 줄만 필터링해서 마지막 줄을 확인해 공유해줄 것을
+권장한다. 또한 Ctrl-C를 누른 시점에 터미널에 `Shutting down` 메시지가 찍히는지,
+두 번째 Ctrl-C(`force_exit`)는 되는지도 여전히 미확인 상태다.

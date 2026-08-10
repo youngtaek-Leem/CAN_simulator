@@ -11,10 +11,11 @@ Run:  uvicorn main:app --host 127.0.0.1 --port 8000
 import asyncio
 import json
 import logging
+import threading
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from fastapi import FastAPI, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -80,6 +81,42 @@ _SLOW_REQUEST_MS = 300.0
 _SLOW_BROADCAST_DRIFT_MS = 100.0
 _inflight_requests = 0
 
+# Ctrl-C still didn't stop the backend even after audio_service.shutdown()'s
+# own 3s bound and uvicorn's --timeout-graceful-shutdown -- so the app's own
+# lifespan shutdown block (below) had no visibility into which step it was
+# actually stuck on. shutdown_logger.info() before/after each step gives that
+# visibility, and _run_bounded() applies the same bounded-background-thread
+# pattern already used in audio_service.shutdown() to the other two calls in
+# that block that touch real hardware drivers with no timeout of their own
+# (CanManager.disconnect()'s bus.shutdown(), PowerSupplyService.disconnect()'s
+# VISA instrument close()) -- either is a plausible hang point on Windows if
+# real hardware (not the virtual bus) is connected.
+shutdown_logger = logging.getLogger("cansim.shutdown")
+_SHUTDOWN_STEP_TIMEOUT_S = 3.0
+
+
+def _run_bounded(fn: Callable[[], None], label: str, timeout_s: float = _SHUTDOWN_STEP_TIMEOUT_S) -> None:
+    done = threading.Event()
+
+    def _wrapped() -> None:
+        try:
+            fn()
+        except Exception:
+            shutdown_logger.warning("%s raised during shutdown", label, exc_info=True)
+        finally:
+            done.set()
+
+    t0 = time.perf_counter()
+    threading.Thread(target=_wrapped, daemon=True, name=f"shutdown-{label}").start()
+    if done.wait(timeout=timeout_s):
+        shutdown_logger.info("%s done in %.0fms", label, (time.perf_counter() - t0) * 1000.0)
+    else:
+        shutdown_logger.warning(
+            "%s did not finish within %.0fs -- abandoning it so the process can still exit",
+            label,
+            timeout_s,
+        )
+
 BASE_DIR = Path(__file__).resolve().parent
 UPLOAD_DIR = BASE_DIR / "uploads"
 LAYOUT_DIR = BASE_DIR / "layouts"
@@ -141,19 +178,27 @@ async def lifespan(app: FastAPI):
     timer_util.enable_1ms_timer()
     broadcaster = asyncio.create_task(_broadcast_loop())
     yield
+    shutdown_logger.info("lifespan shutdown starting")
     broadcaster.cancel()
+    shutdown_logger.info("test_runner_service.stop() starting")
     test_runner_service.stop()
+    shutdown_logger.info("replay_service.stop() starting")
     replay_service.stop()
+    shutdown_logger.info("log_service.stop() starting")
     log_service.stop()
+    shutdown_logger.info("tx_scheduler.shutdown() starting")
     tx_scheduler.shutdown()
-    can_manager.disconnect()
-    power_supply_service.disconnect()
+    # bounded: bus.shutdown()/instrument.close() are real hardware-driver
+    # calls with no timeout of their own -- see _run_bounded()'s docstring.
+    _run_bounded(can_manager.disconnect, "can_manager.disconnect()")
+    _run_bounded(power_supply_service.disconnect, "power_supply_service.disconnect()")
     # Previously missing entirely -- a stream left open (Start/Record never
     # Stopped) just stayed open through shutdown. audio_service.shutdown()
     # is itself bounded-time (see its docstring), so it can't turn into the
     # very "Ctrl-C doesn't exit" symptom this is meant to prevent.
     audio_service.shutdown()
     timer_util.disable_1ms_timer()
+    shutdown_logger.info("lifespan shutdown complete")
 
 
 app = FastAPI(title="CAN Evaluation Backend", lifespan=lifespan)
