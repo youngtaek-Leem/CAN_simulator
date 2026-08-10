@@ -51,6 +51,13 @@ except ImportError:
 
 MAX_EVENTS = 500
 
+# securityAccess sub-function levels used for this ECU's RequestSeed/SendKey
+# ([27 11]/[27 12], not build_security_access_*()'s ISO-default [27 01]/
+# [27 02]) -- matches uds_download_manager.py's own default accessMode when
+# a case's XML doesn't override it.
+SECURITY_ACCESS_MODE_SEED = 0x11
+SECURITY_ACCESS_MODE_KEY = 0x12
+
 _STATE_IDLE = "IDLE"
 _STATE_READY = "READY"
 _STATE_RUNNING = "RUNNING"
@@ -307,7 +314,7 @@ class OtaTesterDownloadManager:
         sub_steps = step.get("sub_steps", [])
         try:
             if service == "securityAccess":
-                pdu = build_security_access_request_seed()
+                pdu = build_security_access_request_seed(SECURITY_ACCESS_MODE_SEED)
                 return bytes(pdu).hex(" ").upper(), "Seed 요청 → 키 생성 → SendKey (실제 키는 실행 시 결정됨)"
 
             if service == "requestDownload":
@@ -668,7 +675,7 @@ class OtaTesterDownloadManager:
         so both UDS round-trips happen here as one logical step."""
         timeout_s = self._p2_can_server_max / 1000.0
 
-        request = build_security_access_request_seed()
+        request = build_security_access_request_seed(SECURITY_ACCESS_MODE_SEED)
         result = self._uds_request_with_retry(request, timeout_s, "RequestSeed")
 
         # Positive response layout is SID(1) | securityAccessType(1) | seed(N)
@@ -685,7 +692,7 @@ class OtaTesterDownloadManager:
             key = generate_key(seed)
             self._log(level="WARN", msg=f"[더미 키] SeedKey DLL이 로드되지 않아 더미 키를 사용합니다: {key.hex()}")
 
-        request = build_security_access_send_key(key)
+        request = build_security_access_send_key(key, SECURITY_ACCESS_MODE_KEY)
         self._uds_request_with_retry(request, timeout_s, "SendKey")
 
     def _execute_request_download(self, params: dict) -> None:

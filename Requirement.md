@@ -1783,3 +1783,29 @@ WebSocket 연결을 열어둔 채(raw 소켓으로 핸드셰이크 성공 확인
    되고 있다는 뜻.
 3. 급할 때 임시 대응: 브라우저 탭을 먼저 닫고 Ctrl-C, 또는 작업 관리자/`taskkill
    /F /IM python.exe`로 강제 종료.
+
+### OTA Tester의 securityAccess sub-function을 [27 01]/[27 02] → [27 11]/[27 12]로
+변경 (2026-08-10, 사용자 요청)
+
+`backend/ota_tester_download_manager.py`의 RequestSeed/SendKey가
+`build_security_access_request_seed()`/`build_security_access_send_key()`를
+인자 없이 호출해 `uds_core.py`의 ISO 기본값(`0x01`/`0x02`)을 쓰고 있었다. 같은
+핸드셰이크를 하는 `uds_download_manager.py`(CAN-SWDL)는 이미 XML의 `accessMode`
+파라미터가 없을 때 `0x11`/`0x12`를 기본값으로 쓰고 있어(`access_mode_seed =
+int(seed_step.params.get("accessMode", "0x11"), 16)`) 두 UDS 실행기가 서로 다른
+레벨을 쓰고 있었던 상태 -- 사용자 요청대로 OTA Tester도 `0x11`/`0x12`로 맞췄다.
+
+OTA Tester의 test-rule XML 스키마는 securityAccess를 requestSeed/sendKey
+서브스텝으로 나누지 않아(`_execute_security_access()`의 기존 주석 참고) CAN-SWDL
+같은 XML `accessMode` 파라미터 경로가 없다 -- 그래서 설정 가능한 값이 아니라
+`ota_tester_download_manager.py` 상단에 고정 상수 `SECURITY_ACCESS_MODE_SEED =
+0x11`/`SECURITY_ACCESS_MODE_KEY = 0x12`를 추가하고, RequestSeed/SendKey 실제
+실행 경로 2곳 + 체크리스트 PDU 미리보기(`_preview_pdu`) 1곳까지 3곳 모두 이
+상수를 명시적으로 넘기도록 수정했다.
+
+검증: `tests/test_ota_tester_download_manager.py`의 가짜 ECU 핸들러(`sid == 0x27`
+분기)와 `test_get_case_steps_security_access_preview`의 기대값(`"27 01"` →
+`"27 11"`)을 새 서브펑션 값에 맞게 같이 갱신 -- 갱신하지 않았다면 가짜 ECU가
+`last[1] == 0x01`을 더 이상 만나지 못해 RequestSeed도 SendKey 응답(`67 02`)으로
+잘못 처리했을 것(실제로 처음엔 이 불일치로 실패했고, 두 곳을 맞춰 통과시켰다).
+백엔드 전체 226개 테스트 통과.

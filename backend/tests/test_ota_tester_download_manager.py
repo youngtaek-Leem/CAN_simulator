@@ -147,9 +147,9 @@ class FakeEcu:
         if sid == 0x22:
             return bytes([0x62, last[1], last[2], 0x01, 0x02])
         if sid == 0x27:
-            if last[1] == 0x01:  # request seed
-                return bytes([0x67, 0x01]) + bytes([0x11] * 8)
-            return bytes([0x67, 0x02])  # send key
+            if last[1] == 0x11:  # request seed
+                return bytes([0x67, 0x11]) + bytes([0x11] * 8)
+            return bytes([0x67, 0x12])  # send key
         if sid == 0x31:
             return bytes([0x71]) + last[1:4]
         if sid == 0x34:
@@ -432,7 +432,7 @@ def test_get_case_steps_security_access_preview(tmp_path):
 
     steps = mgr.get_case_steps("block-1")
     sa_step = next(s for s in steps if s["service"] == "securityAccess")
-    assert sa_step["pdu_preview"] == "27 01"
+    assert sa_step["pdu_preview"] == "27 11"
     assert sa_step["pdu_note"]
 
 
