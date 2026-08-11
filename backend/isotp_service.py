@@ -337,13 +337,22 @@ def receive(
             ff_data_len = min(len(data) - 2, total_length)
             payload = bytearray(data[2:2 + ff_data_len])
 
-            # Send Flow Control (CTS, unlimited block size)
+            # Send Flow Control (CTS)
             fc = _build_fc(FS_CTS, fc_block_size, fc_stmin)
             can_manager.send(tx_id, _pad(fc), is_extended_id, is_fd=is_fd, bitrate_switch=bitrate_switch)
 
-            # Receive Consecutive Frames
+            # Receive Consecutive Frames. Per ISO 15765-2, a nonzero Block
+            # Size means the sender only streams that many CFs per FC before
+            # pausing to wait for another Flow Control frame -- this used to
+            # send exactly one FC (the one above, right after the First
+            # Frame) and then never again, so any sender that actually
+            # honored a nonzero fc_block_size would send its first block and
+            # then wait forever for a follow-up FC that never came. block_size
+            # == 0 (the default) means "unlimited", i.e. the original
+            # single-FC behavior is unchanged.
             expected_sn = 1
             remaining = total_length - ff_data_len
+            block_count = 0
             while remaining > 0:
                 cf_timeout = max(0.1, timeout_s - (time.perf_counter() - t0))
                 if cf_timeout <= 0:
@@ -371,6 +380,12 @@ def receive(
                 payload.extend(cf_data[1:1 + chunk_len])
                 remaining -= chunk_len
                 expected_sn = (expected_sn + 1) % 16
+                block_count += 1
+
+                if fc_block_size and remaining > 0 and block_count >= fc_block_size:
+                    fc = _build_fc(FS_CTS, fc_block_size, fc_stmin)
+                    can_manager.send(tx_id, _pad(fc), is_extended_id, is_fd=is_fd, bitrate_switch=bitrate_switch)
+                    block_count = 0
 
             return bytes(payload)
 

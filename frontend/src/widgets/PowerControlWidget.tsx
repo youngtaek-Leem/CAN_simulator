@@ -7,6 +7,7 @@
 import { useState } from 'react';
 import { api } from '../api/client';
 import { canStore, useCanVersion } from '../store/canStore';
+import { useApp } from '../store/appContext';
 import type { WidgetConfig } from '../types';
 
 function parseNumbers(values: string[]): number[] | null {
@@ -34,25 +35,45 @@ function UnitField({
   );
 }
 
-export function PowerControlWidget(_: { config: WidgetConfig }) {
+export function PowerControlWidget({ config }: { config: WidgetConfig }) {
   useCanVersion();
+  const { updateWidget } = useApp();
   const power = canStore.status?.power;
   const [error, setError] = useState<string | null>(null);
 
-  const [voltage, setVoltage] = useState('14.4');
-  const [current, setCurrent] = useState('10');
+  // All 12 fields below are persisted in config.options (not local
+  // useState) so they survive switching to another page and back -- App.tsx
+  // only mounts the active page's widgets, so a value kept only in local
+  // useState resets on remount.
+  const opts = config.options;
+  const setOpt = (patch: Record<string, string>) => updateWidget({ ...config, options: { ...opts, ...patch } });
 
-  const [onVoltage, setOnVoltage] = useState('14.4');
-  const [onCurrent, setOnCurrent] = useState('10');
-  const [onS, setOnS] = useState('5');
-  const [offVoltage, setOffVoltage] = useState('1');
-  const [offCurrent, setOffCurrent] = useState('0');
-  const [offS, setOffS] = useState('10');
+  const voltage = String(opts.voltage ?? '14.4');
+  const current = String(opts.current ?? '10');
+  const setVoltage = (v: string) => setOpt({ voltage: v });
+  const setCurrent = (v: string) => setOpt({ current: v });
 
-  const [low, setLow] = useState('5');
-  const [high, setHigh] = useState('15');
-  const [sweepCurrent, setSweepCurrent] = useState('10');
-  const [legS, setLegS] = useState('20');
+  const onVoltage = String(opts.onVoltage ?? '14.4');
+  const onCurrent = String(opts.onCurrent ?? '10');
+  const onS = String(opts.onS ?? '5');
+  const offVoltage = String(opts.offVoltage ?? '1');
+  const offCurrent = String(opts.offCurrent ?? '0');
+  const offS = String(opts.offS ?? '10');
+  const setOnVoltage = (v: string) => setOpt({ onVoltage: v });
+  const setOnCurrent = (v: string) => setOpt({ onCurrent: v });
+  const setOnS = (v: string) => setOpt({ onS: v });
+  const setOffVoltage = (v: string) => setOpt({ offVoltage: v });
+  const setOffCurrent = (v: string) => setOpt({ offCurrent: v });
+  const setOffS = (v: string) => setOpt({ offS: v });
+
+  const low = String(opts.low ?? '5');
+  const high = String(opts.high ?? '15');
+  const sweepCurrent = String(opts.sweepCurrent ?? '10');
+  const legS = String(opts.legS ?? '20');
+  const setLow = (v: string) => setOpt({ low: v });
+  const setHigh = (v: string) => setOpt({ high: v });
+  const setSweepCurrent = (v: string) => setOpt({ sweepCurrent: v });
+  const setLegS = (v: string) => setOpt({ legS: v });
 
   const run = async (fn: () => Promise<{ ok: boolean; reason?: string }>) => {
     try {

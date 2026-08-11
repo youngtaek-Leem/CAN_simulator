@@ -20,6 +20,7 @@
 
 import { useEffect, useRef, useState, type MutableRefObject } from 'react';
 import { api } from '../api/client';
+import { drawDiffCursors, nearestCursor, type DiffCursorState } from './DiffCursor';
 import type { AudioWaveformPoint } from '../types';
 
 export interface AudioChartMargin {
@@ -121,6 +122,11 @@ export interface AudioWaveformChartProps {
    * called for it. */
   onResetClick: () => void;
   resetTitle: string;
+  /** Difference-cursor overlay (CanAudioLatencyWidget only -- AudioMonitor
+   * Widget never passes this, so its charts are completely unaffected).
+   * While `cursor.mode` is on, dragging moves the nearest cursor instead of
+   * panning the view. */
+  cursor?: DiffCursorState;
 }
 
 export function AudioWaveformChart({
@@ -140,8 +146,10 @@ export function AudioWaveformChart({
   resetToken,
   onResetClick,
   resetTitle,
+  cursor,
 }: AudioWaveformChartProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const cursorDragRef = useRef<'a' | 'b' | null>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
   const localXViewRef = useRef<AudioChartXView>({ xMin: null, xMax: null });
   const yViewRef = useRef<YView>({ yMin: null, yMax: null });
@@ -366,6 +374,8 @@ export function AudioWaveformChart({
       ctx.restore();
     }
 
+    drawDiffCursors(ctx, cursor, xMin, xMax, plotTop, plotH, xToPx);
+
     lastGeomRef.current = { xMin, xMax, yMin, yMax, plotLeft, plotTop, plotW, plotH };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [size, xWindowMs, xVersion]);
@@ -421,6 +431,13 @@ export function AudioWaveformChart({
     const py = e.clientY - rect.top;
     if (px < g.plotLeft || px > g.plotLeft + g.plotW || py < g.plotTop || py > g.plotTop + g.plotH) return;
     (e.target as HTMLCanvasElement).setPointerCapture(e.pointerId);
+    if (cursor?.mode) {
+      const msToPx = (ms: number) => g.plotLeft + ((ms - g.xMin) / (g.xMax - g.xMin)) * g.plotW;
+      const which = nearestCursor(cursor, px, msToPx);
+      cursorDragRef.current = which;
+      cursor.onMove(which, g.xMin + ((px - g.plotLeft) / g.plotW) * (g.xMax - g.xMin));
+      return;
+    }
     dragRef.current = {
       x: e.clientX,
       y: e.clientY,
@@ -435,6 +452,13 @@ export function AudioWaveformChart({
     };
   };
   const onPointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (cursorDragRef.current && cursor) {
+      const g = lastGeomRef.current;
+      const rect = canvasRef.current!.getBoundingClientRect();
+      const px = e.clientX - rect.left;
+      cursor.onMove(cursorDragRef.current, g.xMin + ((px - g.plotLeft) / g.plotW) * (g.xMax - g.xMin));
+      return;
+    }
     const drag = dragRef.current;
     if (!drag) return;
     const g = lastGeomRef.current;
@@ -448,6 +472,7 @@ export function AudioWaveformChart({
   };
   const onPointerUp = () => {
     dragRef.current = null;
+    cursorDragRef.current = null;
   };
 
   return (

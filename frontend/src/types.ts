@@ -386,6 +386,14 @@ export interface MultiCell {
   sliderStep?: number;
   sliderDefault?: number;
   inputDefault?: string;
+  // Runtime values the user set through the cell itself (not its config
+  // modal) -- persisted here (not local useState) so they survive switching
+  // to another page and back; App.tsx only mounts the active page's
+  // widgets, so anything kept only in local useState resets on remount.
+  checked?: boolean;
+  selectedRaw?: string;
+  sliderCurrent?: number;
+  inputCurrent?: string;
 }
 
 export interface WidgetConfig {

@@ -11,12 +11,19 @@ import { groupedMessages, useApp } from '../store/appContext';
 import { MessageFilter, type MessageFilterMode } from './MessageOptions';
 import type { DbcMessage, WidgetConfig } from '../types';
 
-export function ReplayBox(_: { config: WidgetConfig }) {
+export function ReplayBox({ config }: { config: WidgetConfig }) {
   useCanVersion();
-  const { dbc } = useApp();
+  const { dbc, updateWidget } = useApp();
   const fileInput = useRef<HTMLInputElement>(null);
-  const [mode, setMode] = useState<'pass' | 'stop'>('pass');
-  const [selectedIds, setSelectedIds] = useState<number[]>([]);
+  // Persisted in config.options (not local useState) so the filter mode and
+  // message selection survive switching to another page and back -- App.tsx
+  // only mounts the active page's widgets, so a value kept only in local
+  // useState resets on remount.
+  const mode = (config.options.mode as 'pass' | 'stop' | undefined) ?? 'pass';
+  const selectedIds = (config.options.selectedIds as number[] | undefined) ?? [];
+  const setMode = (v: 'pass' | 'stop') => updateWidget({ ...config, options: { ...config.options, mode: v } });
+  const setSelectedIds = (ids: number[]) =>
+    updateWidget({ ...config, options: { ...config.options, selectedIds: ids } });
   const [showPicker, setShowPicker] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const replay = canStore.status?.replay;

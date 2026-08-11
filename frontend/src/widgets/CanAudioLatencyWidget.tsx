@@ -25,6 +25,14 @@ import { canStore, useCanVersion } from '../store/canStore';
 import { useApp } from '../store/appContext';
 import { SignalPicker } from './MessageOptions';
 import { AudioWaveformChart, niceTicks, orFallback, type AudioChartXView, type Geom } from './AudioWaveformChart';
+import {
+  drawDiffCursors,
+  fmtDelta,
+  nearestCursor,
+  CURSOR_A_COLOR,
+  CURSOR_B_COLOR,
+  type DiffCursorState,
+} from './DiffCursor';
 import type { DbcSummary, SignalBinding, WidgetConfig } from '../types';
 
 const MARGIN = { left: 52, right: 10, top: 8, bottom: 22 };
@@ -91,6 +99,32 @@ export function CanAudioLatencyWidget({ config }: { config: WidgetConfig }) {
   const sharedXRef = useRef<SharedXView>({ xMin: null, xMax: null });
   const [sharedVersion, setSharedVersion] = useState(0);
   const notifyChange = () => setSharedVersion((n) => n + 1);
+
+  // Difference cursor: two draggable vertical lines (epoch ms), drawn on
+  // every chart via the shared X view so they line up across CAN and audio.
+  // Toggling off only hides them (cursorA/B values are kept, not cleared) so
+  // a careful placement survives an accidental toggle. First turn-on seeds
+  // sensible defaults from whatever's currently in view.
+  const [cursorMode, setCursorMode] = useState(false);
+  const [cursorA, setCursorA] = useState<number | null>(null);
+  const [cursorB, setCursorB] = useState<number | null>(null);
+  const onCursorMove = (which: 'a' | 'b', ms: number) => {
+    if (which === 'a') setCursorA(ms);
+    else setCursorB(ms);
+    notifyChange(); // redraw every chart sharing xVersion, same as pan/zoom
+  };
+  const toggleCursorMode = () => {
+    if (!cursorMode && cursorA === null && cursorB === null) {
+      const v = sharedXRef.current;
+      const xMax = v.xMax ?? nowAnchor();
+      const xMin = v.xMin ?? xMax - xWindowMs;
+      setCursorA(xMin + (xMax - xMin) / 3);
+      setCursorB(xMin + ((xMax - xMin) * 2) / 3);
+    }
+    setCursorMode((m) => !m);
+  };
+  const cursor: DiffCursorState = { mode: cursorMode, a: cursorA, b: cursorB, onMove: onCursorMove };
+  const cursorDeltaMs = cursorA !== null && cursorB !== null ? Math.abs(cursorB - cursorA) : null;
 
   const active = level?.active ?? false;
 
@@ -267,6 +301,22 @@ export function CanAudioLatencyWidget({ config }: { config: WidgetConfig }) {
         <button className="icon-btn" title="두 차트 모두 X/Y 축 자동 맞춤으로 리셋" onClick={resetEverything}>
           ⟲
         </button>
+        <span className="spacer" />
+        <button
+          className={`small-btn ${cursorMode ? 'primary' : ''}`}
+          title="차트에서 드래그해 두 커서를 움직이면 그 사이의 시간 간격을 읽을 수 있습니다"
+          onClick={toggleCursorMode}
+        >
+          커서 {cursorMode ? 'ON' : 'OFF'}
+        </button>
+        {cursorMode && cursorDeltaMs !== null && (
+          <span className="graph-xwindow mono">
+            <span style={{ color: CURSOR_A_COLOR }}>A</span>
+            {' - '}
+            <span style={{ color: CURSOR_B_COLOR }}>B</span>
+            {`: Δ ${fmtDelta(cursorDeltaMs)}`}
+          </span>
+        )}
       </div>
       {error && <div className="error">{error}</div>}
       {owner === 'recording' && <div className="hint">테스트 러너 녹음 중 (같은 스트림에서 표시 중)</div>}
@@ -290,6 +340,7 @@ export function CanAudioLatencyWidget({ config }: { config: WidgetConfig }) {
             nowAnchor={nowAnchor}
             resetToken={resetToken}
             onResetAll={resetEverything}
+            cursor={cursor}
           />
         )}
         {channels.map((ch, i) => (
@@ -311,6 +362,7 @@ export function CanAudioLatencyWidget({ config }: { config: WidgetConfig }) {
             resetToken={resetToken}
             onResetClick={resetEverything}
             resetTitle="두 차트 모두 X/Y 축 자동 맞춤으로 리셋"
+            cursor={cursor}
           />
         ))}
       </div>
@@ -343,6 +395,7 @@ function CanSignalChart({
   nowAnchor,
   resetToken,
   onResetAll,
+  cursor,
 }: {
   bindingKey: string;
   label: string;
@@ -354,12 +407,14 @@ function CanSignalChart({
   nowAnchor: () => number;
   resetToken: number;
   onResetAll: () => void;
+  cursor: DiffCursorState;
 }) {
   useCanVersion();
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
   const yViewRef = useRef<YView>({ yMin: null, yMax: null });
   const dragRef = useRef<{ x: number; y: number; xView: SharedXView; yView: YView } | null>(null);
+  const cursorDragRef = useRef<'a' | 'b' | null>(null);
   const lastGeomRef = useRef<Geom>({
     xMin: 0,
     xMax: 1,
@@ -535,6 +590,8 @@ function CanSignalChart({
       ctx.restore();
     }
 
+    drawDiffCursors(ctx, cursor, xMin, xMax, plotTop, plotH, xToPx);
+
     lastGeomRef.current = { xMin, xMax, yMin, yMax, plotLeft, plotTop, plotW, plotH };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [size, xWindowMs, xVersion, bindingKey]);
@@ -580,6 +637,13 @@ function CanSignalChart({
     const py = e.clientY - rect.top;
     if (px < g.plotLeft || px > g.plotLeft + g.plotW || py < g.plotTop || py > g.plotTop + g.plotH) return;
     (e.target as HTMLCanvasElement).setPointerCapture(e.pointerId);
+    if (cursor.mode) {
+      const msToPx = (ms: number) => g.plotLeft + ((ms - g.xMin) / (g.xMax - g.xMin)) * g.plotW;
+      const which = nearestCursor(cursor, px, msToPx);
+      cursorDragRef.current = which;
+      cursor.onMove(which, g.xMin + ((px - g.plotLeft) / g.plotW) * (g.xMax - g.xMin));
+      return;
+    }
     dragRef.current = {
       x: e.clientX,
       y: e.clientY,
@@ -594,6 +658,13 @@ function CanSignalChart({
     };
   };
   const onPointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (cursorDragRef.current) {
+      const g = lastGeomRef.current;
+      const rect = canvasRef.current!.getBoundingClientRect();
+      const px = e.clientX - rect.left;
+      cursor.onMove(cursorDragRef.current, g.xMin + ((px - g.plotLeft) / g.plotW) * (g.xMax - g.xMin));
+      return;
+    }
     const drag = dragRef.current;
     if (!drag) return;
     const g = lastGeomRef.current;
@@ -607,6 +678,7 @@ function CanSignalChart({
   };
   const onPointerUp = () => {
     dragRef.current = null;
+    cursorDragRef.current = null;
   };
 
   return (

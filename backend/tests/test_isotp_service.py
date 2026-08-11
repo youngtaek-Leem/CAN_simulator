@@ -377,3 +377,79 @@ def test_receive_decodes_fd_multi_frame(fd_stack):
 
     t.join(timeout=2)
     assert result["value"] == data
+
+
+def test_receive_sends_follow_up_fc_after_each_block(stack):
+    """Regression: a nonzero Block Size means the sender only streams that
+    many CFs before pausing for another Flow Control frame (ISO 15765-2) --
+    receive() used to send exactly one FC (right after the First Frame) and
+    never again, so a real sender honoring fc_block_size would send its
+    first block and then wait forever. 21 bytes -> FF carries 6, leaving 15
+    (3 CFs of 7/7/1) with fc_block_size=1 -> expect FC before CF1, FC after
+    CF1, FC after CF2, no FC needed after CF3 (nothing left)."""
+    cm, peer = stack
+    data = bytes(range(1, 22))
+    ff_frame = bytes([0x10 | ((len(data) >> 8) & 0x0F), len(data) & 0xFF]) + data[:6]
+
+    result = {}
+
+    def run():
+        result["value"] = isotp_service.receive(cm, RESP_ID, FC_ID, timeout_s=2.0, fc_block_size=1)
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    time.sleep(0.1)
+
+    peer.send(can.Message(arbitration_id=RESP_ID, data=ff_frame, is_extended_id=False))
+    fc1 = peer.recv(timeout=1.0)
+    assert fc1 is not None and fc1.arbitration_id == FC_ID
+    assert fc1.data[0] & 0x0F == 0x00  # CTS
+    assert fc1.data[1] == 1  # block size echoed back
+
+    rest = data[6:]
+    peer.send(can.Message(arbitration_id=RESP_ID, data=bytes([0x21]) + rest[:7], is_extended_id=False))
+    fc2 = peer.recv(timeout=1.0)
+    assert fc2 is not None and fc2.arbitration_id == FC_ID  # the actual bug: this used to never arrive
+
+    rest = rest[7:]
+    peer.send(can.Message(arbitration_id=RESP_ID, data=bytes([0x22]) + rest[:7], is_extended_id=False))
+    fc3 = peer.recv(timeout=1.0)
+    assert fc3 is not None and fc3.arbitration_id == FC_ID
+
+    rest = rest[7:]
+    peer.send(can.Message(arbitration_id=RESP_ID, data=bytes([0x23]) + rest, is_extended_id=False))
+
+    t.join(timeout=2)
+    assert result["value"] == data
+
+
+def test_receive_bs_zero_sends_only_the_initial_fc(stack):
+    """The default (block_size=0, "unlimited") must keep its original
+    behavior exactly -- a single FC upfront, no follow-ups -- since that's
+    what every other existing receive() test already relies on."""
+    cm, peer = stack
+    data = bytes(range(1, 16))  # FF(6) + CF(7) + CF(2), no block boundary
+    ff_frame = bytes([0x10 | ((len(data) >> 8) & 0x0F), len(data) & 0xFF]) + data[:6]
+
+    result = {}
+
+    def run():
+        result["value"] = isotp_service.receive(cm, RESP_ID, FC_ID, timeout_s=2.0)
+
+    t = threading.Thread(target=run, daemon=True)
+    t.start()
+    time.sleep(0.1)
+
+    peer.send(can.Message(arbitration_id=RESP_ID, data=ff_frame, is_extended_id=False))
+    fc1 = peer.recv(timeout=1.0)
+    assert fc1 is not None and fc1.arbitration_id == FC_ID
+
+    rest = data[6:]
+    peer.send(can.Message(arbitration_id=RESP_ID, data=bytes([0x21]) + rest[:7], is_extended_id=False))
+    peer.send(can.Message(arbitration_id=RESP_ID, data=bytes([0x22]) + rest[7:], is_extended_id=False))
+
+    # no second FC should ever arrive
+    assert peer.recv(timeout=0.3) is None
+
+    t.join(timeout=2)
+    assert result["value"] == data

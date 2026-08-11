@@ -99,12 +99,17 @@ export function ButtonWidget({ config }: { config: WidgetConfig }) {
 }
 
 export function CheckboxWidget({ config }: { config: WidgetConfig }) {
+  const { updateWidget } = useApp();
   const { send, error } = useSendSignal(config);
-  const [checked, setChecked] = useState(false);
+  // Persisted in config.options (not local useState) so the checked state
+  // survives switching to another page and back -- App.tsx only mounts the
+  // active page's widgets, so any value kept only in local useState resets
+  // on remount.
+  const checked = Boolean(config.options.checked ?? false);
   const onValue = Number(config.options.onValue ?? 1);
   const offValue = Number(config.options.offValue ?? 0);
   const toggle = (next: boolean) => {
-    setChecked(next);
+    updateWidget({ ...config, options: { ...config.options, checked: next } });
     send(next ? onValue : offValue);
   };
   return (
@@ -130,9 +135,10 @@ export function CheckboxWidget({ config }: { config: WidgetConfig }) {
 }
 
 export function DropdownWidget({ config }: { config: WidgetConfig }) {
-  const { dbc } = useApp();
+  const { dbc, updateWidget } = useApp();
   const { send, error } = useSendSignal(config);
-  const [selected, setSelected] = useState('');
+  // Persisted in config.options -- same reasoning as CheckboxWidget above.
+  const selected = String(config.options.selected ?? '');
   const bound = findSignal(dbc, config.binding);
   const choices = bound?.signal.choices ?? null;
   return (
@@ -141,7 +147,7 @@ export function DropdownWidget({ config }: { config: WidgetConfig }) {
         value={selected}
         disabled={!choices}
         onChange={(e) => {
-          setSelected(e.target.value);
+          updateWidget({ ...config, options: { ...config.options, selected: e.target.value } });
           if (e.target.value !== '') send(Number(e.target.value));
         }}
       >
@@ -161,7 +167,7 @@ export function DropdownWidget({ config }: { config: WidgetConfig }) {
 }
 
 export function SliderWidget({ config }: { config: WidgetConfig }) {
-  const { dbc } = useApp();
+  const { dbc, updateWidget } = useApp();
   const { send, error } = useSendSignal(config);
   const bound = findSignal(dbc, config.binding);
   const min = Number(config.options.min ?? bound?.signal.minimum ?? 0);
@@ -170,17 +176,34 @@ export function SliderWidget({ config }: { config: WidgetConfig }) {
   );
   const step = Number(config.options.step ?? 1);
   const defaultValue = Math.min(max, Math.max(min, Number(config.options.default ?? min)));
-  const [value, setValue] = useState(defaultValue);
-  const valueRef = useRef(defaultValue);
+  // The position the user last dragged/stepped to is persisted separately
+  // from `default` (config.options.currentValue) so switching to another
+  // page and back doesn't snap the slider back to its configured default --
+  // App.tsx only mounts the active page's widgets, so a value kept only in
+  // local useState resets on remount.
+  const initialValue =
+    config.options.currentValue !== undefined
+      ? Math.min(max, Math.max(min, Number(config.options.currentValue)))
+      : defaultValue;
+  const [value, setValue] = useState(initialValue);
+  const valueRef = useRef(initialValue);
   const lastSent = useRef(0);
+  const isFirstRender = useRef(true);
 
   // Re-apply the configured default whenever it (or min/max, which it's
   // clamped into) changes in the config modal -- otherwise a slider that's
   // already on screen would only pick up a new default on the next full
-  // page load, which reads as "the setting didn't do anything."
+  // page load, which reads as "the setting didn't do anything." Skipped on
+  // mount (isFirstRender) so remounting on a page switch doesn't clobber
+  // the persisted currentValue with the default every time.
   useEffect(() => {
+    if (isFirstRender.current) {
+      isFirstRender.current = false;
+      return;
+    }
     setValue(defaultValue);
     valueRef.current = defaultValue;
+    updateWidget({ ...config, options: { ...config.options, currentValue: defaultValue } });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [defaultValue]);
 
@@ -196,10 +219,14 @@ export function SliderWidget({ config }: { config: WidgetConfig }) {
 
   // Flush the current value regardless of how the interaction ended (mouse/
   // touch pointerup or the explicit keyboard stepping below) so a value
-  // swallowed by the 100ms throttle is never silently dropped.
+  // swallowed by the 100ms throttle is never silently dropped -- also the
+  // one place that persists the settled position into config.options, so
+  // dragging doesn't trigger a config write (and parent re-render) on every
+  // single pointermove tick.
   const flush = () => {
     lastSent.current = performance.now();
     void send(valueRef.current);
+    updateWidget({ ...config, options: { ...config.options, currentValue: valueRef.current } });
   };
 
   const stepBy = (delta: number) => {
@@ -275,16 +302,28 @@ export function parseFlexibleInt(input: string): number | null {
  * control widget: Event sends the value then auto-invalidates 30ms later,
  * Periodic keeps resending the value at the signal's cycle time. */
 export function ManualValueWidget({ config }: { config: WidgetConfig }) {
-  const { dbc } = useApp();
+  const { dbc, updateWidget } = useApp();
   const bound = findSignal(dbc, config.binding);
   const defaultText = String(config.options.default ?? '');
-  const [text, setText] = useState(defaultText);
+  // The typed-in text is persisted separately from `default`
+  // (config.options.currentText) so switching to another page and back
+  // doesn't revert it -- App.tsx only mounts the active page's widgets, so
+  // a value kept only in local useState resets on remount.
+  const text = config.options.currentText !== undefined ? String(config.options.currentText) : defaultText;
+  const setText = (v: string) => updateWidget({ ...config, options: { ...config.options, currentText: v } });
   const { send, error, setError } = useSendSignal(config);
+  const isFirstRender = useRef(true);
 
   // Re-apply the configured default whenever it changes in the config modal
   // -- same reasoning as SliderWidget's equivalent effect: otherwise a
   // widget already on screen wouldn't pick up a new default until reload.
+  // Skipped on mount so remounting on a page switch doesn't clobber the
+  // persisted currentText with the default every time.
   useEffect(() => {
+    if (isFirstRender.current) {
+      isFirstRender.current = false;
+      return;
+    }
     setText(defaultText);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [defaultText]);

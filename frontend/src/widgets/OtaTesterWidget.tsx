@@ -1,11 +1,12 @@
 import { useEffect, useRef, useState } from 'react';
 import { api } from '../api/client';
-import type { OtaTesterCase, OtaTesterStatus, OtaTesterStepInfo } from '../types';
+import { useApp } from '../store/appContext';
+import type { OtaTesterCase, OtaTesterStatus, OtaTesterStepInfo, WidgetConfig } from '../types';
 import { SERVICE_DISPLAY_NAMES } from '../types';
 import { UdsGlobalControls, getGlobalStminOverride } from './UdsGlobalControls';
 
 interface Props {
-  config: { id: string; title: string; options: Record<string, unknown> };
+  config: WidgetConfig;
 }
 
 const STATE_LABELS: Record<string, string> = {
@@ -73,13 +74,20 @@ interface ManifestEntry {
   kind: 'hook' | 'testBlock';
 }
 
-export default function OtaTesterWidget({ config: _config }: Props) {
+export default function OtaTesterWidget({ config }: Props) {
+  const { updateWidget } = useApp();
   const [status, setStatus] = useState<OtaTesterStatus | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [folderLoading, setFolderLoading] = useState(false);
   const [folderMsg, setFolderMsg] = useState<string | null>(null);
-  const [reqId, setReqId] = useState('18DA00F1');
-  const [respId, setRespId] = useState('18DA00F1');
+  // Persisted in config.options (not local useState) so the request/response
+  // CAN IDs survive switching to another page and back -- App.tsx only
+  // mounts the active page's widgets, so a value kept only in local
+  // useState resets on remount.
+  const reqId = String(config.options.reqId ?? '18DA00F1');
+  const respId = String(config.options.respId ?? '18DA00F1');
+  const setReqId = (v: string) => updateWidget({ ...config, options: { ...config.options, reqId: v } });
+  const setRespId = (v: string) => updateWidget({ ...config, options: { ...config.options, respId: v } });
   const [expandedCases, setExpandedCases] = useState<Set<string>>(new Set());
   const [stepsByCase, setStepsByCase] = useState<Record<string, OtaTesterStepInfo[]>>({});
   const [stepsLoading, setStepsLoading] = useState<Set<string>>(new Set());

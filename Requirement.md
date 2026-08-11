@@ -2101,3 +2101,124 @@ CAN 신호 차트(`CanSignalChart`, 다른 데이터소스라 이번엔 통합�
 **사용자가 다음 실사용 시 두 위젯 모두(특히 CanAudioLatencyWidget의 공유 X뷰
 줌/팬이 CAN 차트와 함께 움직이는지, AudioMonitorWidget의 X축 눈금이 스트림
 시작부터 계속 증가하는지) 확인해줄 것을 권장한다.**
+
+## "CAN-오디오 지연 확인" 위젯: X축 시간 간격 측정용 difference cursor 추가
+(2026-08-11, 사용자 요청)
+
+`frontend/src/widgets/DiffCursor.ts`(신규)에 두 세로선 커서(A/B, 색상 구분)의
+드로잉·hit-test(가장 가까운 커서 찾기)·Δt 포맷 로직을 뽑아, `CanSignalChart`(CAN
+신호, 로컬)와 `AudioWaveformChart`(오디오 채널, 공용 -- `cursor` prop이
+optional이라 `AudioMonitorWidget.tsx`는 전달하지 않아 영향 없음) 양쪽 차트가
+같은 로직을 공유하게 했다.
+
+- 상태(`cursorMode`/`cursorA`/`cursorB`)는 부모(`CanAudioLatencyWidget`)가
+  소유하고 `sharedXRef`처럼 두 차트 종류 모두에 prop으로 내려준다 -- CAN
+  차트와 오디오 차트가 X축을 공유하는 것과 같은 이유로, 커서도 공유해야 두
+  차트에서 같은 위치에 그려진다.
+- 툴바에 "커서 ON/OFF" 토글 버튼 + 켜져 있을 때만 `Δ` 델타 표시(`fmtDelta`,
+  1초 미만은 ms, 이상은 초 3자리).
+- 커서 모드가 켜져 있으면 차트 드래그가 팬(pan) 대신 가장 가까운 커서를
+  옮긴다(휠 줌은 그대로 동작 -- 확대해서 미세 조정 가능). 처음 켤 때 두
+  커서가 모두 안 잡혀 있으면 현재 뷰의 1/3, 2/3 지점에 기본 배치. 꺼도
+  값은 유지(다시 켜면 그 자리에 그대로) -- 실수로 토글해도 애써 맞춘
+  위치를 잃지 않게.
+- 커서 이동은 공유 X뷰와 동일한 `notifyChange()`(→ `xVersion` bump) 경로로
+  재드로잉을 트리거해, 팬/줌과 같은 기존 메커니즘을 그대로 재사용했다(새
+  redraw 경로를 따로 안 만듦).
+
+검증: 프론트 `tsc -b --noEmit`/`vite build`/`oxlint` 클린(새 경고 없음, 기존
+`only-export-components` 경고만 그대로). 백엔드는 무관, 227개 테스트 그대로
+통과. 브라우저 자동화 도구가 없어 실제 드래그로 커서를 옮기고 Δt가 정확히
+계산되는지는 코드 검토로만 확인했다 -- 사용자가 다음 실사용 시 확인해줄 것을
+권장한다.
+
+## ISO-TP 수신측: Block Size 기반 후속 Flow Control 프레임 미전송 버그 수정
+(2026-08-11, 사용자 요청 — 최초 설명은 부정확했으나 재확인 후 정확한 버그 특정)
+
+사용자가 처음엔 "8바이트 초과 전송에 flow control이 구현 안 됨"이라고 했으나,
+`isotp_service.py`의 SEND 경로(그리고 RECEIVE 경로 모두)가 이미 완전히 구현·
+테스트(기존 18개 통과)돼 있어 재확인을 요청했다. 정확한 설명: "전송 후 수신되는
+데이터를 8바이트(= 1 CAN 프레임) 수신 후 FC message를 보내야 하는데 보내지
+않고 있다."
+
+**실제 버그(수신측)**: `receive()`가 First Frame을 받은 직후 Flow Control을
+**딱 한 번만** 보내고, 그 뒤로는 `fc_block_size`가 몇이든 상관없이 다시는 보내지
+않았다. ISO 15765-2 기준 Block Size가 0(무제한)이 아니면 송신측은 그 개수만큼
+Consecutive Frame을 보낸 뒤 반드시 다음 FC를 기다려야 하는데, 이 코드는 최초
+FC 이후 후속 FC를 전혀 안 보내니 그런 송신측은 첫 블록만 보내고 영원히 대기하게
+된다 — 사용자가 정확히 이 증상을 보고했다. (송신측 `send()`는 원래도 FC의
+block_size/STmin을 정상적으로 따르고 있었다 — 이건 반대쪽, 우리가 수신자 역할일
+때의 문제였다.)
+
+**수정**(`backend/isotp_service.py`): Consecutive Frame을 `fc_block_size`개
+받을 때마다(그리고 아직 남은 데이터가 있을 때만) 같은 값으로 새 FC(CTS)를
+보내도록 루프에 `block_count` 카운터를 추가했다. `fc_block_size == 0`(기본값,
+"무제한")일 때는 조건이 전혀 발동하지 않아 기존 동작(최초 1회 FC만) 그대로다 --
+100% 하위 호환.
+
+검증: `tests/test_isotp_service.py`에 신규 테스트 2개 —
+`test_receive_sends_follow_up_fc_after_each_block`(21바이트, block_size=1로
+받아 CF마다 새 FC가 실제로 오는지 확인 — 고치기 전엔 두 번째 FC가 영원히 안 와서
+이 테스트가 타임아웃으로 실패했을 것), `test_receive_bs_zero_sends_only_the_initial_fc`
+(기본값 0에서는 여전히 후속 FC가 전혀 안 감을 확인, 기존 테스트들과의 하위
+호환성 보증). 백엔드 전체 229개 테스트 통과.
+
+**참고로 확인한 사실**: 이 앱의 실제 호출 지점(`uds_download_manager.py`,
+`ota_tester_download_manager.py`)은 현재 `fc_block_size`를 지정하지 않아 항상
+기본값 0(무제한)을 쓴다 — STmin은 이미 위젯에서 오버라이드 가능(`_get_fc_stmin()`/
+`global_stmin_tx`)하지만 Block Size는 그런 오버라이드 경로가 아예 없다. 사용자의
+실제 ECU가 (우리가 무제한이라고 알려줘도) 자체적으로 블록 단위 페이싱을 요구하는
+것으로 보이는데, 그렇다면 이번 수정만으로는 아직 재현할 방법이 없다 — STmin과
+동일한 패턴의 "Block Size 오버라이드" 위젯 컨트롤을 추가할지 사용자 확인 필요
+(다음 턴에서 결정).
+
+## 페이지 전환 시 위젯 값 초기화 버그 일괄 수정 (2026-08-11, 사용자 요청 —
+"모든 위젯 다 고침" 선택)
+
+App.tsx는 `activePage.widgets`만 렌더링/마운트한다(비활성 페이지의 위젯은 DOM에서
+완전히 unmount됨) -- 그래서 위젯이 `config.options`(위젯마다 유지되는, 마운트
+여부와 무관한 상태)가 아니라 컴포넌트 로컬 `useState`에만 값을 들고 있으면 다른
+페이지로 갔다가 돌아왔을 때 그 값이 초기값으로 리셋된다. 조사 서브에이전트로
+`frontend/src/widgets/` 전체를 훑어 실제로 이 버그가 있는 위젯을 특정했다
+(`IsoTpBox.tsx`/`TxBox.tsx`/`CanAudioLatencyWidget.tsx` 등은 이미 `config.options`/
+`config.binding`에 저장하는 기존 패턴을 쓰고 있어 문제없음으로 확인됨). 사용자가
+"모든 위젯 다 고침(추천)"을 선택해 아래 6개 파일을 전부 수정했다.
+
+- **`controls.tsx`**: `CheckboxWidget.checked`, `DropdownWidget.selected`,
+  `SliderWidget`의 현재 슬라이더 위치(`config.options.currentValue`, 기존
+  `default`와 분리 — 드래그 중 매 틱마다 config를 쓰지 않고 `flush()`(pointerup/
+  키보드 스텝)에서만 저장해 퍼포먼스 문제 없음), `ManualValueWidget`의 입력
+  텍스트(`config.options.currentText`) — 전부 `config.options`로 이전. 콘피그
+  모달에서 `default`를 바꾸면 즉시 반영되던 기존 동작은 "첫 렌더(마운트)에는
+  건드리지 않고, 이후 실제 변경에만 반응"하도록 `isFirstRender` ref로 유지.
+- **`MultiControls.tsx`**: 같은 문제가 그리드 셀 단위로 있었다 —
+  `MultiCell`(`types.ts`)에 `checked`/`selectedRaw`/`sliderCurrent`/`inputCurrent`
+  필드를 추가해 `MultiCheckboxWidget`/`MultiDropdownWidget`/`MultiSliderWidget`/
+  `MultiManualValueWidget`이 로컬 `Record<number,...>` 대신 이 필드들을
+  `updateCell()`로 저장하도록 변경.
+- **`PowerControlWidget.tsx`**: 원래 `config`를 완전히 버리고(`_: {config}`) 12개
+  숫자 입력 필드(배터리 전압/전류, On/Off 반복 6개, 스윕 4개)를 전부 로컬
+  `useState`로만 들고 있었다 — 전부 `config.options`로 이전.
+- **`ReplayBox.tsx`**: `mode`(Pass/Stop), `selectedIds`(필터 메시지 선택)를
+  `config.options`로 이전.
+- **`OtaTesterWidget.tsx`**: `reqId`/`respId`(요청/응답 CAN ID)를
+  `config.options`로 이전. `Props.config`의 로컬 축소 타입을 실제 `WidgetConfig`로
+  교체(런타임에는 이미 그 타입의 객체가 전달되고 있었음).
+- **`UdsSwdlWidget.tsx`**(가장 큰 작업): `selectedSteps`(슬롯별 체크된 스텝,
+  `Set` 그대로는 `JSON.stringify`(레이아웃 저장 시 실제로 발생)에서 깨지므로
+  `config.options`에는 배열로 저장하고 컴포넌트 안에서만 `Set`으로 변환),
+  `slots[].paramOverrides`(스텝별 파라미터 오버라이드)를 `config.options`로
+  이전. 부수적으로, 조사에서 같이 발견된 관련 문제 — 마운트 시 백엔드 상태를
+  다시 가져오는 로직이 아예 없어서(⟳ 버튼을 눌러야만 갱신) 이미 백엔드에 XML/BIN
+  이 로드돼 있어도 페이지 전환 후 빈 화면으로 보이는 문제 — 도 같이 고쳤다:
+  마운트 시 `udsStatus()` + (procedure_loaded인 슬롯마다) `udsSteps()`를 자동
+  호출.
+
+검증: 프론트 `tsc -b --noEmit`/`vite build`/`oxlint` 클린(새 경고 없음, 기존
+`only-export-components` 경고만 그대로). 백엔드는 무관, 229개 테스트 그대로
+통과. 브라우저 자동화 도구가 없어 실제로 페이지를 전환했다가 돌아왔을 때 값이
+유지되는지는 코드 검토로만 확인했다 -- 사용자가 다음 실사용 시 6개 위젯 전부
+확인해줄 것을 권장한다. GraphWidget/AudioMonitorWidget/CanAudioLatencyWidget의
+차트 확대/축소 창 크기(`xWindowMs`)와 TxBox의 TX/RX 필터는 audit에서 "낮은
+우선순위(설정이 아니라 뷰 상태에 더 가까움)"로 분류돼 이번엔 건드리지 않았다
+-- 필요하면 별도 요청.

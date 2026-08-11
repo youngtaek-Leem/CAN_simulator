@@ -1,12 +1,13 @@
 import { useEffect, useRef, useState } from 'react';
 import { api } from '../api/client';
 import { canStore } from '../store/canStore';
+import { useApp } from '../store/appContext';
 import { UdsGlobalControls, getGlobalStminOverride } from './UdsGlobalControls';
-import type { UdsDownloadStatus, UdsStepInfo } from '../types';
+import type { UdsDownloadStatus, UdsStepInfo, WidgetConfig } from '../types';
 import { SERVICE_DISPLAY_NAMES } from '../types';
 
 interface Props {
-  config: { id: string; title: string; options: Record<string, unknown> };
+  config: WidgetConfig;
 }
 
 const NUM_SLOTS = 3;
@@ -38,18 +39,17 @@ interface SlotState {
   binFile: File | null;
   status: UdsDownloadStatus | null;
   steps: UdsStepInfo[] | null;
-  paramOverrides: Record<string, Record<string, string>>;
   uploading: boolean;
   error: string | null;
 }
 
-export default function UdsSwdlWidget({ config: _config }: Props) {
+export default function UdsSwdlWidget({ config }: Props) {
+  const { updateWidget } = useApp();
   const makeEmptySlot = (): SlotState => ({
     xmlFile: null,
     binFile: null,
     status: null,
     steps: null,
-    paramOverrides: {},
     uploading: false,
     error: null,
   });
@@ -57,12 +57,37 @@ export default function UdsSwdlWidget({ config: _config }: Props) {
   const [slots, setSlots] = useState<SlotState[]>(() =>
     Array.from({ length: NUM_SLOTS }, () => makeEmptySlot()),
   );
-  // Per-slot selected step indices — using step index (not service name) to distinguish duplicate steps
-  const [selectedSteps, setSelectedSteps] = useState<Record<number, Set<number>>>({
-    0: new Set(),
-    1: new Set(),
-    2: new Set(),
-  });
+
+  // Per-slot selected step indices and parameter overrides -- persisted in
+  // config.options (not local useState) so they survive switching to
+  // another page and back; App.tsx only mounts the active page's widgets,
+  // so a value kept only in local useState resets on remount. Stored as
+  // plain arrays/objects (not Set, which doesn't survive JSON.stringify)
+  // since config.options is also what gets serialized when saving a layout.
+  const selectedStepsArr = (config.options.selectedSteps as Record<number, number[]> | undefined) ?? {};
+  const selectedSteps: Record<number, Set<number>> = {
+    0: new Set(selectedStepsArr[0] ?? []),
+    1: new Set(selectedStepsArr[1] ?? []),
+    2: new Set(selectedStepsArr[2] ?? []),
+  };
+  const setSelectedSteps = (
+    updater: (prev: Record<number, Set<number>>) => Record<number, Set<number>>,
+  ) => {
+    const next = updater(selectedSteps);
+    const nextArr: Record<number, number[]> = {};
+    for (let i = 0; i < NUM_SLOTS; i++) nextArr[i] = Array.from(next[i] ?? []);
+    updateWidget({ ...config, options: { ...config.options, selectedSteps: nextArr } });
+  };
+
+  const allParamOverrides =
+    (config.options.paramOverrides as Record<number, Record<string, Record<string, string>>> | undefined) ?? {};
+  const paramOverridesFor = (slotIdx: number) => allParamOverrides[slotIdx] ?? {};
+  const setSlotParamOverrides = (slotIdx: number, overrides: Record<string, Record<string, string>>) => {
+    updateWidget({
+      ...config,
+      options: { ...config.options, paramOverrides: { ...allParamOverrides, [slotIdx]: overrides } },
+    });
+  };
   const [globalError, setGlobalError] = useState<string | null>(null);
   const [autoLoadMsg, setAutoLoadMsg] = useState<string | null>(null);
   // Polling control: a single on/off flag. Turned on right before start, turned
@@ -76,6 +101,27 @@ export default function UdsSwdlWidget({ config: _config }: Props) {
   const [starting, setStarting] = useState(false);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const lastEventCountRef = useRef<Record<number, number>>({ 0: 0, 1: 0, 2: 0 });
+
+  // Restore status + steps on mount -- otherwise switching to another page
+  // and back (App.tsx only mounts the active page's widgets) shows every
+  // slot as blank/unloaded even though the backend still has the XML/binary
+  // loaded and remembers it, until the user manually clicks the ⟳ button.
+  useEffect(() => {
+    (async () => {
+      try {
+        const all = await api.udsStatus();
+        setSlots(prev => prev.map((s, i) => ({ ...s, status: all[i] || s.status })));
+        for (let i = 0; i < NUM_SLOTS; i++) {
+          if (!all[i]?.procedure_loaded) continue;
+          try {
+            const steps = await api.udsSteps(i);
+            setSlots(prev => prev.map((s, si) => (si === i ? { ...s, steps } : s)));
+          } catch { /* ignore -- this slot just stays without a step list */ }
+        }
+      } catch { /* ignore -- widget still usable, just starts from a blank state */ }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Poll status while `polling` is on -- also pipe CAN-SWDL events into the
   // shared TextDisplay activity log (canStore.activityLog). The loop turns
@@ -153,7 +199,7 @@ export default function UdsSwdlWidget({ config: _config }: Props) {
   };
 
   const handleDeselectAll = () => {
-    setSelectedSteps({ 0: new Set(), 1: new Set(), 2: new Set() });
+    setSelectedSteps(() => ({ 0: new Set(), 1: new Set(), 2: new Set() }));
   };
 
   const uploadXml = async (slotIdx: number) => {
@@ -178,14 +224,13 @@ export default function UdsSwdlWidget({ config: _config }: Props) {
         });
       }
 
-      setSlots(prev => prev.map((s, i) => {
-        if (i !== slotIdx) return s;
-        const mergedParams = { ...s.paramOverrides };
-        if (Object.keys(autoParams).length > 0) {
-          mergedParams['diagnosticSessionControl'] = { ...autoParams };
-        }
-        return { ...s, status: allStatus[i], steps, uploading: false, paramOverrides: mergedParams };
-      }));
+      if (Object.keys(autoParams).length > 0) {
+        setSlotParamOverrides(slotIdx, {
+          ...paramOverridesFor(slotIdx),
+          diagnosticSessionControl: { ...autoParams },
+        });
+      }
+      setSlots(prev => prev.map((s, i) => (i === slotIdx ? { ...s, status: allStatus[i], steps, uploading: false } : s)));
     } catch (e: unknown) {
       setSlots(prev => prev.map((s, i) => i === slotIdx ? { ...s, error: String(e instanceof Error ? e.message : e), uploading: false } : s));
     }
@@ -230,9 +275,8 @@ export default function UdsSwdlWidget({ config: _config }: Props) {
         arr.length === 0 ? [] :
         arr.length === totalSteps ? undefined :
         arr;
-      perSlotParams[idx] = slots[idx].paramOverrides && Object.keys(slots[idx].paramOverrides).length > 0
-        ? slots[idx].paramOverrides
-        : undefined;
+      const slotParams = paramOverridesFor(idx);
+      perSlotParams[idx] = Object.keys(slotParams).length > 0 ? slotParams : undefined;
       // Debug log: announce what we are about to run for this slot.
       const describe = arr.length === 0 ? '선택 없음(건너뜀)'
         : arr.length === totalSteps ? `전체 ${totalSteps}스텝`
@@ -280,13 +324,9 @@ export default function UdsSwdlWidget({ config: _config }: Props) {
   };
 
   const setParam = (slotIdx: number, svc: string, key: string, val: string) => {
-    setSlots(prev => prev.map((s, i) => {
-      if (i !== slotIdx) return s;
-      const overrides = { ...s.paramOverrides };
-      if (!overrides[svc]) overrides[svc] = {};
-      overrides[svc][key] = val;
-      return { ...s, paramOverrides: overrides };
-    }));
+    const overrides = { ...paramOverridesFor(slotIdx) };
+    overrides[svc] = { ...(overrides[svc] ?? {}), [key]: val };
+    setSlotParamOverrides(slotIdx, overrides);
   };
 
   // Running is driven by backend status (kept fresh by polling), not by a
@@ -367,14 +407,13 @@ export default function UdsSwdlWidget({ config: _config }: Props) {
                           });
                         }
 
-                        setSlots(prev => prev.map((s, si) => {
-                          if (si !== slotIdx) return s;
-                          const mergedParams = { ...s.paramOverrides };
-                          if (Object.keys(autoParams).length > 0) {
-                            mergedParams['diagnosticSessionControl'] = { ...autoParams };
-                          }
-                          return { ...s, steps, status: null, paramOverrides: mergedParams };
-                        }));
+                        // Fresh package load -- reset this slot's overrides rather than
+                        // merging with whatever a previously loaded package left behind.
+                        setSlotParamOverrides(
+                          slotIdx,
+                          Object.keys(autoParams).length > 0 ? { diagnosticSessionControl: { ...autoParams } } : {},
+                        );
+                        setSlots(prev => prev.map((s, si) => (si === slotIdx ? { ...s, steps, status: null } : s)));
                       }
                       if (newSlots[slotIdx].binFile) {
                         await api.udsUploadBinary(newSlots[slotIdx].binFile!, slotIdx);
@@ -517,7 +556,7 @@ export default function UdsSwdlWidget({ config: _config }: Props) {
                          // If there are multiple session types to choose from, show a dropdown
                          if (sessionTypes.length > 1) {
                            // Determine current selection
-                           const overrideVal = slot.paramOverrides[step.service]?.[`_sessionType_${stepIdx}`] ?? '';
+                           const overrideVal = paramOverridesFor(idx)[step.service]?.[`_sessionType_${stepIdx}`] ?? '';
                            // Check if a param override for _selectedSessionType exists (the actual type string)
                            return (
                              <div style={{ marginLeft: '14px', marginTop: '2px' }}>
@@ -562,7 +601,7 @@ export default function UdsSwdlWidget({ config: _config }: Props) {
                              }
                              // For skipTask/skipConfirm etc, still show as input
                              if (pk === 'skipTask' || pk === 'confirmPositiveResponse' || pk === 'skipTask') {
-                               const overrideVal = slot.paramOverrides[step.service]?.[pk] ?? '';
+                               const overrideVal = paramOverridesFor(idx)[step.service]?.[pk] ?? '';
                                const isModified = overrideVal !== '';
                                return (
                                  <div key={pk} style={{ display: 'flex', alignItems: 'center', gap: '3px', fontSize: '9px', marginTop: '1px' }}>
@@ -585,7 +624,7 @@ export default function UdsSwdlWidget({ config: _config }: Props) {
                                );
                              }
                              // Regular params (memoryAddress, etc)
-                             const overrideVal = slot.paramOverrides[step.service]?.[pk] ?? '';
+                             const overrideVal = paramOverridesFor(idx)[step.service]?.[pk] ?? '';
                              const isModified = overrideVal !== '';
                              return (
                                <div key={pk} style={{ display: 'flex', alignItems: 'center', gap: '3px', fontSize: '9px', marginTop: '1px' }}>

@@ -134,11 +134,10 @@ export function MultiCheckboxWidget({ config }: { config: WidgetConfig }) {
   const { rows, cols, cells } = getGrid(config);
   const updateCell = useCellUpdater(config);
   const [editingIndex, setEditingIndex] = useState<number | null>(null);
-  const [checkedState, setCheckedState] = useState<Record<number, boolean>>({});
   const [error, setError] = useState<string | null>(null);
 
   const toggle = async (i: number, cell: MultiCell, checked: boolean) => {
-    setCheckedState((s) => ({ ...s, [i]: checked }));
+    updateCell(i, { ...cell, checked });
     if (!cell.binding?.signal) return;
     const value = checked ? (cell.onValue ?? 1) : (cell.offValue ?? 0);
     try {
@@ -163,13 +162,13 @@ export function MultiCheckboxWidget({ config }: { config: WidgetConfig }) {
               <label className="check-label multi-cell-check">
                 <input
                   type="checkbox"
-                  checked={checkedState[i] ?? false}
+                  checked={cell.checked ?? false}
                   disabled={!cell.binding?.signal}
                   onChange={(e) => toggle(i, cell, e.target.checked)}
                   onKeyDown={(e) => {
                     if (e.key === ' ') {
                       e.preventDefault();
-                      toggle(i, cell, !(checkedState[i] ?? false));
+                      toggle(i, cell, !(cell.checked ?? false));
                     }
                   }}
                 />
@@ -211,11 +210,10 @@ export function MultiDropdownWidget({ config }: { config: WidgetConfig }) {
   const { rows, cols, cells } = getGrid(config);
   const updateCell = useCellUpdater(config);
   const [editingIndex, setEditingIndex] = useState<number | null>(null);
-  const [selected, setSelected] = useState<Record<number, string>>({});
   const [error, setError] = useState<string | null>(null);
 
   const select = async (i: number, cell: MultiCell, raw: string) => {
-    setSelected((s) => ({ ...s, [i]: raw }));
+    updateCell(i, { ...cell, selectedRaw: raw });
     if (!cell.binding?.signal || raw === '') return;
     try {
       await canStore.sendSignal(cell.binding.message, { [cell.binding.signal]: Number(raw) });
@@ -239,7 +237,7 @@ export function MultiDropdownWidget({ config }: { config: WidgetConfig }) {
             <div className="multi-cell" key={i}>
               <select
                 className="multi-cell-dropdown"
-                value={selected[i] ?? ''}
+                value={cell.selectedRaw ?? ''}
                 disabled={!choices}
                 onChange={(e) => select(i, cell, e.target.value)}
               >
@@ -320,9 +318,14 @@ export function MultiSliderWidget({ config }: { config: WidgetConfig }) {
     }
   };
 
+  // Persists the settled position into cell.sliderCurrent (not just local
+  // `values` state) so it survives switching to another page and back --
+  // only here, not in onChange, so dragging doesn't trigger a config write
+  // (and parent re-render) on every single pointermove tick.
   const flush = (i: number, cell: MultiCell, v: number) => {
     lastSent.current[i] = performance.now();
     void send(cell, v);
+    updateCell(i, { ...cell, sliderCurrent: v });
   };
 
   return (
@@ -336,7 +339,9 @@ export function MultiSliderWidget({ config }: { config: WidgetConfig }) {
           const bound = findSignal(dbc, cell.binding);
           const { min, max, step } = range(cell);
           const defaultValue = Math.min(max, Math.max(min, cell.sliderDefault ?? min));
-          const value = values[i] ?? defaultValue;
+          const persistedValue =
+            cell.sliderCurrent !== undefined ? Math.min(max, Math.max(min, cell.sliderCurrent)) : defaultValue;
+          const value = values[i] ?? persistedValue;
           return (
             <div className="multi-cell multi-cell-slider" key={i}>
               <div className="slider-header">
@@ -393,10 +398,12 @@ export function MultiManualValueWidget({ config }: { config: WidgetConfig }) {
   const { rows, cols, cells } = getGrid(config);
   const updateCell = useCellUpdater(config);
   const [editingIndex, setEditingIndex] = useState<number | null>(null);
-  const [texts, setTexts] = useState<Record<number, string>>({});
   const [errors, setErrors] = useState<Record<number, string>>({});
 
-  const textFor = (i: number, cell: MultiCell) => texts[i] ?? cell.inputDefault ?? '';
+  // Persisted in cell.inputCurrent (not local useState) so typed text
+  // survives switching to another page and back.
+  const textFor = (_i: number, cell: MultiCell) => cell.inputCurrent ?? cell.inputDefault ?? '';
+  const setTextFor = (i: number, cell: MultiCell, v: string) => updateCell(i, { ...cell, inputCurrent: v });
 
   const submit = async (i: number, cell: MultiCell) => {
     const bound = findSignal(dbc, cell.binding);
@@ -449,7 +456,7 @@ export function MultiManualValueWidget({ config }: { config: WidgetConfig }) {
                   value={textFor(i, cell)}
                   placeholder="0x1A / 0b0110 / 26"
                   disabled={!cell.binding?.signal}
-                  onChange={(e) => setTexts((t) => ({ ...t, [i]: e.target.value }))}
+                  onChange={(e) => setTextFor(i, cell, e.target.value)}
                   onKeyDown={(e) => {
                     if (e.key === 'Enter') void submit(i, cell);
                   }}
