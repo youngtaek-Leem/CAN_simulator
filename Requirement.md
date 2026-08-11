@@ -2222,3 +2222,42 @@ App.tsx는 `activePage.widgets`만 렌더링/마운트한다(비활성 페이지
 차트 확대/축소 창 크기(`xWindowMs`)와 TxBox의 TX/RX 필터는 audit에서 "낮은
 우선순위(설정이 아니라 뷰 상태에 더 가까움)"로 분류돼 이번엔 건드리지 않았다
 -- 필요하면 별도 요청.
+
+## ISO-TP 전송 위젯에 "응답 대기" 기능 추가 (2026-08-11, 사용자 요청 — FC가
+전혀 안 나간다는 재보고를 조사한 결과 버그가 아니라 누락된 기능으로 확인)
+
+사용자가 "시뮬레이터에서 FC를 한번도 안 보낸다"며 실제 버스 트레이스(`783: 03 22
+F1 C1 ...` 요청 → `78B: 10 23 62 F1 C1 ...` ECU의 멀티프레임 응답)를 제시했다.
+조사 결과 버그가 아니라: **"ISO-TP 전송" 위젯(`IsoTpBox.tsx`)이 순수 송신
+전용**이라 `/api/isotp/send`만 호출하고 응답을 기다리거나 수신측 역할(FC 발송
+포함)을 하는 로직이 전혀 없었다 — `isotp_service.receive()`는 UDS SWDL/OTA
+Tester의 내부 시퀀스에서만 쓰이고, 수동 ISO-TP 전송 경로에는 아예 연결돼 있지
+않았다. 그래서 사용자가 수동으로 UDS 요청을 보내고 ECU 응답을 관찰하려던
+시나리오에서는 애초에 FC를 보낼 코드 자체가 실행되지 않았다.
+
+**추가한 기능**: "응답 대기" 토글 — 켜면 전송 후 지정한 응답 ID에서 메시지를
+기다리고, Single Frame이면 즉시, Multi Frame이면 `isotp_service.receive()`로
+Flow Control을 보내며 Consecutive Frame을 수집해 재조립한 뒤 화면에 표시한다.
+
+- **`backend/main.py`**: `IsoTpSendRequest`에 `resp_id`(옵션, 기본 None=기존
+  송신 전용 동작 그대로), `resp_timeout_ms`(기본 2000), `resp_fc_block_size`(기본
+  0), `resp_fc_stmin`(기본 0) 추가. `resp_id`가 있으면 `send()` 후 `receive()`를
+  호출해 결과에 `response`(hex) 또는 `response_error`를 덧붙인다.
+- **`frontend/src/api/client.ts`**: `isotpSend()` 옵션에 위 4개 필드 추가,
+  반환 타입에 `response`/`response_error` 추가.
+- **`frontend/src/widgets/IsoTpBox.tsx`**: "응답 대기" 체크박스 + 켜졌을 때만
+  보이는 "응답 ID"/"응답 타임아웃"/"응답 FC Block Size"(바로 위에서 고친 수신측
+  Block Size 버그를 이 위젯에서 직접 테스트할 수 있도록 노출) 필드, 응답 hex
+  표시. 전부 `config.options`에 저장(기존 IsoTpBox 패턴 그대로 유지).
+
+검증: `backend/tests/test_api.py`에 신규 테스트 3개 —
+`test_isotp_send_with_response_wait_single_frame`(SF 응답 즉시 반환),
+`test_isotp_send_with_response_wait_multi_frame_sends_flow_control`(정확히
+사용자가 보고한 시나리오 재현: 21바이트 멀티프레임 응답에 실제로 FC가 나가고
+재조립되는지 확인), `test_isotp_send_response_wait_timeout_reports_response_error`
+(응답 없을 때 `response_error`로 우아하게 처리). 백엔드 전체 232개 테스트 통과.
+프론트 `tsc -b --noEmit`/`vite build`/`oxlint` 클린.
+
+브라우저 자동화 도구가 없어 실제 하드웨어로 요청→응답→FC 왕복을 확인하지는
+못했다 -- 사용자가 다음 실사용 시(원래 재현했던 것과 같은 시나리오,
+`22 F1 C1` 같은 ReadDataByIdentifier 요청) 확인해줄 것을 권장한다.

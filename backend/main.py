@@ -694,12 +694,22 @@ class IsoTpSendRequest(BaseModel):
     is_extended_id: bool = False
     fc_timeout_ms: int = 1000
     max_wait_frames: int = 10
+    # Optional request/response mode: after sending, also wait for and
+    # reassemble a reply on resp_id (used as isotp_service.receive()'s rx_id,
+    # with this request's tx_id as the id we send our own Flow Control back
+    # on) -- see Requirement.md's ISO-TP widget "응답 대기" entry. None (the
+    # default) preserves the original send-only behavior.
+    resp_id: Optional[int] = None
+    resp_timeout_ms: int = 2000
+    resp_fc_block_size: int = 0
+    resp_fc_stmin: int = 0x00
 
 
 @app.post("/api/isotp/send")
 def isotp_send(req: IsoTpSendRequest):
-    # blocking (waits for Flow Control) -- runs in FastAPI's threadpool since
-    # this handler is a plain `def`, so it does not block the event loop.
+    # blocking (waits for Flow Control, and optionally the response) -- runs
+    # in FastAPI's threadpool since this handler is a plain `def`, so it does
+    # not block the event loop.
     _require_running()
     if not can_manager.connected:
         raise HTTPException(status_code=400, detail="CAN bus is not connected")
@@ -711,7 +721,7 @@ def isotp_send(req: IsoTpSendRequest):
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=f"잘못된 hex 데이터: {exc}")
     try:
-        return isotp_service.send(
+        result = isotp_service.send(
             can_manager,
             req.tx_id,
             req.fc_id,
@@ -722,6 +732,23 @@ def isotp_send(req: IsoTpSendRequest):
         )
     except isotp_service.IsoTpError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+
+    if req.resp_id is not None:
+        try:
+            response = isotp_service.receive(
+                can_manager,
+                req.resp_id,
+                req.tx_id,
+                timeout_s=req.resp_timeout_ms / 1000.0,
+                is_extended_id=req.is_extended_id,
+                fc_stmin=req.resp_fc_stmin,
+                fc_block_size=req.resp_fc_block_size,
+            )
+            result["response"] = response.hex(" ").upper()
+        except isotp_service.IsoTpError as exc:
+            result["response_error"] = str(exc)
+
+    return result
 
 
 # ---- Replay -------------------------------------------------------------

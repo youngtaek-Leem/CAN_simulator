@@ -107,8 +107,28 @@ export const api = {
     tx_id: number,
     fc_id: number,
     data: string,
-    opts?: { is_extended_id?: boolean; fc_timeout_ms?: number; max_wait_frames?: number },
-  ) => post('/api/isotp/send', { tx_id, fc_id, data, ...opts }),
+    opts?: {
+      is_extended_id?: boolean;
+      fc_timeout_ms?: number;
+      max_wait_frames?: number;
+      // "응답 대기": after sending, also wait for and reassemble a reply on
+      // resp_id (acting as ISO-TP receiver of that reply, including sending
+      // its own Flow Control -- previously nothing in the app did this for
+      // a manually-sent request, see Requirement.md).
+      resp_id?: number;
+      resp_timeout_ms?: number;
+      resp_fc_block_size?: number;
+      resp_fc_stmin?: number;
+    },
+  ) =>
+    post<{
+      frame_type: string;
+      frames_sent: number;
+      bytes_sent: number;
+      duration_ms: number;
+      response?: string;
+      response_error?: string;
+    }>('/api/isotp/send', { tx_id, fc_id, data, ...opts }),
 
   uploadReplay: (file: File) => upload('/api/replay/upload', file),
   replayStart: (mode: 'pass' | 'stop', frame_ids: number[]) =>

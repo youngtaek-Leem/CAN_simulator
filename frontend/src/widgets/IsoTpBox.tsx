@@ -39,6 +39,10 @@ interface IsoTpOptions {
   dataHex?: string;
   isExtended?: boolean;
   fcTimeoutMs?: number;
+  waitForResponse?: boolean;
+  respId?: string;
+  respTimeoutMs?: number;
+  respFcBlockSize?: number;
 }
 
 export function IsoTpBox({ config }: { config: WidgetConfig }) {
@@ -46,6 +50,7 @@ export function IsoTpBox({ config }: { config: WidgetConfig }) {
   const opts = config.options as IsoTpOptions;
   const [sending, setSending] = useState(false);
   const [result, setResult] = useState<string | null>(null);
+  const [response, setResponse] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const txId = opts.txId ?? '783';
@@ -53,6 +58,14 @@ export function IsoTpBox({ config }: { config: WidgetConfig }) {
   const dataHex = opts.dataHex ?? '';
   const isExtended = opts.isExtended ?? false;
   const fcTimeoutMs = opts.fcTimeoutMs ?? 1000;
+  // "응답 대기": after sending, also wait for and reassemble a reply on
+  // respId, sending our own Flow Control if it's multi-frame -- previously
+  // this widget only ever sent, never listened for or flow-controlled a
+  // response at all (see Requirement.md).
+  const waitForResponse = opts.waitForResponse ?? false;
+  const respId = opts.respId ?? '78B';
+  const respTimeoutMs = opts.respTimeoutMs ?? 2000;
+  const respFcBlockSize = opts.respFcBlockSize ?? 0;
 
   const setOpt = (patch: Partial<IsoTpOptions>) =>
     updateWidget({ ...config, options: { ...config.options, ...patch } });
@@ -60,6 +73,7 @@ export function IsoTpBox({ config }: { config: WidgetConfig }) {
   const dataBytes = parseHexBytes(dataHex);
   const txIdNum = txId.trim() ? parseInt(txId, 16) : NaN;
   const fcIdNum = fcId.trim() ? parseInt(fcId, 16) : NaN;
+  const respIdNum = respId.trim() ? parseInt(respId, 16) : NaN;
   const needsFc = (dataBytes?.length ?? 0) > SF_MAX_LEN;
   const canSend =
     !sending &&
@@ -67,22 +81,33 @@ export function IsoTpBox({ config }: { config: WidgetConfig }) {
     dataBytes.length > 0 &&
     Number.isInteger(txIdNum) &&
     txIdNum >= 0 &&
-    (!needsFc || (Number.isInteger(fcIdNum) && fcIdNum >= 0));
+    (!needsFc || (Number.isInteger(fcIdNum) && fcIdNum >= 0)) &&
+    (!waitForResponse || (Number.isInteger(respIdNum) && respIdNum >= 0));
 
   const send = async () => {
     if (!canSend) return;
     setSending(true);
     setError(null);
     setResult(null);
+    setResponse(null);
     try {
-      const r = (await api.isotpSend(txIdNum, needsFc ? fcIdNum : 0, dataHex, {
+      const r = await api.isotpSend(txIdNum, needsFc ? fcIdNum : 0, dataHex, {
         is_extended_id: isExtended,
         fc_timeout_ms: fcTimeoutMs,
-      })) as { frame_type: string; frames_sent: number; bytes_sent: number; duration_ms: number };
+        ...(waitForResponse
+          ? {
+              resp_id: respIdNum,
+              resp_timeout_ms: respTimeoutMs,
+              resp_fc_block_size: respFcBlockSize,
+            }
+          : {}),
+      });
       setResult(
         `${r.frame_type === 'single' ? 'Single Frame' : 'Multi Frame'} 전송 완료 — ` +
           `${r.frames_sent}프레임, ${r.bytes_sent}바이트, ${r.duration_ms}ms`,
       );
+      if (r.response !== undefined) setResponse(r.response);
+      else if (r.response_error !== undefined) setError(`응답 수신 실패: ${r.response_error}`);
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -141,6 +166,52 @@ export function IsoTpBox({ config }: { config: WidgetConfig }) {
         />
       </label>
       <div className="isotp-row">
+        <label className="toggle">
+          <input
+            type="checkbox"
+            checked={waitForResponse}
+            onChange={(e) => setOpt({ waitForResponse: e.target.checked })}
+          />
+          응답 대기
+        </label>
+        {waitForResponse && (
+          <>
+            <label className="isotp-field">
+              응답 ID (hex)
+              <input
+                className="mono"
+                value={respId}
+                placeholder="78B"
+                onChange={(e) => setOpt({ respId: e.target.value })}
+              />
+            </label>
+            <label className="isotp-field isotp-field-narrow">
+              응답 타임아웃(ms)
+              <input
+                type="number"
+                min={100}
+                step={100}
+                value={respTimeoutMs}
+                onChange={(e) => setOpt({ respTimeoutMs: Number(e.target.value) })}
+              />
+            </label>
+            <label
+              className="isotp-field isotp-field-narrow"
+              title="응답이 여러 프레임일 때 이 값(개)마다 새 Flow Control을 보냄 (0 = 무제한, 한 번만 보냄)"
+            >
+              응답 FC Block Size
+              <input
+                type="number"
+                min={0}
+                step={1}
+                value={respFcBlockSize}
+                onChange={(e) => setOpt({ respFcBlockSize: Math.max(0, Number(e.target.value)) })}
+              />
+            </label>
+          </>
+        )}
+      </div>
+      <div className="isotp-row">
         <span className="hint">
           {dataBytes === null ? '잘못된 hex 문자열입니다' : framePreview(dataBytes.length)}
         </span>
@@ -150,6 +221,11 @@ export function IsoTpBox({ config }: { config: WidgetConfig }) {
         </button>
       </div>
       {result && <div className="isotp-result ok">{result}</div>}
+      {response && (
+        <div className="isotp-result ok">
+          응답: <span className="mono">{response}</span>
+        </div>
+      )}
       {error && <div className="error">{error}</div>}
     </div>
   );

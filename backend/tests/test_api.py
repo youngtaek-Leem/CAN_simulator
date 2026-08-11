@@ -181,6 +181,115 @@ def test_isotp_send_single_and_multi_frame():
             client.post("/api/disconnect")
 
 
+def test_isotp_send_with_response_wait_single_frame():
+    """resp_id turns the send-only endpoint into a request/response
+    round-trip: after sending, it also waits for and reassembles a reply on
+    resp_id -- this is the "응답 대기" feature added for manual ISO-TP testing
+    (the ISO-TP widget previously never received/flow-controlled a reply at
+    all, see Requirement.md)."""
+    with make_client() as client:
+        client.post("/api/connect", json={"interface": "virtual", "channel": "t_api_isotp_resp1"})
+        peer = can.Bus(interface="virtual", channel="t_api_isotp_resp1")
+        try:
+            def responder():
+                m = peer.recv(timeout=1.0)
+                assert m is not None and m.data[:4] == bytes([0x03, 0x22, 0xF1, 0xC1])
+                peer.send(
+                    can.Message(
+                        arbitration_id=0x78B,
+                        data=bytes([0x03, 0x62, 0xF1, 0xC1, 0, 0, 0, 0]),
+                        is_extended_id=False,
+                    )
+                )
+
+            t = threading.Thread(target=responder, daemon=True)
+            t.start()
+            r = client.post(
+                "/api/isotp/send",
+                json={
+                    "tx_id": 0x783,
+                    "fc_id": 0x78B,
+                    "data": "22 F1 C1",
+                    "resp_id": 0x78B,
+                    "resp_timeout_ms": 1000,
+                },
+            )
+            t.join(timeout=2)
+            assert r.status_code == 200
+            body = r.json()
+            assert body["frame_type"] == "single"
+            assert body["response"] == "62 F1 C1"
+            assert "response_error" not in body
+        finally:
+            peer.shutdown()
+            client.post("/api/disconnect")
+
+
+def test_isotp_send_with_response_wait_multi_frame_sends_flow_control():
+    """The actual bug being fixed: when the reply is multi-frame, this
+    endpoint (as ISO-TP receiver of the response) must itself send the Flow
+    Control frame(s) -- previously nothing in the app ever called receive()
+    for a manually-sent ISO-TP request, so no FC went out at all."""
+    with make_client() as client:
+        client.post("/api/connect", json={"interface": "virtual", "channel": "t_api_isotp_resp2"})
+        peer = can.Bus(interface="virtual", channel="t_api_isotp_resp2")
+        try:
+            data = bytes(range(1, 22))  # 21 bytes -> FF(6) + CF(7) + CF(7) + CF(1)
+            ff_frame = bytes([0x10 | ((len(data) >> 8) & 0x0F), len(data) & 0xFF]) + data[:6]
+
+            def responder():
+                req = peer.recv(timeout=1.0)
+                assert req is not None
+                peer.send(can.Message(arbitration_id=0x78B, data=ff_frame, is_extended_id=False))
+                fc = peer.recv(timeout=1.0)
+                assert fc is not None and fc.arbitration_id == 0x783 and (fc.data[0] & 0xF0) == 0x30
+                rest = data[6:]
+                peer.send(can.Message(arbitration_id=0x78B, data=bytes([0x21]) + rest[:7], is_extended_id=False))
+                peer.send(can.Message(arbitration_id=0x78B, data=bytes([0x22]) + rest[7:], is_extended_id=False))
+
+            t = threading.Thread(target=responder, daemon=True)
+            t.start()
+            r = client.post(
+                "/api/isotp/send",
+                json={
+                    "tx_id": 0x783,
+                    "fc_id": 0x78B,
+                    "data": "01",
+                    "resp_id": 0x78B,
+                    "resp_timeout_ms": 1000,
+                },
+            )
+            t.join(timeout=2)
+            assert r.status_code == 200
+            body = r.json()
+            assert body["response"] == data.hex(" ").upper()
+        finally:
+            peer.shutdown()
+            client.post("/api/disconnect")
+
+
+def test_isotp_send_response_wait_timeout_reports_response_error():
+    with make_client() as client:
+        client.post("/api/connect", json={"interface": "virtual", "channel": "t_api_isotp_resp3"})
+        try:
+            r = client.post(
+                "/api/isotp/send",
+                json={
+                    "tx_id": 0x783,
+                    "fc_id": 0x78B,
+                    "data": "01",
+                    "resp_id": 0x78B,
+                    "resp_timeout_ms": 200,
+                },
+            )
+            assert r.status_code == 200
+            body = r.json()
+            assert "response" not in body
+            assert "response_error" in body
+        finally:
+            client.post("/api/disconnect")
+
+
 def test_isotp_send_requires_connection():
     with make_client() as client:
         r = client.post(
