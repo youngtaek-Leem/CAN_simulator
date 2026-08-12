@@ -98,19 +98,7 @@ function MessageDisplayCore({ config }: { config: WidgetConfig }) {
   const { dbc, updateWidget } = useApp();
   const mode = (config.options.viewMode as 'fixed' | 'trace') ?? 'fixed';
   const [paused, setPaused] = useState(false);
-  // Auto-freeze: same effect as `paused`, but triggered by the user
-  // scrolling away from the bottom in trace mode (TraceView's
-  // onScrollAway) instead of the explicit button -- canStore.trace prunes
-  // to the last 60s/30000 frames on every incoming batch regardless of
-  // what's on screen, so without this, history the user is actively
-  // scrolled up reading would keep vanishing out from under them. Kept
-  // separate from `paused` so scrolling back to the bottom can resume live
-  // tracking automatically (TraceView's onScrollToBottom), while a manual
-  // pause still only releases via the "재개" button.
-  const [autoFrozen, setAutoFrozen] = useState(false);
-  const frozen = paused || autoFrozen;
-  // frozen copy of the last-minute trace, captured when frozen (by either
-  // path) begins
+  // frozen copy of the last-minute trace, captured when pause is pressed
   const [snapshot, setSnapshot] = useState<RxFrame[]>([]);
   // IDs currently expanded to show their signal breakdown (fixed mode only)
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
@@ -120,21 +108,8 @@ function MessageDisplayCore({ config }: { config: WidgetConfig }) {
     updateWidget({ ...config, options: { ...config.options, viewMode: m } });
 
   const togglePause = () => {
-    if (!paused) {
-      setSnapshot([...canStore.trace]);
-      setAutoFrozen(false); // an explicit pause takes over from any auto-freeze
-    }
+    if (!paused) setSnapshot([...canStore.trace]);
     setPaused(!paused);
-  };
-
-  const handleScrollAway = () => {
-    if (frozen) return; // already frozen one way or another
-    setSnapshot([...canStore.trace]);
-    setAutoFrozen(true);
-  };
-  const handleScrollToBottom = () => {
-    if (!autoFrozen) return; // only auto-release what was auto-frozen; manual pause needs the button
-    setAutoFrozen(false);
   };
 
   const toggleExpanded = (id: number) =>
@@ -181,7 +156,7 @@ function MessageDisplayCore({ config }: { config: WidgetConfig }) {
         <button
           className={`small-btn ${paused ? 'primary' : ''}`}
           onClick={togglePause}
-          title="일시중지하면 최근 1분간 수신된 메시지를 스크롤로 확인할 수 있습니다 (스크롤 모드에서 위로 스크롤하면 자동으로도 정지됩니다)"
+          title="일시중지하면 최근 1분간 수신된 메시지를 스크롤로 확인할 수 있습니다"
         >
           {paused ? '▶ 재개' : '⏸ 일시중지'}
         </button>
@@ -195,21 +170,19 @@ function MessageDisplayCore({ config }: { config: WidgetConfig }) {
         <span className="hint">
           {paused
             ? `일시중지 — 최근 1분 ${snapshotRows.length}개`
-            : autoFrozen
-              ? `자동 정지(스크롤 중) — 최근 1분 ${snapshotRows.length}개`
-              : mode === 'fixed'
-                ? `${frames.length} IDs`
-                : `${traceRows.length}개 (최근 1분)`}
+            : mode === 'fixed'
+              ? `${frames.length} IDs`
+              : `${traceRows.length}개 (최근 1분)`}
         </span>
         <span className="spacer" />
         <button className="small-btn" onClick={() => canStore.clearFrames()}>
           Clear
         </button>
       </div>
-      {frozen ? (
-        <TraceView rows={snapshotRows} live={false} onScrollToBottom={handleScrollToBottom} />
+      {paused ? (
+        <TraceView rows={snapshotRows} live={false} />
       ) : mode === 'trace' ? (
-        <TraceView rows={traceRows} live={true} onScrollAway={handleScrollAway} />
+        <TraceView rows={traceRows} live={true} />
       ) : (
         <FixedTable frames={frames} dbc={dbc} expanded={expanded} onToggle={toggleExpanded} />
       )}
@@ -402,25 +375,8 @@ function SignalDetail({ frame, dbc }: { frame: FrameEntry; dbc: DbcSummary }) {
 // thousands of frames, so only the visible rows are rendered.
 const ROW_H = 22;
 const OVERSCAN = 10;
-const AT_BOTTOM_TOLERANCE_PX = 4;
 
-function TraceView({
-  rows,
-  live,
-  onScrollAway,
-  onScrollToBottom,
-}: {
-  rows: RxFrame[];
-  live: boolean;
-  /** Live mode only: fired when a new frame arrives while the user has
-   * scrolled away from the bottom -- lets the parent freeze this view on a
-   * snapshot instead of the row disappearing under them. */
-  onScrollAway?: () => void;
-  /** Frozen mode only: fired when the user scrolls back down to the
-   * bottom -- lets the parent that auto-froze (as opposed to a manual
-   * "일시중지") resume live tracking. */
-  onScrollToBottom?: () => void;
-}) {
+function TraceView({ rows, live }: { rows: RxFrame[]; live: boolean }) {
   const outerRef = useRef<HTMLDivElement>(null);
   const [scrollTop, setScrollTop] = useState(0);
   const [viewH, setViewH] = useState(200);
@@ -435,36 +391,12 @@ function TraceView({
     return () => ro.disconnect();
   }, []);
 
-  // Live mode sticks to the newest frame at the bottom -- but only while
-  // the user is actually there. If they've scrolled up to read history, a
-  // new incoming frame must not snap the view back down out from under
-  // them (checking this *before* forcibly scrolling, rather than reacting
-  // to the scroll event that would cause, sidesteps a race against this
-  // same effect's own programmatic scroll). Instead this hands control to
-  // the parent via onScrollAway, which freezes the view on a snapshot --
-  // exactly like the manual "일시중지" button (see MessageDisplayCore) --
-  // since canStore.trace's own 60s/30000-frame prune would otherwise erase
-  // history out from under whatever the user is currently scrolled to.
+  // live mode sticks to the newest frame at the bottom
   useEffect(() => {
-    if (!live) return;
-    const el = outerRef.current;
-    if (!el) return;
-    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight <= AT_BOTTOM_TOLERANCE_PX;
-    if (atBottom) {
-      el.scrollTop = el.scrollHeight;
-    } else {
-      onScrollAway?.();
+    if (live && outerRef.current) {
+      outerRef.current.scrollTop = outerRef.current.scrollHeight;
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [live, rows.length]);
-
-  const onScroll = (e: React.UIEvent<HTMLDivElement>) => {
-    const el = e.target as HTMLDivElement;
-    setScrollTop(el.scrollTop);
-    if (live) return; // while live, the effect above owns scroll-away detection
-    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight <= AT_BOTTOM_TOLERANCE_PX;
-    if (atBottom) onScrollToBottom?.();
-  };
 
   const first = Math.max(0, Math.floor(scrollTop / ROW_H) - OVERSCAN);
   const last = Math.min(rows.length, Math.ceil((scrollTop + viewH) / ROW_H) + OVERSCAN);
@@ -480,7 +412,11 @@ function TraceView({
         <span className="t-dlc">DLC</span>
         <span className="t-data">Data</span>
       </div>
-      <div ref={outerRef} className="trace-body" onScroll={onScroll}>
+      <div
+        ref={outerRef}
+        className="trace-body"
+        onScroll={(e) => setScrollTop((e.target as HTMLDivElement).scrollTop)}
+      >
         <div style={{ height: first * ROW_H }} />
         {visible.map((f, i) => (
           <div className="trace-row" key={first + i}>

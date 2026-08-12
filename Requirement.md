@@ -2379,3 +2379,85 @@ test_uds_download_manager.py`(4개 신규: reader 재사용 확인, suppress-bit
 무관. 브라우저 자동화 도구가 없어 실제 스크롤 동작(위로 스크롤 시 자동 정지,
 바닥으로 스크롤 시 자동 재개)은 코드 검토로만 확인했다 -- 사용자가 다음
 실사용 시 확인해줄 것을 권장한다.
+
+---
+
+## 2026-08-12 롤백 및 4건 수정
+
+### ① CAN 메시지 표시창 "자동 정지(스크롤 중)" 기능 롤백
+
+사용자가 위 2026-08-11(추정) 자동 정지 기능을 원래의 단순 "항상 바닥으로
+스크롤" 동작으로 되돌리라고 요청 — 60초 경과 시 메시지가 사라지는 현상은
+알려진 트레이드오프로 감수하겠다고 명시.
+
+`frontend/src/widgets/displays.tsx`를 해당 기능이 추가되기 전 커밋
+(`d754af7`)의 내용으로 전체 되돌림 (`git checkout d754af7 --
+frontend/src/widgets/displays.tsx`). `git diff d754af7 c5b8472 --
+frontend/src/widgets/displays.tsx`로 이 기능의 diff가 이 파일 하나에만
+고립되어 있음을 먼저 확인 — 같은 커밋에 같이 들어있던 페이지 탭 드래그 재정렬
+(App.tsx/styles.css)이나 UDS suppress-bit/NRC 0x78 백엔드 수정과는 겹치지
+않으므로, 이 파일만 되돌려도 나머지 작업은 전혀 영향받지 않는다.
+
+`autoFrozen`/`handleScrollAway`/`handleScrollToBottom`/`onScrollAway`/
+`onScrollToBottom`/`AT_BOTTOM_TOLERANCE_PX` 전부 제거되고, `TraceView`/
+`MessageDisplayCore`는 원래의 단순 "항상 바닥으로 스크롤"(일시중지 버튼으로만
+멈춤) 동작으로 복귀.
+
+검증: `tsc -b --noEmit`/`vite build`/`oxlint src` 클린.
+
+### ② NRC 0x78 (ResponsePending) 재시도 횟수 제한 제거
+
+증상: 실제 ECU가 pending을 여러 번 보내는 상황에서 기본값 3회를 넘기면
+타임아웃 실패로 처리됐다. 사용자 요청: 횟수 제한 없이, ECU가 pending을 보내는
+동안은 계속 기다린다 (ISO 14229-1상 pending 응답 자체의 횟수 제한은 없고,
+개별 대기 시간만 P2*Server_max로 한정됨).
+
+`uds_download_manager.py`/`ota_tester_download_manager.py`의
+`_uds_request_with_retry`:
+- `max_retries: int = 3` → `max_retries: Optional[int] = None`(기본값
+  "무제한"). 내부 루프를 `for attempt in range(max_retries + 1)`에서
+  `while True` + `max_retries is None or attempt < max_retries` 조건으로
+  변경.
+- 두 파일의 `RoutineControl`/`RequestDownload`/`TransferData`/
+  `RequestTransferExit` 호출부에 있던 명시적 `max_retries=10` 오버라이드도
+  제거 — pending 자체에 인위적 상한을 두지 않는 것이 사용자 요청의 취지이므로
+  기본(무제한)을 따르게 함.
+- `test_uds_request_with_retry_raises_after_max_consecutive_pending`
+  테스트는 `max_retries=3`을 명시적으로 넘겨서 호출하므로 그대로 유효(명시적
+  오버라이드는 계속 지원).
+
+검증: 백엔드 전체 240개 테스트 통과 (`.venv/bin/python -m pytest -q`).
+
+### ③ ASK(SeedKey) 파일 선택 시 자동 업로드
+
+"ask 파일"은 `backend/seedkey_client.py`가 감싸는 HKMC Advanced SeedKey DLL을
+가리킴(벤더 헤더 `HKMC_ASK_Client.h`, UI 라벨도 "ASK 선택"). 기존에는 파일
+선택 후 별도로 "SeedKey DLL 업로드" 버튼을 눌러야 실제 업로드가 실행됐다.
+
+`frontend/src/widgets/UdsGlobalControls.tsx`: `uploadSeedKey`가 선택적
+`file?: File` 파라미터를 받도록 변경(안 넘기면 기존처럼 state의
+`seedKeyFile` 사용). 파일 `<input>`의 `onChange`에서 파일을 고르는 즉시
+`uploadSeedKey(f)`를 직접 호출 — 버튼 클릭 없이 자동 업로드. 기존 "SeedKey
+DLL 업로드" 버튼은 그대로 남겨 재업로드 등 수동 트리거도 계속 가능
+(`onClick={() => uploadSeedKey()}`로 인자 없이 호출하도록 수정 — 그냥
+`onClick={uploadSeedKey}`로 두면 클릭 이벤트 객체가 `file` 인자로 들어가
+타입 에러가 나는 문제를 미리 수정).
+
+검증: `tsc -b --noEmit`/`vite build`/`oxlint src` 클린.
+
+### ④ OTA Tester 위젯이 진행 로그 갱신 시 전체 페이지 스크롤을 가져가는 문제 수정
+
+원인: `frontend/src/widgets/OtaTesterWidget.tsx`가 이벤트 로그 갱신마다
+맨 아래 sentinel(`eventsEndRef`)에 대해 `scrollIntoView({ behavior:
+'smooth' })`를 호출했는데, 이 로그 영역 자체는 이미 `overflow: 'auto'`인
+스크롤 컨테이너지만 `scrollIntoView`는 대상이 뷰포트에 보이도록 필요한 모든
+조상(문서/페이지 스크롤 포함)까지 같이 스크롤시킨다 — 그래서 OTA 진행 중
+다른 위젯을 보고 있어도 로그가 갱신될 때마다 페이지 전체가 이 위젯으로
+끌려왔다.
+
+수정: sentinel div와 `eventsEndRef`를 제거하고, 로그 컨테이너 자체에
+`eventsContainerRef`를 달아 `el.scrollTop = el.scrollHeight`로 직접
+설정 — 이 위젯 내부 스크롤만 움직이고 페이지/문서 스크롤은 전혀 건드리지
+않는다.
+
+검증: `tsc -b --noEmit`/`vite build`/`oxlint src` 클린. 백엔드 무관.

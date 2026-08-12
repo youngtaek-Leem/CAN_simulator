@@ -26,12 +26,13 @@ export function UdsGlobalControls() {
     api.seedkeyStatus().then(setSeedKeyStatus).catch(() => {});
   }, []);
 
-  const uploadSeedKey = async () => {
-    if (!seedKeyFile) return;
+  const uploadSeedKey = async (file?: File) => {
+    const target = file ?? seedKeyFile;
+    if (!target) return;
     setSeedKeyUploading(true);
     setSeedKeyError(null);
     try {
-      const status = await api.seedkeyUpload(seedKeyFile);
+      const status = await api.seedkeyUpload(target);
       setSeedKeyStatus(status);
       canStore.pushActivity(`SeedKey DLL 로드됨: ${status.filename} (v${status.version?.version ?? '?'})`);
     } catch (e: unknown) {
@@ -78,12 +79,16 @@ export function UdsGlobalControls() {
         }}>
           ASK 선택
           <input type="file" accept=".dll" style={{ display: 'none' }}
-            onChange={e => setSeedKeyFile(e.target.files?.[0] ?? null)} />
+            onChange={e => {
+              const f = e.target.files?.[0] ?? null;
+              setSeedKeyFile(f);
+              if (f) uploadSeedKey(f); // ASK 파일 선택 즉시 업로드 (버튼 클릭 불필요)
+            }} />
         </label>
         {seedKeyFile && (
           <span style={{ fontSize: '10px', whiteSpace: 'nowrap', color: 'inherit' }}>{seedKeyFile.name}</span>
         )}
-        <button disabled={!seedKeyFile || seedKeyUploading} onClick={uploadSeedKey}
+        <button disabled={!seedKeyFile || seedKeyUploading} onClick={() => uploadSeedKey()}
           style={{
             padding: '2px 6px',
             fontSize: '10px',

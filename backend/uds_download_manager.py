@@ -484,7 +484,7 @@ class UdsDownloadManager:
 
     def _uds_request_with_retry(
         self, request: bytes, timeout_s: float, label: str = "",
-        max_retries: int = 3, retry_delay_s: float = 0.1,
+        max_retries: Optional[int] = None, retry_delay_s: float = 0.1,
     ) -> dict:
         """Send a UDS request once and receive the response, waiting again
         (without retransmitting) on NRC 0x78 (ResponsePending) -- per ISO
@@ -494,6 +494,13 @@ class UdsDownloadManager:
         P2*Server_max timeout (`proc.p2_star_can_server_max`) instead of
         the original, usually much shorter, P2 timeout that was only meant
         to bound the FIRST reply.
+
+        ``max_retries=None`` (the default) means unlimited: the client keeps
+        waiting as long as the ECU keeps sending 0x78, with no attempt-count
+        ceiling -- per ISO 14229-1 there is no cap on the number of pending
+        responses, only on how long each individual wait may take (bounded
+        by P2*Server_max on each attempt). Pass an explicit integer to cap
+        it where that's actually wanted.
 
         One CAN listener is kept registered for the *entire* retry sequence
         below (passed into every `_isotp_receive()` call as `reader`) --
@@ -537,7 +544,8 @@ class UdsDownloadManager:
         self._can.notifier.add_listener(reader)
         try:
             pending_timeout_s = max(proc.p2_star_can_server_max / 1000.0, timeout_s)
-            for attempt in range(max_retries + 1):
+            attempt = 0
+            while True:
                 try:
                     response = self._isotp_receive(
                         self._can, rx_id, tx_id,
@@ -559,18 +567,19 @@ class UdsDownloadManager:
                 result = parse_response(response)
                 if result["positive"]:
                     return result
-                if result["nrc"] == 0x78 and attempt < max_retries:
+                if result["nrc"] == 0x78 and (max_retries is None or attempt < max_retries):
+                    limit_str = "무제한" if max_retries is None else str(max_retries)
                     self._log(
                         level="WARN",
-                        msg=f"NRC 0x78 (ResponsePending) 대기 {attempt + 1}/{max_retries} (P2*={pending_timeout_s:.1f}s)",
+                        msg=f"NRC 0x78 (ResponsePending) 대기 {attempt + 1}/{limit_str} (P2*={pending_timeout_s:.1f}s)",
                     )
                     time.sleep(retry_delay_s)
+                    attempt += 1
                     continue
                 raise UdsError(
                     f"UDS Negative Response ({label}): SID=0x{result['sid']:02X}, NRC=0x{result['nrc']:02X}",
                     nrc=result["nrc"],
                 )
-            raise UdsError(f"No response ({label})")
         finally:
             self._can.notifier.remove_listener(reader)
 
@@ -757,7 +766,7 @@ class UdsDownloadManager:
 
             self._uds_request_with_retry(request, timeout_s,
                                           f"RoutineControl(0x{routine_id:04X}, type={ctrl_type})",
-                                          max_retries=10, retry_delay_s=0.5)
+                                          retry_delay_s=0.5)
             self._log(level="INFO", msg=f"루틴 제어 성공: ID=0x{routine_id:04X}, type={ctrl_type}")
 
         elif svc == "requestDownload":
@@ -855,7 +864,7 @@ class UdsDownloadManager:
         result = self._uds_request_with_retry(
             request, timeout_s,
             f"RequestDownload(addr=0x{mem_addr:08X}, size=0x{mem_size:08X})",
-            max_retries=10, retry_delay_s=0.5,
+            retry_delay_s=0.5,
         )
 
         # result["data"] is already the full positive response (SID 0x74 +
@@ -932,7 +941,7 @@ class UdsDownloadManager:
                 self._uds_request_with_retry(
                     request, timeout_s,
                     f"TransferData(seq={seq_num}, offset=0x{offset:06X}, size={len(chunk)})",
-                    max_retries=10, retry_delay_s=0.5,
+                    retry_delay_s=0.5,
                 )
             except UdsError as exc:
                 self._log(level="ERROR", msg=f"TransferData 블록 {seq_num} 실패: {exc}")
@@ -958,7 +967,7 @@ class UdsDownloadManager:
         request = build_transfer_exit()
         timeout_s = max(self._procedure.p2_star_can_server_max / 1000.0, 2.0) if self._procedure else 2.0
 
-        self._uds_request_with_retry(request, timeout_s, "RequestTransferExit", max_retries=10, retry_delay_s=0.5)
+        self._uds_request_with_retry(request, timeout_s, "RequestTransferExit", retry_delay_s=0.5)
         self._log(level="INFO", msg="전송 종료 성공")
 
     def _run_error_recovery(self, modified_params: Optional[dict[str, dict]] = None) -> None:

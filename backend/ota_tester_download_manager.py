@@ -556,7 +556,7 @@ class OtaTesterDownloadManager:
 
     def _uds_request_with_retry(
         self, request: bytes, timeout_s: float, label: str = "",
-        max_retries: int = 3, retry_delay_s: float = 0.1,
+        max_retries: Optional[int] = None, retry_delay_s: float = 0.1,
     ) -> dict:
         """Send a UDS request once and receive the response, waiting again
         (without retransmitting) on NRC 0x78 (ResponsePending) -- per ISO
@@ -566,8 +566,12 @@ class OtaTesterDownloadManager:
         P2*Server_max timeout (`_p2_star_can_server_max`) instead of the
         original, usually much shorter, P2 timeout that was only meant to
         bound the FIRST reply. Returns the parsed positive response dict;
-        raises UdsError on any other negative response, or once
-        max_retries consecutive 0x78s are exceeded.
+        raises UdsError on any other negative response.
+
+        ``max_retries=None`` (the default) means unlimited: the client keeps
+        waiting as long as the ECU keeps sending 0x78, with no attempt-count
+        ceiling -- per ISO 14229-1 there is no cap on the number of pending
+        responses, only on how long each individual wait may take.
 
         One CAN listener is kept registered for the *entire* retry sequence
         (passed into every `_isotp_receive()` call as `reader`) instead of
@@ -602,7 +606,8 @@ class OtaTesterDownloadManager:
         self._can.notifier.add_listener(reader)
         try:
             pending_timeout_s = max(self._p2_star_can_server_max / 1000.0, timeout_s)
-            for attempt in range(max_retries + 1):
+            attempt = 0
+            while True:
                 try:
                     response = self._isotp_receive(
                         self._can, self._response_id, self._request_id,
@@ -619,12 +624,13 @@ class OtaTesterDownloadManager:
                 result = parse_response(response)
                 if result["positive"]:
                     return result
-                if result["nrc"] == 0x78 and attempt < max_retries:
-                    self._log(level="WARN", msg=f"NRC 0x78 (ResponsePending) 대기 {attempt + 1}/{max_retries} (P2*={pending_timeout_s:.1f}s)")
+                if result["nrc"] == 0x78 and (max_retries is None or attempt < max_retries):
+                    limit_str = "무제한" if max_retries is None else str(max_retries)
+                    self._log(level="WARN", msg=f"NRC 0x78 (ResponsePending) 대기 {attempt + 1}/{limit_str} (P2*={pending_timeout_s:.1f}s)")
                     time.sleep(retry_delay_s)
+                    attempt += 1
                     continue
                 raise UdsError(f"UDS Negative Response ({label}): NRC=0x{result['nrc']:02X}", nrc=result["nrc"])
-            raise UdsError(f"No response ({label})")
         finally:
             self._can.notifier.remove_listener(reader)
 
@@ -747,7 +753,7 @@ class OtaTesterDownloadManager:
         result = self._uds_request_with_retry(
             request, timeout_s,
             f"RequestDownload(addr=0x{mem_addr:08X}, size=0x{mem_size:08X})",
-            max_retries=10, retry_delay_s=0.5,
+            retry_delay_s=0.5,
         )
         download_info = parse_request_download_response(result["data"])
         max_block_length = download_info.get("max_length", 0)
@@ -799,7 +805,7 @@ class OtaTesterDownloadManager:
             self._uds_request_with_retry(
                 request, timeout_s,
                 f"TransferData(seq={seq_num}, offset=0x{offset:06X}, size={len(chunk)})",
-                max_retries=10, retry_delay_s=0.5,
+                retry_delay_s=0.5,
             )
             last_seq = seq_num
             bytes_sent = offset + len(chunk) - seek_addr
@@ -812,4 +818,4 @@ class OtaTesterDownloadManager:
     def _execute_transfer_exit(self) -> None:
         request = build_transfer_exit()
         timeout_s = max(self._p2_star_can_server_max / 1000.0, 2.0)
-        self._uds_request_with_retry(request, timeout_s, "RequestTransferExit", max_retries=10, retry_delay_s=0.5)
+        self._uds_request_with_retry(request, timeout_s, "RequestTransferExit", retry_delay_s=0.5)

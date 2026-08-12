@@ -93,7 +93,7 @@ export default function OtaTesterWidget({ config }: Props) {
   const [stepsLoading, setStepsLoading] = useState<Set<string>>(new Set());
 
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const eventsEndRef = useRef<HTMLDivElement>(null);
+  const eventsContainerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     api.otaTesterStatus().then(setStatus).catch(() => {});
@@ -123,7 +123,12 @@ export default function OtaTesterWidget({ config }: Props) {
   }, [status?.running]);
 
   useEffect(() => {
-    eventsEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    // scrollTop (not scrollIntoView) so only this widget's own log area
+    // scrolls -- scrollIntoView also drags the whole page's scroll
+    // position to keep the target in the viewport, which hijacked focus
+    // away from whatever other widget the user was looking at.
+    const el = eventsContainerRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
   }, [status?.events]);
 
   const handleFolderSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -491,7 +496,7 @@ export default function OtaTesterWidget({ config }: Props) {
       )}
 
       {/* Event log */}
-      <div style={{
+      <div ref={eventsContainerRef} style={{
         flex: 1, overflow: 'auto', background: '#1e293b', borderRadius: 6, padding: 8,
         fontSize: 12, fontFamily: 'monospace', minHeight: 100,
       }}>
@@ -502,7 +507,6 @@ export default function OtaTesterWidget({ config }: Props) {
             {ev.msg}
           </div>
         ))}
-        <div ref={eventsEndRef} />
       </div>
     </div>
   );
