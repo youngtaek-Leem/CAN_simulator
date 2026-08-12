@@ -41,6 +41,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+import can
 import diag_log
 import timer_util
 import isotp_service
@@ -720,20 +721,45 @@ def isotp_send(req: IsoTpSendRequest):
         data = bytes.fromhex(hex_str)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=f"잘못된 hex 데이터: {exc}")
-    try:
-        result = isotp_service.send(
-            can_manager,
-            req.tx_id,
-            req.fc_id,
-            data,
-            is_extended_id=req.is_extended_id,
-            fc_timeout_s=req.fc_timeout_ms / 1000.0,
-            max_wait_frames=req.max_wait_frames,
-        )
-    except isotp_service.IsoTpError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+    if req.resp_id is None:
+        try:
+            return isotp_service.send(
+                can_manager,
+                req.tx_id,
+                req.fc_id,
+                data,
+                is_extended_id=req.is_extended_id,
+                fc_timeout_s=req.fc_timeout_ms / 1000.0,
+                max_wait_frames=req.max_wait_frames,
+            )
+        except isotp_service.IsoTpError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
 
-    if req.resp_id is not None:
+    # "응답 대기" mode: registered *before* sending and shared between send()
+    # (for any Flow Control it needs while sending) and receive(), so there
+    # is no gap between them where python-can's Notifier has nowhere to
+    # dispatch an arriving frame -- an ECU that answers unusually fast can
+    # otherwise have its response land in that gap and be lost for good.
+    # See isotp_service.send()/receive()'s own `reader` docstrings.
+    if can_manager.notifier is None:
+        raise HTTPException(status_code=400, detail="CAN 버스가 연결되어 있지 않습니다")
+    reader = can.BufferedReader()
+    can_manager.notifier.add_listener(reader)
+    try:
+        try:
+            result = isotp_service.send(
+                can_manager,
+                req.tx_id,
+                req.fc_id,
+                data,
+                is_extended_id=req.is_extended_id,
+                fc_timeout_s=req.fc_timeout_ms / 1000.0,
+                max_wait_frames=req.max_wait_frames,
+                reader=reader,
+            )
+        except isotp_service.IsoTpError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
+
         try:
             response = isotp_service.receive(
                 can_manager,
@@ -743,10 +769,13 @@ def isotp_send(req: IsoTpSendRequest):
                 is_extended_id=req.is_extended_id,
                 fc_stmin=req.resp_fc_stmin,
                 fc_block_size=req.resp_fc_block_size,
+                reader=reader,
             )
             result["response"] = response.hex(" ").upper()
         except isotp_service.IsoTpError as exc:
             result["response_error"] = str(exc)
+    finally:
+        can_manager.notifier.remove_listener(reader)
 
     return result
 

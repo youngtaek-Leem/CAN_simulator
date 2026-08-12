@@ -88,6 +88,12 @@ export default function OtaTesterWidget({ config }: Props) {
   const respId = String(config.options.respId ?? '18DA00F1');
   const setReqId = (v: string) => updateWidget({ ...config, options: { ...config.options, reqId: v } });
   const setRespId = (v: string) => updateWidget({ ...config, options: { ...config.options, respId: v } });
+  // setReqId+setRespId back-to-back would both read the same stale `config`
+  // snapshot from this render, so the second call's updateWidget() clobbers
+  // the first's -- only whichever was called last ever actually stuck. Used
+  // by the vehicleInfo.json auto-fill, which needs to set both atomically.
+  const setReqRespId = (req: string, resp: string) =>
+    updateWidget({ ...config, options: { ...config.options, reqId: req, respId: resp } });
   const [expandedCases, setExpandedCases] = useState<Set<string>>(new Set());
   const [stepsByCase, setStepsByCase] = useState<Record<string, OtaTesterStepInfo[]>>({});
   const [stepsLoading, setStepsLoading] = useState<Set<string>>(new Set());
@@ -166,8 +172,9 @@ export default function OtaTesterWidget({ config }: Props) {
         try {
           const vehicleInfo = JSON.parse(await vehicleInfoFile.text());
           const settings = vehicleInfo?.communicationInfo?.settings ?? {};
-          if (settings.requestID) setReqId(String(settings.requestID).replace(/^0x/i, '').toUpperCase());
-          if (settings.responseID) setRespId(String(settings.responseID).replace(/^0x/i, '').toUpperCase());
+          const newReqId = settings.requestID ? String(settings.requestID).replace(/^0x/i, '').toUpperCase() : reqId;
+          const newRespId = settings.responseID ? String(settings.responseID).replace(/^0x/i, '').toUpperCase() : respId;
+          setReqRespId(newReqId, newRespId);
         } catch {
           warnings.push('VehicleInfo/vehicleInfo.json 파싱 실패 -- Req/Resp ID는 기존 값 유지');
         }

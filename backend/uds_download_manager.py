@@ -448,31 +448,50 @@ class UdsDownloadManager:
             msg=f"Tx CAN_ID=0x{tx_id:03X} DATA=[{req_hex}] ({label})"
         )
 
+        if self._can.notifier is None:
+            raise UdsError(f"ISO-TP 송신 실패 ({label}): CAN 버스가 연결되어 있지 않습니다")
+        # Registered *before* sending, not after -- an ECU that answers
+        # unusually fast (observed: 4.688ms after a TransferData request)
+        # can have its response on the bus before a listener created only
+        # after send() returns gets a chance to see it, since python-can's
+        # Notifier only delivers to listeners registered at the moment a
+        # frame arrives. Passing the same reader into both send() (for any
+        # Flow Control it needs while sending a multi-frame request) and
+        # receive() keeps it registered across the whole exchange with no
+        # gap in between. See isotp_service.send()/receive()'s own
+        # docstrings.
+        reader = can.BufferedReader()
+        self._can.notifier.add_listener(reader)
         try:
-            self._isotp_send(
-                self._can, tx_id, rx_id, request,
-                is_extended_id=is_ext,
-                fc_timeout_s=timeout_s,
-            )
-        except Exception as exc:
-            raise UdsError(f"ISO-TP 송신 실패 ({label}): {exc}")
+            try:
+                self._isotp_send(
+                    self._can, tx_id, rx_id, request,
+                    is_extended_id=is_ext,
+                    fc_timeout_s=timeout_s,
+                    reader=reader,
+                )
+            except Exception as exc:
+                raise UdsError(f"ISO-TP 송신 실패 ({label}): {exc}")
 
-        try:
-            response = self._isotp_receive(
-                self._can, rx_id, tx_id,
-                timeout_s=timeout_s,
-                is_extended_id=is_ext,
-                fc_stmin=fc_stmin,
-            )
-        except Exception as exc:
-            # Suppress Positive Response bit set -> the server is required
-            # to send nothing at all, so a plain timeout here is the
-            # correct, expected outcome, not a failure. A non-timeout error
-            # (malformed frame, etc.) still fails regardless of the bit.
-            if expects_no_response(request) and _is_timeout_error(exc):
-                self._log(level="INFO", msg=f"응답 없음(suppressPosRspMsgIndicationBit) — 정상 ({label})")
-                return suppressed_response_result(request)
-            raise UdsError(f"ISO-TP 수신 실패 ({label}): {exc}")
+            try:
+                response = self._isotp_receive(
+                    self._can, rx_id, tx_id,
+                    timeout_s=timeout_s,
+                    is_extended_id=is_ext,
+                    fc_stmin=fc_stmin,
+                    reader=reader,
+                )
+            except Exception as exc:
+                # Suppress Positive Response bit set -> the server is required
+                # to send nothing at all, so a plain timeout here is the
+                # correct, expected outcome, not a failure. A non-timeout error
+                # (malformed frame, etc.) still fails regardless of the bit.
+                if expects_no_response(request) and _is_timeout_error(exc):
+                    self._log(level="INFO", msg=f"응답 없음(suppressPosRspMsgIndicationBit) — 정상 ({label})")
+                    return suppressed_response_result(request)
+                raise UdsError(f"ISO-TP 수신 실패 ({label}): {exc}")
+        finally:
+            self._can.notifier.remove_listener(reader)
 
         result = parse_response(response)
         if not result["positive"]:
@@ -502,18 +521,20 @@ class UdsDownloadManager:
         by P2*Server_max on each attempt). Pass an explicit integer to cap
         it where that's actually wanted.
 
-        One CAN listener is kept registered for the *entire* retry sequence
-        below (passed into every `_isotp_receive()` call as `reader`) --
-        otherwise each call tearing down and recreating its own listener
-        (isotp_service.receive()'s normal behavior when no reader is passed)
-        leaves a gap between attempts during which nothing is registered to
-        catch an arriving frame for this wait. If the ECU's real final
-        response happens to land in that gap (right after an NRC 0x78, or
-        during the retry_delay_s sleep), it's gone for good and the next
-        attempt times out waiting for a frame that already went by -- this
-        produced the exact "timed out anyway" symptom despite the 0x78
-        retry logic itself being correct. See isotp_service.receive()'s
-        `reader` docstring.
+        One CAN listener is kept registered across the send *and* the
+        entire retry sequence (passed into `_isotp_send()` and every
+        `_isotp_receive()` call as `reader`) -- registering it only after
+        send() returns, or tearing it down and recreating it between
+        retries, both leave a gap during which nothing is registered to
+        catch an arriving frame. If the ECU's real final response happens
+        to land in one of those gaps (right after sending, right after an
+        NRC 0x78, or during the retry_delay_s sleep), it's gone for good
+        and the next attempt times out waiting for a frame that already
+        went by -- this produced the exact "timed out anyway" symptom
+        despite the 0x78 retry logic itself being correct, and also a
+        response arriving unusually fast (observed: 4.688ms after a
+        TransferData request) being missed entirely. See
+        isotp_service.send()/receive()'s own `reader` docstrings.
 
         Deliberately does not delegate to `_uds_request()` (which both
         sends and receives) -- that method is still used as-is by callers
@@ -533,16 +554,20 @@ class UdsDownloadManager:
 
         req_hex = request.hex(" ").upper() if isinstance(request, (bytes, bytearray)) else str(request)
         self._log(level="INFO", service="CAN_TX", msg=f"Tx CAN_ID=0x{tx_id:03X} DATA=[{req_hex}] ({label})")
-        try:
-            self._isotp_send(self._can, tx_id, rx_id, request, is_extended_id=is_ext, fc_timeout_s=timeout_s)
-        except Exception as exc:
-            raise UdsError(f"ISO-TP 송신 실패 ({label}): {exc}")
 
         if self._can.notifier is None:
-            raise UdsError(f"ISO-TP 수신 실패 ({label}): CAN 버스가 연결되어 있지 않습니다")
+            raise UdsError(f"ISO-TP 송신 실패 ({label}): CAN 버스가 연결되어 있지 않습니다")
+        # Registered *before* sending -- see _uds_request()'s matching
+        # comment and isotp_service.send()'s docstring; the fast-ECU-
+        # response race this fixes applies here identically.
         reader = can.BufferedReader()
         self._can.notifier.add_listener(reader)
         try:
+            try:
+                self._isotp_send(self._can, tx_id, rx_id, request, is_extended_id=is_ext, fc_timeout_s=timeout_s, reader=reader)
+            except Exception as exc:
+                raise UdsError(f"ISO-TP 송신 실패 ({label}): {exc}")
+
             pending_timeout_s = max(proc.p2_star_can_server_max / 1000.0, timeout_s)
             attempt = 0
             while True:

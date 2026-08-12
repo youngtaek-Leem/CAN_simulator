@@ -15,6 +15,7 @@ import threading
 import pytest
 
 from ota_tester_download_manager import OtaTesterDownloadManager, iter_transfer_chunks
+from uds_xml_parser import parse_test_rule_xml
 
 
 class _FakeNotifier:
@@ -177,6 +178,29 @@ class FakeEcu:
         return bytes([0x7F, sid, 0x11])  # serviceNotSupported (unrecognized)
 
 
+STMIN_XML = """<?xml version="1.0" encoding="utf-8"?>
+<xfrm:root xmlns:xfrm="http://gitauto.com/xfrm/">
+  <xfrm:test-rule binaryPath="">
+    <xfrm:rule funcTP="false">
+      <xfrm:diagnosticSessionControl diagnosticSessionType="0x02" confirmPositiveResponse="yes" localSTMinTx="0x0A" />
+      <xfrm:readDataByIdentifier dataIdentifier="0xF187" confirmPositiveResponse="yes" localSTMinTx="" />
+    </xfrm:rule>
+  </xfrm:test-rule>
+</xfrm:root>
+"""
+
+
+SINGLE_STEP_XML = """<?xml version="1.0" encoding="utf-8"?>
+<xfrm:root xmlns:xfrm="http://gitauto.com/xfrm/">
+  <xfrm:test-rule binaryPath="">
+    <xfrm:rule comment="Single">
+      <xfrm:readDataByIdentifier dataIdentifier="0xF187" confirmPositiveResponse="yes" />
+    </xfrm:rule>
+  </xfrm:test-rule>
+</xfrm:root>
+"""
+
+
 def _write_xml(tmp_path, name: str, content: str) -> str:
     p = tmp_path / name
     p.write_text(content, encoding="utf-8")
@@ -240,6 +264,98 @@ def test_disabled_case_is_skipped_entirely(tmp_path):
     # the disabled hook's readDataByIdentifier (SID 0x22) must never appear.
     assert not any(b[0] == 0x22 for b in ecu.sent)
     assert mgr.status()["state"] == "COMPLETED"
+
+
+def test_uds_request_with_retry_registers_listener_before_sending(tmp_path):
+    """Regression for "TransferData 응답이 0.004688초에 왔는데 놓치고 에러
+    처리했다": the listener used to be created only *after* send()
+    returned, leaving a gap in which an unusually fast ECU response could
+    arrive before anything was registered to catch it. The listener must
+    now be registered before the request is even sent, and the same
+    reader passed to both send() and receive()."""
+    log: list[str] = []
+
+    class _OrderTrackingNotifier:
+        def add_listener(self, listener) -> None:
+            log.append("add_listener")
+
+        def remove_listener(self, listener) -> None:
+            log.append("remove_listener")
+
+    def fake_send(can, tx_id, rx_id, data, **kw):
+        log.append("send")
+        assert kw.get("reader") is not None
+        return {"sent": True}
+
+    def fake_receive(can, rx_id, tx_id, **kw):
+        log.append("receive")
+        assert kw.get("reader") is not None
+        return bytes([0x62, 0xF1, 0x87, 0x01])
+
+    can_obj = type("FakeCan", (), {"notifier": _OrderTrackingNotifier()})()
+    mgr = OtaTesterDownloadManager(can_obj, fake_send, fake_receive)
+
+    xml_path = _write_xml(tmp_path, "single.xml", SINGLE_STEP_XML)
+    mgr.add_case("c1", "Single", "hook", xml_path, order=0)
+
+    mgr.start(request_id=0x18DA00F1, response_id=0x18DA00F1)
+    mgr._thread.join(timeout=5.0)
+
+    assert mgr.status()["state"] == "COMPLETED", mgr.status()["events"]
+    assert log == ["add_listener", "send", "receive", "remove_listener"]
+
+
+def test_local_stmin_tx_empty_attribute_parses_to_none(tmp_path):
+    """Regression: nearly every real GITAuto export has a localSTMinTx
+    attribute present on every step but almost always empty (""). The old
+    parsing (`"localSTMinTx" in step_info.params`) treated that presence
+    alone as a real override of 0, silently forcing STmin=0 on virtually
+    every step. Only a genuinely non-empty value should count as a step's
+    own override."""
+    xml_path = _write_xml(tmp_path, "stmin.xml", STMIN_XML)
+    steps = parse_test_rule_xml(xml_path)
+    assert steps[0]["local_stmin_tx"] == 0x0A
+    assert steps[1]["local_stmin_tx"] is None
+
+
+def test_local_stmin_tx_override_applied_during_step_and_cleared_after(tmp_path):
+    """A step's own XML localSTMinTx must win over the shared global STmin
+    override while that step runs, and must not leak into the next step
+    that has no override of its own (which should fall back to the global
+    value)."""
+    fc_stmins_by_sid: dict[int, list[int]] = {}
+    last_sid = {}
+
+    def fake_send(can, tx_id, rx_id, data, is_extended_id=False, fc_timeout_s=1.0, **kw):
+        last_sid["v"] = data[0]
+        return {"sent": True}
+
+    def fake_receive(can, rx_id, tx_id, timeout_s=1.0, is_extended_id=False, fc_stmin=0, **kw):
+        sid = last_sid["v"]
+        fc_stmins_by_sid.setdefault(sid, []).append(fc_stmin)
+        if sid == 0x10:
+            return bytes([0x50, 0x02])
+        if sid == 0x22:
+            return bytes([0x62, 0xF1, 0x87, 0x01])
+        return bytes([0x7F, sid, 0x11])
+
+    can = type("FakeCan", (), {"notifier": _FakeNotifier()})()
+    mgr = OtaTesterDownloadManager(can, fake_send, fake_receive)
+    mgr._global_stmin_tx = 0x05  # shared UI override
+
+    xml_path = _write_xml(tmp_path, "stmin.xml", STMIN_XML)
+    mgr.add_case("c1", "StminCase", "testBlock", xml_path, order=0)
+
+    mgr.start(request_id=0x18DA00F1, response_id=0x18DA00F1)
+    mgr._thread.join(timeout=5.0)
+
+    assert mgr.status()["state"] == "COMPLETED", mgr.status()["events"]
+    # diagnosticSessionControl (SID 0x10) has its own localSTMinTx="0x0A" -> wins over the global 0x05
+    assert fc_stmins_by_sid[0x10] == [0x0A]
+    # readDataByIdentifier (SID 0x22) has an empty localSTMinTx -> no leftover override, falls back to global 0x05
+    assert fc_stmins_by_sid[0x22] == [0x05]
+    # override must not remain set once the run is over
+    assert mgr._local_stmin_override is None
 
 
 def test_real_negative_response_is_detected_not_ignored(tmp_path):

@@ -148,7 +148,21 @@ def send(
     max_wait_frames: int = 10,
     is_fd: Optional[bool] = None,
     bitrate_switch: Optional[bool] = None,
+    reader: Optional[can.BufferedReader] = None,
 ) -> dict:
+    """``reader``, when given, is reused for waiting on Flow Control frames
+    during a multi-frame send instead of creating/tearing down one just for
+    this call (irrelevant for a Single Frame send, which never waits on
+    anything). A caller that will also call receive() right after sending
+    -- e.g. a UDS request/response exchange -- should create one reader,
+    register it *before* calling send(), and pass it to both send() and
+    receive(), tearing it down itself only once the whole exchange is done.
+    Otherwise there's a gap between this call returning and a fresh
+    listener being registered for the receive() that follows, during which
+    python-can's Notifier has nowhere to dispatch an arriving frame -- an
+    ECU that answers fast enough (observed: 4.688ms after a TransferData
+    request) can have its response land exactly in that gap and be lost for
+    good, timing out the receive despite the ECU having actually answered."""
     if not data:
         raise IsoTpError("전송할 데이터가 없습니다")
     if len(data) > MAX_ISOTP_LEN:
@@ -185,8 +199,10 @@ def send(
 
     total_len = len(data)
     ff = bytes([PCI_FF | ((total_len >> 8) & 0x0F), total_len & 0xFF]) + data[:ff_data_len]
-    reader = can.BufferedReader()
-    can_manager.notifier.add_listener(reader)
+    owns_reader = reader is None
+    if owns_reader:
+        reader = can.BufferedReader()
+        can_manager.notifier.add_listener(reader)
     try:
         can_manager.send(tx_id, pad(ff), is_extended_id, is_fd=is_fd, bitrate_switch=bitrate_switch)
         remaining = data[ff_data_len:]
@@ -227,7 +243,8 @@ def send(
                 sn = (sn + 1) % 16
                 block_count += 1
     finally:
-        can_manager.notifier.remove_listener(reader)
+        if owns_reader:
+            can_manager.notifier.remove_listener(reader)
 
     return {
         "sent": True,

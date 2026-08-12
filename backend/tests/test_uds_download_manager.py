@@ -150,6 +150,75 @@ def test_uds_request_with_retry_reuses_same_reader_across_pending_retries():
     assert readers_seen[0] is readers_seen[1]
 
 
+class _OrderTrackingNotifier:
+    """Records add_listener/remove_listener calls (interleaved with fake
+    send/receive calls appending their own markers to the same list) so a
+    test can assert the exact order they happened in."""
+
+    def __init__(self, log: list[str]):
+        self._log = log
+
+    def add_listener(self, listener) -> None:
+        self._log.append("add_listener")
+
+    def remove_listener(self, listener) -> None:
+        self._log.append("remove_listener")
+
+
+def test_uds_request_registers_listener_before_sending():
+    """Regression for "TransferData 응답이 0.004688초에 왔는데 놓치고 에러
+    처리했다": the listener used to be created only *after* send()
+    returned, leaving a gap in which an unusually fast ECU response could
+    arrive on the bus before anything was registered to catch it --
+    python-can's Notifier only delivers to listeners registered at the
+    moment a frame arrives. The listener must now be registered before the
+    request is even sent, and the same reader passed to both send() and
+    receive()."""
+    log: list[str] = []
+
+    def fake_send(can, tx_id, rx_id, data, **kw):
+        log.append("send")
+        assert kw.get("reader") is not None
+        return {"sent": True}
+
+    def fake_receive(can, rx_id, tx_id, **kw):
+        log.append("receive")
+        assert kw.get("reader") is not None
+        return bytes([0x50, 0x02])
+
+    can_obj = type("FakeCan", (), {"notifier": _OrderTrackingNotifier(log)})()
+    mgr = UdsDownloadManager(can_obj, fake_send, fake_receive)
+    mgr._procedure = UdsProcedure(request_id=0x783, response_id=0x78B)
+
+    result = mgr._uds_request(bytearray([0x10, 0x02]), 0.05, "diagnosticSessionControl")
+
+    assert result["positive"] is True
+    assert log == ["add_listener", "send", "receive", "remove_listener"]
+
+
+def test_uds_request_with_retry_registers_listener_before_sending():
+    log: list[str] = []
+
+    def fake_send(can, tx_id, rx_id, data, **kw):
+        log.append("send")
+        assert kw.get("reader") is not None
+        return {"sent": True}
+
+    def fake_receive(can, rx_id, tx_id, **kw):
+        log.append("receive")
+        assert kw.get("reader") is not None
+        return bytes([0x50, 0x02])
+
+    can_obj = type("FakeCan", (), {"notifier": _OrderTrackingNotifier(log)})()
+    mgr = UdsDownloadManager(can_obj, fake_send, fake_receive)
+    mgr._procedure = UdsProcedure(request_id=0x783, response_id=0x78B)
+
+    result = mgr._uds_request_with_retry(bytearray([0x10, 0x02]), 0.05, "diagnosticSessionControl")
+
+    assert result["positive"] is True
+    assert log == ["add_listener", "send", "receive", "remove_listener"]
+
+
 # ---- Suppress Positive Response bit (subfunction | 0x80) ------------------
 
 

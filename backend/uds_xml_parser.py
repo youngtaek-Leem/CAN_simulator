@@ -301,6 +301,16 @@ def parse_test_rule_xml(path: str) -> list[dict]:
     for child in rule_elem_prompt:
         step_info = _parse_step(child)
         
+        # localSTMinTx is present (as an attribute) on nearly every real
+        # GITAuto export, but almost always empty (localSTMinTx="") -- only
+        # a step that deliberately wants its own STmin_Tx override sets it
+        # to an actual hex value. Checking "in step_info.params" alone (as
+        # this used to) treats that empty string as a real override of 0
+        # (no delay), which forced STmin=0 on virtually every step
+        # regardless of the shared global STmin setting -- must be a
+        # non-empty string to count as a real override.
+        local_stmin_tx_str = step_info.params.pop("localSTMinTx", "")
+
         # Convert fxrm:UdsStep to the dict for OTA tester
         step_dict = {
             "service": step_info.service,
@@ -313,7 +323,7 @@ def parse_test_rule_xml(path: str) -> list[dict]:
             # When confirmPositiveResponse="no", the tester expects a negative
             # response (0x7F) instead of a positive response.
             "confirm_positive_response": step_info.params.pop("confirmPositiveResponse", "yes") == "yes",
-            "local_stmin_tx": _int_hex(step_info.params.pop("localSTMinTx", "0")) if "localSTMinTx" in step_info.params else None,
+            "local_stmin_tx": _int_hex(local_stmin_tx_str) if local_stmin_tx_str else None,
         }
         steps.append(step_dict)
     

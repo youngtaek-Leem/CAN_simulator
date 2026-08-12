@@ -162,6 +162,13 @@ class OtaTesterDownloadManager:
         # with CAN-SWDL in the UI (frontend/src/widgets/UdsGlobalControls.tsx),
         # but each manager instance keeps its own copy of the value.
         self._global_stmin_tx: Optional[int] = None
+        # Per-step override, set for the duration of a single step's
+        # execution from that step's own XML localSTMinTx attribute (see
+        # uds_xml_parser.parse_test_rule_xml's "local_stmin_tx"). Takes
+        # priority over _global_stmin_tx -- a step that explicitly asks for
+        # its own STmin_Tx in the XML should get it even if the UI's shared
+        # override is also set. None outside of step execution.
+        self._local_stmin_override: Optional[int] = None
 
         self._request_id = 0x18DA00F1
         self._response_id = 0x18DA00F1
@@ -527,7 +534,14 @@ class OtaTesterDownloadManager:
 
             self._log(level="INFO", msg=f"Step [{idx + 1}/{len(steps)}] {service}", service=service)
 
-            ok = self._execute_step(case, service, params, sub_steps, confirm_pos_rsp)
+            local_stmin = step.get("local_stmin_tx")
+            if local_stmin is not None:
+                self._log(level="INFO", msg=f"이 스텝의 localSTMinTx 적용: 0x{local_stmin:02X}", service=service)
+            self._local_stmin_override = local_stmin
+            try:
+                ok = self._execute_step(case, service, params, sub_steps, confirm_pos_rsp)
+            finally:
+                self._local_stmin_override = None
             if not ok:
                 with self._lock:
                     self._error_message = f"{case['label']}: {service} 실패"
@@ -548,8 +562,13 @@ class OtaTesterDownloadManager:
         return self._request_id > 0x7FF or self._response_id > 0x7FF
 
     def _get_fc_stmin(self) -> int:
-        """Flow Control STmin: the shared global override if set (see
-        ota_tester_start in main.py), else the default 0x0A."""
+        """Flow Control STmin, in priority order: this step's own XML
+        localSTMinTx override (_local_stmin_override, set for the duration
+        of the current step by _run_case_steps), then the shared global
+        override if set (see ota_tester_start in main.py), else the default
+        0x0A."""
+        if self._local_stmin_override is not None:
+            return self._local_stmin_override
         if self._global_stmin_tx is not None:
             return self._global_stmin_tx
         return 0x0A
@@ -573,14 +592,19 @@ class OtaTesterDownloadManager:
         ceiling -- per ISO 14229-1 there is no cap on the number of pending
         responses, only on how long each individual wait may take.
 
-        One CAN listener is kept registered for the *entire* retry sequence
-        (passed into every `_isotp_receive()` call as `reader`) instead of
-        letting each call tear down and recreate its own -- otherwise the
-        gap between attempts (right after an NRC 0x78, or during
-        retry_delay_s's sleep) has nothing registered to catch an arriving
-        frame, so a real final response landing exactly there is lost and
-        the next attempt times out waiting for a frame that already went
-        by. See isotp_service.receive()'s `reader` docstring.
+        One CAN listener is kept registered across the send *and* the
+        entire retry sequence (passed into `_isotp_send()` and every
+        `_isotp_receive()` call as `reader`) -- registering it only after
+        send() returns, or tearing it down and recreating it between
+        retries, both leave a gap during which nothing is registered to
+        catch an arriving frame. A real final response landing in one of
+        those gaps (right after sending, right after an NRC 0x78, or
+        during retry_delay_s's sleep) is lost for good, timing out the
+        next attempt on a frame that already went by -- this includes a
+        response arriving unusually fast (observed: 4.688ms after a
+        TransferData request) being missed entirely despite the ECU having
+        actually answered. See isotp_service.send()/receive()'s own
+        `reader` docstrings.
 
         Send/receive failures are wrapped as UdsError (previously this
         function let a raw isotp_service.IsoTpError -- e.g. a plain timeout
@@ -592,19 +616,22 @@ class OtaTesterDownloadManager:
         is_ext = self._is_extended()
         req_hex = request.hex(" ").upper() if isinstance(request, (bytes, bytearray)) else str(request)
         self._log(level="INFO", service="CAN_TX", msg=f"Tx CAN_ID=0x{self._request_id:03X} DATA=[{req_hex}] ({label})")
-        try:
-            self._isotp_send(
-                self._can, self._request_id, self._response_id, request,
-                is_extended_id=is_ext, fc_timeout_s=timeout_s,
-            )
-        except Exception as exc:
-            raise UdsError(f"ISO-TP 송신 실패 ({label}): {exc}")
 
         if self._can.notifier is None:
-            raise UdsError(f"ISO-TP 수신 실패 ({label}): CAN 버스가 연결되어 있지 않습니다")
+            raise UdsError(f"ISO-TP 송신 실패 ({label}): CAN 버스가 연결되어 있지 않습니다")
+        # Registered *before* sending -- see this method's own docstring
+        # above and isotp_service.send()'s docstring.
         reader = can.BufferedReader()
         self._can.notifier.add_listener(reader)
         try:
+            try:
+                self._isotp_send(
+                    self._can, self._request_id, self._response_id, request,
+                    is_extended_id=is_ext, fc_timeout_s=timeout_s, reader=reader,
+                )
+            except Exception as exc:
+                raise UdsError(f"ISO-TP 송신 실패 ({label}): {exc}")
+
             pending_timeout_s = max(self._p2_star_can_server_max / 1000.0, timeout_s)
             attempt = 0
             while True:

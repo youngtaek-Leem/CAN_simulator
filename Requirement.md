@@ -2461,3 +2461,105 @@ DLL 업로드" 버튼은 그대로 남겨 재업로드 등 수동 트리거도 �
 않는다.
 
 검증: `tsc -b --noEmit`/`vite build`/`oxlint src` 클린. 백엔드 무관.
+
+---
+
+## 2026-08-12 (2차) Req/Rsp ID 자동설정 버그, STmin 미적용, TransferData 응답 누락 수정
+
+### ① OTA Tester Req ID/Rsp ID가 vehicleInfo.json에서 자동설정되지 않음
+
+증상 확인 결과 이 기능(폴더 선택 시 `VehicleInfo/vehicleInfo.json`의
+`communicationInfo.settings.requestID/responseID`를 읽어 Req/Resp ID를 자동
+채움)은 이미 구현되어 있었으나(commit 72c3ba2), 실제로는 두 값 중 하나만
+반영되는 버그가 있었다.
+
+**원인**: `OtaTesterWidget.tsx`의 `setReqId(v)`/`setRespId(v)`가 각각
+`updateWidget({ ...config, options: { ...config.options, reqId: v } })`
+형태로, 렌더 시점에 캡처된 `config`(prop) 스냅샷을 기준으로 새 위젯
+객체를 만들어 전체 교체(`App.tsx`의 `updateWidget`은 `p.widgets.map((x) =>
+x.id === cfg.id ? cfg : x)`로 병합이 아니라 통째로 교체)한다. 폴더 선택
+핸들러가 `setReqId(...)`를 호출한 뒤 곧바로(같은 동기 실행 안에서, 리렌더
+전) `setRespId(...)`를 호출하면, 두 번째 호출도 첫 번째 호출 *이전의* 오래된
+`config.options`를 기준으로 새 옵션을 만들어 위젯을 덮어써버려 — 결과적으로
+마지막에 호출된 쪽(respId)만 남고 먼저 호출된 reqId 갱신은 사라진다.
+
+**수정**: `reqId`/`respId`를 한 번의 `updateWidget` 호출로 원자적으로 함께
+설정하는 `setReqRespId(req, resp)`를 추가하고, vehicleInfo.json 파싱 결과
+반영 부분을 이걸로 교체. 사용자가 입력 필드에서 직접 하나씩 고칠 때 쓰는
+개별 `setReqId`/`setRespId`는 그대로 유지(한 번에 하나만 바뀌므로 문제
+없음).
+
+검증: `tsc -b --noEmit`/`vite build`/`oxlint src` 클린.
+
+### ② OTA Tester STmin 설정이 적용되지 않음 (XML의 localSTMinTx 무시됨)
+
+`uds_xml_parser.parse_test_rule_xml`이 각 스텝의 `localSTMinTx` XML
+속성(스텝별 Flow Control STmin_Tx 오버라이드)을 파싱해 `local_stmin_tx`
+필드에 담아 두긴 했지만, `ota_tester_download_manager.py`의 실행 경로
+(`_run_case_steps` → `_execute_step` → ... → `_get_fc_stmin()`) 어디에서도
+이 값을 실제로 읽지 않아 완전히 죽은 코드였다 — 스텝이 자기 XML에
+`localSTMinTx="0x0A"`를 명시해도 항상 전역 STmin(UdsGlobalControls) 또는
+기본값 0x0A만 적용됐다.
+
+게다가 파싱 자체에도 버그가 있었다: 실제 GITAuto 내보내기 XML은 거의 모든
+스텝에 `localSTMinTx=""`(빈 문자열) 속성을 항상 갖고 있는데, 기존 파싱
+조건(`"localSTMinTx" in step_info.params`)은 속성이 "존재하기만 하면"
+참이 되어 `_int_hex("")`(=0)을 실제 오버라이드로 취급했다. 즉 이 죽은
+코드를 그대로 연결했다면 거의 모든 스텝에서 STmin=0(딜레이 없음)이
+강제되어 전역 설정을 오히려 항상 무시하는 정반대의 회귀가 발생했을
+것이다.
+
+**수정**:
+- `uds_xml_parser.py`: `localSTMinTx` 속성값이 빈 문자열이면 `None`(오버라이드
+  없음)으로, 실제 값이 있을 때만 `_int_hex()`로 파싱하도록 변경.
+- `ota_tester_download_manager.py`: `_local_stmin_override`(스텝 실행 중에만
+  설정되는 인스턴스 필드) 추가. `_get_fc_stmin()`의 우선순위를 "스텝 자신의
+  localSTMinTx > 공유 전역 STmin(UdsGlobalControls) > 기본값 0x0A"로 변경.
+  `_run_case_steps`에서 각 스텝 실행 직전에 `_local_stmin_override`를 그
+  스텝의 `local_stmin_tx`로 설정하고, `finally`로 스텝이 끝나면 `None`으로
+  복원(다음 스텝에 새어나가지 않게).
+
+검증: 신규 테스트 2건(`test_local_stmin_tx_empty_attribute_parses_to_none`,
+`test_local_stmin_tx_override_applied_during_step_and_cleared_after`) 포함
+백엔드 전체 242개 테스트 통과.
+
+### ③ TransferData 응답을 매우 빠르게(0.004688초) 받았는데 놓치고 타임아웃 처리됨
+
+**원인**: `_uds_request()`/`_uds_request_with_retry()`(uds_download_manager.py,
+ota_tester_download_manager.py)와 `/api/isotp/send`(main.py, "응답 대기" 모드)
+모두 지금까지 "먼저 `send()` 호출 → 끝나면 그제서야 receive용 리스너
+생성/등록"순서였다. python-can의 `Notifier`는 프레임이 도착하는 *그 순간*
+등록되어 있는 리스너에게만 전달하므로, `send()`가 반환된 시점과 receive용
+`can.BufferedReader()`를 실제로 만들어 `add_listener`하는 시점 사이의
+(로깅·예외처리 등 파이썬 레벨 오버헤드로 생기는) 짧은 공백에 ECU 응답이
+도착하면 그냥 사라진다. 이번에 실제로 관찰된 응답 지연 0.004688초(4.688ms)는
+이 공백보다 충분히 빠를 수 있는 값이었다.
+
+이전에 고친 NRC 0x78 재시도 사이 공백(리스너 재사용)과 같은 계열의 버그이지만,
+이번엔 "송신 직후 ~ 수신 리스너 등록 전" 구간이라는 점이 다르다.
+
+**수정**: `isotp_service.py`의 `send()`에 `receive()`와 동일한 패턴으로
+`reader: Optional[can.BufferedReader] = None` 파라미터 추가(넘기면 그
+리스너를 그대로 쓰고 자기가 안 만들고 안 지움 — 멀티프레임 송신 중 Flow
+Control 대기에 사용, Single Frame 송신에는 영향 없음). 호출부 3곳
+(`uds_download_manager._uds_request`/`_uds_request_with_retry`,
+`ota_tester_download_manager._uds_request_with_retry`, `main.py`의
+`/api/isotp/send` "응답 대기" 분기)을 모두 "리스너를 먼저 만들어
+등록 → `reader=`를 넘겨 `send()` 호출 → 같은 `reader`로 `receive()` 호출
+→ 끝나면 한 번만 해제" 순서로 재구성 — 송신 시작부터 수신 완료까지 리스너가
+공백 없이 계속 등록되어 있다.
+
+검증: 신규 테스트 3건(`test_uds_request_registers_listener_before_sending`,
+`test_uds_request_with_retry_registers_listener_before_sending` ×2, 각
+uds_download_manager/ota_tester_download_manager) 포함 백엔드 전체 245개
+테스트 통과. `main.py`는 syntax 확인 + 기존 `test_api.py`의 `/api/isotp/send`
+resp_id 테스트로 회귀 확인.
+
+### ④ (보류) CAN/전원 연결 상태 저장 안 함 요구사항 — 조사 결과 재현 불가
+
+`App.tsx`의 `CanConfig`(iface/channel/bitrate/fd), `PowerControlWidget.tsx`,
+`canStore.ts`의 모든 `localStorage` 키를 확인한 결과, CAN/전원의
+연결/해제 상태는 현재 어디에도 저장되지 않고 있었다 -- 둘 다 항상
+`canStore.status`(백엔드 실시간 조회)로만 표시되며, 레이아웃 저장 JSON에도
+연결 플래그가 없다. 사용자에게 재현 경로(레이아웃 불러오기 후? 프론트만
+새로고침? 백엔드까지 재시작?)를 확인 요청, 답변 대기 중.
