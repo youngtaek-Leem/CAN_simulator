@@ -55,6 +55,36 @@ SECURITY_REQUEST_SEED = 0x01
 SECURITY_SEND_KEY = 0x02
 
 # ---------------------------------------------------------------------------
+# Suppress Positive Response Message Indication Bit (bit 7 of the
+# subfunction byte, i.e. subfunction | 0x80) -- ISO 14229-1 defines this for
+# every subfunction-based service below; when a request sets it, the server
+# MUST send no positive response at all (only a negative response if
+# something is actually wrong), so a caller waiting for a reply must treat
+# "nothing arrived before the timeout" as success, not a failure, for these
+# services. Restricted to the services this module actually builds
+# subfunction-based requests for (see the module docstring) -- checking byte
+# 1 for services that DON'T have a subfunction there (e.g.
+# ReadDataByIdentifier's DID high byte) would misfire, since that byte is
+# ordinary data and can easily have bit 0x80 set by coincidence.
+# ---------------------------------------------------------------------------
+
+SUPPRESS_BIT = 0x80
+_SUBFUNCTION_SERVICES = frozenset({0x10, 0x11, 0x28, 0x31, 0x3E, 0x85})
+
+
+def expects_no_response(request: bytes) -> bool:
+    """True if `request` is a subfunction-based UDS request with the
+    Suppress Positive Response bit set -- the server is required to send no
+    positive response, so a timeout waiting for one is the expected, correct
+    outcome rather than a failure. A negative response (0x7F ...), if one
+    does arrive, is still a real failure regardless of this bit."""
+    return (
+        len(request) >= 2
+        and request[0] in _SUBFUNCTION_SERVICES
+        and bool(request[1] & SUPPRESS_BIT)
+    )
+
+# ---------------------------------------------------------------------------
 # Dummy key generation (override with .dll or custom logic)
 # ---------------------------------------------------------------------------
 
@@ -391,6 +421,15 @@ def parse_response(response: bytes) -> dict:
     result["positive"] = True
     result["data"] = response
     return result
+
+
+def suppressed_response_result(request: bytes) -> dict:
+    """Synthetic success result for a suppress-bit request that correctly
+    got no response at all -- same shape as parse_response()'s positive
+    case, so callers checking result["positive"]/["sid"]/etc. don't need a
+    separate code path. `suppressed` is extra (ignored by existing callers)
+    for logging/diagnostics."""
+    return {"positive": True, "sid": (request[0] + 0x40) & 0xFF, "nrc": 0, "data": b"", "suppressed": True}
 
 
 def parse_request_download_response(response: bytes) -> dict:

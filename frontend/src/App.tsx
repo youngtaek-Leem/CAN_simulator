@@ -374,6 +374,23 @@ export default function App() {
     setActiveId(null);
   };
 
+  const reorderPages = (fromId: string, toId: string) => {
+    setPages((ps) => {
+      const fromIdx = ps.findIndex((p) => p.id === fromId);
+      if (fromIdx === -1 || fromId === toId) return ps;
+      const next = [...ps];
+      const [moved] = next.splice(fromIdx, 1);
+      // Re-find toId's index *after* removing the dragged page, so `moved`
+      // always lands immediately before it -- otherwise (using the
+      // pre-removal index) dragging rightward would drop one slot past the
+      // target instead of onto it.
+      const toIdx = next.findIndex((p) => p.id === toId);
+      if (toIdx === -1) return ps;
+      next.splice(toIdx, 0, moved);
+      return next;
+    });
+  };
+
   // ---- render ----------------------------------------------------------------
 
   return (
@@ -407,6 +424,7 @@ export default function App() {
           onAdd={addPage}
           onRename={renamePage}
           onRemove={removePage}
+          onReorder={reorderPages}
         />
         {banner && <div className="banner">{banner}</div>}
         <div className="canvas">
@@ -458,11 +476,17 @@ interface PageTabsProps {
   onAdd: () => void;
   onRename: (id: string, name: string) => void;
   onRemove: (id: string) => void;
+  onReorder: (fromId: string, toId: string) => void;
 }
 
-function PageTabs({ pages, activePageId, editMode, onSwitch, onAdd, onRename, onRemove }: PageTabsProps) {
+function PageTabs({ pages, activePageId, editMode, onSwitch, onAdd, onRename, onRemove, onReorder }: PageTabsProps) {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draft, setDraft] = useState('');
+  // Drag-to-reorder (native HTML5 DnD, no extra dependency) -- only enabled
+  // in edit mode, same as rename/delete, so an ordinary click-to-switch
+  // during normal use can never be misread as a drag.
+  const [dragId, setDragId] = useState<string | null>(null);
+  const [dragOverId, setDragOverId] = useState<string | null>(null);
 
   const startRename = (p: Page) => {
     setEditingId(p.id);
@@ -478,7 +502,31 @@ function PageTabs({ pages, activePageId, editMode, onSwitch, onAdd, onRename, on
   return (
     <div className="page-tabs">
       {pages.map((p) => (
-        <div key={p.id} className={`page-tab ${p.id === activePageId ? 'page-tab-active' : ''}`}>
+        <div
+          key={p.id}
+          className={`page-tab ${p.id === activePageId ? 'page-tab-active' : ''} ${dragOverId === p.id ? 'page-tab-drag-over' : ''}`}
+          draggable={editMode && editingId !== p.id}
+          onDragStart={(e) => {
+            setDragId(p.id);
+            e.dataTransfer.effectAllowed = 'move';
+          }}
+          onDragOver={(e) => {
+            if (!dragId || dragId === p.id) return;
+            e.preventDefault();
+            setDragOverId(p.id);
+          }}
+          onDragLeave={() => setDragOverId((id) => (id === p.id ? null : id))}
+          onDrop={(e) => {
+            e.preventDefault();
+            if (dragId && dragId !== p.id) onReorder(dragId, p.id);
+            setDragId(null);
+            setDragOverId(null);
+          }}
+          onDragEnd={() => {
+            setDragId(null);
+            setDragOverId(null);
+          }}
+        >
           {editingId === p.id ? (
             <input
               className="page-tab-rename"

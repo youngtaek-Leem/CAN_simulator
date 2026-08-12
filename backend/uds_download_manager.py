@@ -19,6 +19,8 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 
+import can
+
 from uds_core import (
     UdsError,
     SESSION_DEFAULT, SESSION_PROGRAMMING, SESSION_EXTENDED,
@@ -36,10 +38,22 @@ from uds_core import (
     parse_response,
     parse_request_download_response,
     generate_key,
+    expects_no_response,
+    suppressed_response_result,
 )
 from uds_xml_parser import parse_xml, UdsProcedure, UdsStep, UdsRule, find_step
 
 logger = logging.getLogger(__name__)
+
+
+def _is_timeout_error(exc: Exception) -> bool:
+    """isotp_service.receive() reports every "no frame arrived" case (SF/FF
+    wait, CF wait) via an IsoTpError whose message contains this phrase --
+    used to distinguish a genuine timeout (the expected outcome for a
+    suppress-bit request) from other ISO-TP-level errors (malformed frame,
+    SN mismatch, etc.), which should still be surfaced as real failures even
+    when the suppress bit is set."""
+    return "시간 초과" in str(exc)
 
 MAX_EVENTS = 500
 
@@ -451,6 +465,13 @@ class UdsDownloadManager:
                 fc_stmin=fc_stmin,
             )
         except Exception as exc:
+            # Suppress Positive Response bit set -> the server is required
+            # to send nothing at all, so a plain timeout here is the
+            # correct, expected outcome, not a failure. A non-timeout error
+            # (malformed frame, etc.) still fails regardless of the bit.
+            if expects_no_response(request) and _is_timeout_error(exc):
+                self._log(level="INFO", msg=f"응답 없음(suppressPosRspMsgIndicationBit) — 정상 ({label})")
+                return suppressed_response_result(request)
             raise UdsError(f"ISO-TP 수신 실패 ({label}): {exc}")
 
         result = parse_response(response)
@@ -473,6 +494,19 @@ class UdsDownloadManager:
         P2*Server_max timeout (`proc.p2_star_can_server_max`) instead of
         the original, usually much shorter, P2 timeout that was only meant
         to bound the FIRST reply.
+
+        One CAN listener is kept registered for the *entire* retry sequence
+        below (passed into every `_isotp_receive()` call as `reader`) --
+        otherwise each call tearing down and recreating its own listener
+        (isotp_service.receive()'s normal behavior when no reader is passed)
+        leaves a gap between attempts during which nothing is registered to
+        catch an arriving frame for this wait. If the ECU's real final
+        response happens to land in that gap (right after an NRC 0x78, or
+        during the retry_delay_s sleep), it's gone for good and the next
+        attempt times out waiting for a frame that already went by -- this
+        produced the exact "timed out anyway" symptom despite the 0x78
+        retry logic itself being correct. See isotp_service.receive()'s
+        `reader` docstring.
 
         Deliberately does not delegate to `_uds_request()` (which both
         sends and receives) -- that method is still used as-is by callers
@@ -497,33 +531,48 @@ class UdsDownloadManager:
         except Exception as exc:
             raise UdsError(f"ISO-TP 송신 실패 ({label}): {exc}")
 
-        pending_timeout_s = max(proc.p2_star_can_server_max / 1000.0, timeout_s)
-        for attempt in range(max_retries + 1):
-            try:
-                response = self._isotp_receive(
-                    self._can, rx_id, tx_id,
-                    timeout_s=timeout_s if attempt == 0 else pending_timeout_s,
-                    is_extended_id=is_ext,
-                    fc_stmin=fc_stmin,
-                )
-            except Exception as exc:
-                raise UdsError(f"ISO-TP 수신 실패 ({label}): {exc}")
+        if self._can.notifier is None:
+            raise UdsError(f"ISO-TP 수신 실패 ({label}): CAN 버스가 연결되어 있지 않습니다")
+        reader = can.BufferedReader()
+        self._can.notifier.add_listener(reader)
+        try:
+            pending_timeout_s = max(proc.p2_star_can_server_max / 1000.0, timeout_s)
+            for attempt in range(max_retries + 1):
+                try:
+                    response = self._isotp_receive(
+                        self._can, rx_id, tx_id,
+                        timeout_s=timeout_s if attempt == 0 else pending_timeout_s,
+                        is_extended_id=is_ext,
+                        fc_stmin=fc_stmin,
+                        reader=reader,
+                    )
+                except Exception as exc:
+                    # Suppress Positive Response bit set -> no response at
+                    # all is the correct, expected outcome on a plain
+                    # timeout, not a failure (see _uds_request()'s matching
+                    # comment). A non-timeout error still fails regardless.
+                    if expects_no_response(request) and _is_timeout_error(exc):
+                        self._log(level="INFO", msg=f"응답 없음(suppressPosRspMsgIndicationBit) — 정상 ({label})")
+                        return suppressed_response_result(request)
+                    raise UdsError(f"ISO-TP 수신 실패 ({label}): {exc}")
 
-            result = parse_response(response)
-            if result["positive"]:
-                return result
-            if result["nrc"] == 0x78 and attempt < max_retries:
-                self._log(
-                    level="WARN",
-                    msg=f"NRC 0x78 (ResponsePending) 대기 {attempt + 1}/{max_retries} (P2*={pending_timeout_s:.1f}s)",
+                result = parse_response(response)
+                if result["positive"]:
+                    return result
+                if result["nrc"] == 0x78 and attempt < max_retries:
+                    self._log(
+                        level="WARN",
+                        msg=f"NRC 0x78 (ResponsePending) 대기 {attempt + 1}/{max_retries} (P2*={pending_timeout_s:.1f}s)",
+                    )
+                    time.sleep(retry_delay_s)
+                    continue
+                raise UdsError(
+                    f"UDS Negative Response ({label}): SID=0x{result['sid']:02X}, NRC=0x{result['nrc']:02X}",
+                    nrc=result["nrc"],
                 )
-                time.sleep(retry_delay_s)
-                continue
-            raise UdsError(
-                f"UDS Negative Response ({label}): SID=0x{result['sid']:02X}, NRC=0x{result['nrc']:02X}",
-                nrc=result["nrc"],
-            )
-        raise UdsError(f"No response ({label})")
+            raise UdsError(f"No response ({label})")
+        finally:
+            self._can.notifier.remove_listener(reader)
 
     # ---- Internal: Main execution loop ---------------------------------------
 

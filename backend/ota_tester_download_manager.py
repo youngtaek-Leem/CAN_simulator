@@ -23,6 +23,8 @@ import threading
 import time
 from typing import Optional, Callable, Any
 
+import can
+
 from uds_core import (
     UdsError,
     build_diagnostic_session,
@@ -40,6 +42,8 @@ from uds_core import (
     parse_response,
     parse_request_download_response,
     generate_key,
+    expects_no_response,
+    suppressed_response_result,
 )
 
 logger = logging.getLogger(__name__)
@@ -563,30 +567,66 @@ class OtaTesterDownloadManager:
         original, usually much shorter, P2 timeout that was only meant to
         bound the FIRST reply. Returns the parsed positive response dict;
         raises UdsError on any other negative response, or once
-        max_retries consecutive 0x78s are exceeded."""
+        max_retries consecutive 0x78s are exceeded.
+
+        One CAN listener is kept registered for the *entire* retry sequence
+        (passed into every `_isotp_receive()` call as `reader`) instead of
+        letting each call tear down and recreate its own -- otherwise the
+        gap between attempts (right after an NRC 0x78, or during
+        retry_delay_s's sleep) has nothing registered to catch an arriving
+        frame, so a real final response landing exactly there is lost and
+        the next attempt times out waiting for a frame that already went
+        by. See isotp_service.receive()'s `reader` docstring.
+
+        Send/receive failures are wrapped as UdsError (previously this
+        function let a raw isotp_service.IsoTpError -- e.g. a plain timeout
+        -- propagate uncaught, which _execute_step()'s `except UdsError`
+        escape hatch for confirmPositiveResponse="no" could never catch,
+        aborting the entire run instead of just failing this one step). A
+        suppress-bit ("응답 없음") timeout is treated as success rather than
+        an error at all, per ISO 14229-1."""
         is_ext = self._is_extended()
         req_hex = request.hex(" ").upper() if isinstance(request, (bytes, bytearray)) else str(request)
         self._log(level="INFO", service="CAN_TX", msg=f"Tx CAN_ID=0x{self._request_id:03X} DATA=[{req_hex}] ({label})")
-        self._isotp_send(
-            self._can, self._request_id, self._response_id, request,
-            is_extended_id=is_ext, fc_timeout_s=timeout_s,
-        )
-        pending_timeout_s = max(self._p2_star_can_server_max / 1000.0, timeout_s)
-        for attempt in range(max_retries + 1):
-            response = self._isotp_receive(
-                self._can, self._response_id, self._request_id,
-                timeout_s=timeout_s if attempt == 0 else pending_timeout_s,
-                is_extended_id=is_ext, fc_stmin=self._get_fc_stmin(),
+        try:
+            self._isotp_send(
+                self._can, self._request_id, self._response_id, request,
+                is_extended_id=is_ext, fc_timeout_s=timeout_s,
             )
-            result = parse_response(response)
-            if result["positive"]:
-                return result
-            if result["nrc"] == 0x78 and attempt < max_retries:
-                self._log(level="WARN", msg=f"NRC 0x78 (ResponsePending) 대기 {attempt + 1}/{max_retries} (P2*={pending_timeout_s:.1f}s)")
-                time.sleep(retry_delay_s)
-                continue
-            raise UdsError(f"UDS Negative Response ({label}): NRC=0x{result['nrc']:02X}", nrc=result["nrc"])
-        raise UdsError(f"No response ({label})")
+        except Exception as exc:
+            raise UdsError(f"ISO-TP 송신 실패 ({label}): {exc}")
+
+        if self._can.notifier is None:
+            raise UdsError(f"ISO-TP 수신 실패 ({label}): CAN 버스가 연결되어 있지 않습니다")
+        reader = can.BufferedReader()
+        self._can.notifier.add_listener(reader)
+        try:
+            pending_timeout_s = max(self._p2_star_can_server_max / 1000.0, timeout_s)
+            for attempt in range(max_retries + 1):
+                try:
+                    response = self._isotp_receive(
+                        self._can, self._response_id, self._request_id,
+                        timeout_s=timeout_s if attempt == 0 else pending_timeout_s,
+                        is_extended_id=is_ext, fc_stmin=self._get_fc_stmin(),
+                        reader=reader,
+                    )
+                except Exception as exc:
+                    if expects_no_response(request) and "시간 초과" in str(exc):
+                        self._log(level="INFO", msg=f"응답 없음(suppressPosRspMsgIndicationBit) — 정상 ({label})")
+                        return suppressed_response_result(request)
+                    raise UdsError(f"ISO-TP 수신 실패 ({label}): {exc}")
+
+                result = parse_response(response)
+                if result["positive"]:
+                    return result
+                if result["nrc"] == 0x78 and attempt < max_retries:
+                    self._log(level="WARN", msg=f"NRC 0x78 (ResponsePending) 대기 {attempt + 1}/{max_retries} (P2*={pending_timeout_s:.1f}s)")
+                    time.sleep(retry_delay_s)
+                    continue
+                raise UdsError(f"UDS Negative Response ({label}): NRC=0x{result['nrc']:02X}", nrc=result["nrc"])
+            raise UdsError(f"No response ({label})")
+        finally:
+            self._can.notifier.remove_listener(reader)
 
     # ---- Internal: single-step execution -----------------------------------
 

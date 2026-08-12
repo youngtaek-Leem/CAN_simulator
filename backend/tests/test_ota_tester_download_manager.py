@@ -17,11 +17,26 @@ import pytest
 from ota_tester_download_manager import OtaTesterDownloadManager, iter_transfer_chunks
 
 
+class _FakeNotifier:
+    """`_uds_request_with_retry` now keeps one CAN listener registered
+    across its whole NRC-0x78 retry sequence (see its docstring), so every
+    fake CAN manager below needs a notifier that at least accepts
+    add_listener/remove_listener -- these tests fake `_isotp_send`/
+    `_isotp_receive` entirely, so the listener itself is never actually
+    used to receive anything."""
+
+    def add_listener(self, listener) -> None:
+        pass
+
+    def remove_listener(self, listener) -> None:
+        pass
+
+
 # ---- _build_pdu param-name regression tests --------------------------------
 
 
 def _mgr():
-    can = type("FakeCan", (), {"notifier": object()})()
+    can = type("FakeCan", (), {"notifier": _FakeNotifier()})()
     return OtaTesterDownloadManager(can, lambda *a, **kw: None, lambda *a, **kw: b"")
 
 
@@ -176,7 +191,7 @@ def _write_bin(tmp_path, name: str, size: int) -> str:
 
 def test_full_sequence_runs_hook_then_testblock_with_binary_transfer(tmp_path):
     ecu = FakeEcu(ecu_max_block_length=4)
-    can = type("FakeCan", (), {"notifier": object()})()
+    can = type("FakeCan", (), {"notifier": _FakeNotifier()})()
     mgr = OtaTesterDownloadManager(can, ecu.send, ecu.receive)
 
     hook_path = _write_xml(tmp_path, "hook.xml", HOOK_XML)
@@ -207,7 +222,7 @@ def test_full_sequence_runs_hook_then_testblock_with_binary_transfer(tmp_path):
 
 def test_disabled_case_is_skipped_entirely(tmp_path):
     ecu = FakeEcu()
-    can = type("FakeCan", (), {"notifier": object()})()
+    can = type("FakeCan", (), {"notifier": _FakeNotifier()})()
     mgr = OtaTesterDownloadManager(can, ecu.send, ecu.receive)
 
     hook_path = _write_xml(tmp_path, "hook.xml", HOOK_XML)
@@ -231,7 +246,7 @@ def test_real_negative_response_is_detected_not_ignored(tmp_path):
     """Regression test for the removed TX-ONLY-TEST-MODE hardcoding: a real
     negative response from the fake ECU must actually fail the run."""
     ecu = FakeEcu(fail_sid=0x31)  # routineControl always fails
-    can = type("FakeCan", (), {"notifier": object()})()
+    can = type("FakeCan", (), {"notifier": _FakeNotifier()})()
     mgr = OtaTesterDownloadManager(can, ecu.send, ecu.receive)
 
     block_path = _write_xml(tmp_path, "block.xml", TESTBLOCK_XML)
@@ -254,7 +269,7 @@ def test_confirm_positive_response_no_treats_negative_as_success(tmp_path):
     the fake ECU's default 0x50 positive reply would normally be fine, but
     verify the negative-is-expected path explicitly."""
     ecu = FakeEcu(fail_sid=0x10)  # diagnosticSessionControl returns negative
-    can = type("FakeCan", (), {"notifier": object()})()
+    can = type("FakeCan", (), {"notifier": _FakeNotifier()})()
     mgr = OtaTesterDownloadManager(can, ecu.send, ecu.receive)
 
     hook_path = _write_xml(tmp_path, "hook.xml", HOOK_XML)
@@ -271,7 +286,7 @@ def test_confirm_positive_response_no_treats_negative_as_success(tmp_path):
 
 
 def test_set_all_enabled_and_clear_cases(tmp_path):
-    can = type("FakeCan", (), {"notifier": object()})()
+    can = type("FakeCan", (), {"notifier": _FakeNotifier()})()
     mgr = OtaTesterDownloadManager(can, lambda *a, **kw: None, lambda *a, **kw: b"")
     hook_path = _write_xml(tmp_path, "hook.xml", HOOK_XML)
     mgr.add_case("hook-1", "VersionCheck", "hook", hook_path, order=0, enabled=True)
@@ -289,7 +304,7 @@ def test_set_all_enabled_and_clear_cases(tmp_path):
 
 
 def test_add_case_replaces_existing_case_with_same_id(tmp_path):
-    can = type("FakeCan", (), {"notifier": object()})()
+    can = type("FakeCan", (), {"notifier": _FakeNotifier()})()
     mgr = OtaTesterDownloadManager(can, lambda *a, **kw: None, lambda *a, **kw: b"")
     hook_path = _write_xml(tmp_path, "hook.xml", HOOK_XML)
     mgr.add_case("hook-1", "VersionCheck", "hook", hook_path, order=0)
@@ -301,7 +316,7 @@ def test_add_case_replaces_existing_case_with_same_id(tmp_path):
 
 
 def test_start_requires_at_least_one_case():
-    can = type("FakeCan", (), {"notifier": object()})()
+    can = type("FakeCan", (), {"notifier": _FakeNotifier()})()
     mgr = OtaTesterDownloadManager(can, lambda *a, **kw: None, lambda *a, **kw: b"")
     with pytest.raises(RuntimeError):
         mgr.start(request_id=0x18DA00F1, response_id=0x18DA00F1)
@@ -320,7 +335,7 @@ def test_start_requires_connected_can(tmp_path):
 
 
 def test_get_case_steps_returns_service_and_params(tmp_path):
-    can = type("FakeCan", (), {"notifier": object()})()
+    can = type("FakeCan", (), {"notifier": _FakeNotifier()})()
     mgr = OtaTesterDownloadManager(can, lambda *a, **kw: None, lambda *a, **kw: b"")
     hook_path = _write_xml(tmp_path, "hook.xml", HOOK_XML)
     mgr.add_case("hook-1", "VersionCheck", "hook", hook_path, order=0)
@@ -336,7 +351,7 @@ def test_set_case_selected_steps_skips_deselected_step(tmp_path):
     """Deselecting the (always-failing, in this test) diagnosticSessionControl
     step should make it never execute, while the rest of the case still runs."""
     ecu = FakeEcu(fail_sid=0x10)
-    can = type("FakeCan", (), {"notifier": object()})()
+    can = type("FakeCan", (), {"notifier": _FakeNotifier()})()
     mgr = OtaTesterDownloadManager(can, ecu.send, ecu.receive)
 
     hook_path = _write_xml(tmp_path, "hook.xml", HOOK_XML)
@@ -356,7 +371,7 @@ def test_set_case_selected_steps_skips_deselected_step(tmp_path):
 
 def test_set_case_selected_steps_empty_list_skips_all(tmp_path):
     ecu = FakeEcu()
-    can = type("FakeCan", (), {"notifier": object()})()
+    can = type("FakeCan", (), {"notifier": _FakeNotifier()})()
     mgr = OtaTesterDownloadManager(can, ecu.send, ecu.receive)
 
     hook_path = _write_xml(tmp_path, "hook.xml", HOOK_XML)
@@ -371,7 +386,7 @@ def test_set_case_selected_steps_empty_list_skips_all(tmp_path):
 
 
 def test_get_case_steps_requires_existing_case():
-    can = type("FakeCan", (), {"notifier": object()})()
+    can = type("FakeCan", (), {"notifier": _FakeNotifier()})()
     mgr = OtaTesterDownloadManager(can, lambda *a, **kw: None, lambda *a, **kw: b"")
     with pytest.raises(RuntimeError):
         mgr.get_case_steps("nonexistent")
@@ -383,7 +398,7 @@ def test_get_case_steps_requires_existing_case():
 def test_get_case_steps_includes_pdu_preview_for_routine_control(tmp_path):
     """User-reported example: routineControl(type=0x01, id=0xFF00,
     optionRecord=0xF1B1) must preview as '31 01 FF 00 F1 B1'."""
-    can = type("FakeCan", (), {"notifier": object()})()
+    can = type("FakeCan", (), {"notifier": _FakeNotifier()})()
     mgr = OtaTesterDownloadManager(can, lambda *a, **kw: None, lambda *a, **kw: b"")
     block_path = _write_xml(tmp_path, "block.xml", TESTBLOCK_XML)
     mgr.add_case("block-1", "Unit1", "testBlock", block_path, order=0)
@@ -395,7 +410,7 @@ def test_get_case_steps_includes_pdu_preview_for_routine_control(tmp_path):
 
 
 def test_get_case_steps_transfer_data_preview_without_binary(tmp_path):
-    can = type("FakeCan", (), {"notifier": object()})()
+    can = type("FakeCan", (), {"notifier": _FakeNotifier()})()
     mgr = OtaTesterDownloadManager(can, lambda *a, **kw: None, lambda *a, **kw: b"")
     block_path = _write_xml(tmp_path, "block.xml", TESTBLOCK_XML)
     mgr.add_case("block-1", "Unit1", "testBlock", block_path, order=0)
@@ -407,7 +422,7 @@ def test_get_case_steps_transfer_data_preview_without_binary(tmp_path):
 
 
 def test_get_case_steps_transfer_data_preview_with_binary(tmp_path):
-    can = type("FakeCan", (), {"notifier": object()})()
+    can = type("FakeCan", (), {"notifier": _FakeNotifier()})()
     mgr = OtaTesterDownloadManager(can, lambda *a, **kw: None, lambda *a, **kw: b"")
     block_path = _write_xml(tmp_path, "block.xml", TESTBLOCK_XML)
     bin_path = _write_bin(tmp_path, "fw.bin", 1024)
@@ -425,7 +440,7 @@ def test_get_case_steps_transfer_data_preview_with_binary(tmp_path):
 
 
 def test_get_case_steps_security_access_preview(tmp_path):
-    can = type("FakeCan", (), {"notifier": object()})()
+    can = type("FakeCan", (), {"notifier": _FakeNotifier()})()
     mgr = OtaTesterDownloadManager(can, lambda *a, **kw: None, lambda *a, **kw: b"")
     block_path = _write_xml(tmp_path, "block.xml", TESTBLOCK_XML)
     mgr.add_case("block-1", "Unit1", "testBlock", block_path, order=0)
@@ -437,7 +452,7 @@ def test_get_case_steps_security_access_preview(tmp_path):
 
 
 def test_get_case_steps_diagnostic_session_control_preview(tmp_path):
-    can = type("FakeCan", (), {"notifier": object()})()
+    can = type("FakeCan", (), {"notifier": _FakeNotifier()})()
     mgr = OtaTesterDownloadManager(can, lambda *a, **kw: None, lambda *a, **kw: b"")
     hook_path = _write_xml(tmp_path, "hook.xml", HOOK_XML)
     mgr.add_case("hook-1", "VersionCheck", "hook", hook_path, order=0)
@@ -453,7 +468,7 @@ def test_get_case_steps_transfer_data_preview_truncates_large_block(tmp_path):
     printed the entire first block (thousands of hex bytes) inline."""
     xml = TESTBLOCK_XML.replace('maxNumberOfBlockLength="0x08"', 'maxNumberOfBlockLength="0x0C02"') \
                         .replace('writeSize="0x00000010"', 'writeSize="0x00186508"')
-    can = type("FakeCan", (), {"notifier": object()})()
+    can = type("FakeCan", (), {"notifier": _FakeNotifier()})()
     mgr = OtaTesterDownloadManager(can, lambda *a, **kw: None, lambda *a, **kw: b"")
     block_path = _write_xml(tmp_path, "block.xml", xml)
     bin_path = _write_bin(tmp_path, "fw.bin", 1_600_000)
@@ -473,13 +488,13 @@ def test_get_case_steps_transfer_data_preview_truncates_large_block(tmp_path):
 
 
 def test_get_fc_stmin_defaults_when_no_override():
-    can = type("FakeCan", (), {"notifier": object()})()
+    can = type("FakeCan", (), {"notifier": _FakeNotifier()})()
     mgr = OtaTesterDownloadManager(can, lambda *a, **kw: None, lambda *a, **kw: b"")
     assert mgr._get_fc_stmin() == 0x0A
 
 
 def test_get_fc_stmin_uses_global_override():
-    can = type("FakeCan", (), {"notifier": object()})()
+    can = type("FakeCan", (), {"notifier": _FakeNotifier()})()
     mgr = OtaTesterDownloadManager(can, lambda *a, **kw: None, lambda *a, **kw: b"")
     mgr._global_stmin_tx = 0x1F
     assert mgr._get_fc_stmin() == 0x1F
@@ -497,7 +512,7 @@ def test_uds_request_with_retry_passes_stmin_override_to_receive(tmp_path):
         received_stmin.append(fc_stmin)
         return bytes([0x50, 0x02])  # positive diagnosticSessionControl response
 
-    can = type("FakeCan", (), {"notifier": object()})()
+    can = type("FakeCan", (), {"notifier": _FakeNotifier()})()
     mgr = OtaTesterDownloadManager(can, fake_send, fake_receive)
     mgr._global_stmin_tx = 0x2A
 
@@ -529,7 +544,7 @@ def test_uds_request_with_retry_does_not_retransmit_on_nrc78():
         receive_calls.append(timeout_s)
         return responses.pop(0)
 
-    can = type("FakeCan", (), {"notifier": object()})()
+    can = type("FakeCan", (), {"notifier": _FakeNotifier()})()
     mgr = OtaTesterDownloadManager(can, fake_send, fake_receive)
 
     result = mgr._uds_request_with_retry(bytearray([0x10, 0x02]), 0.05, "diagnosticSessionControl")
@@ -554,7 +569,7 @@ def test_uds_request_with_retry_extends_timeout_after_nrc78():
         receive_timeouts.append(timeout_s)
         return responses.pop(0)
 
-    can = type("FakeCan", (), {"notifier": object()})()
+    can = type("FakeCan", (), {"notifier": _FakeNotifier()})()
     mgr = OtaTesterDownloadManager(can, fake_send, fake_receive)
 
     mgr._uds_request_with_retry(bytearray([0x10, 0x02]), 0.05, "diagnosticSessionControl")
@@ -573,7 +588,7 @@ def test_uds_request_with_retry_raises_after_max_consecutive_pending():
     def fake_receive(can, rx_id, tx_id, timeout_s=1.0, is_extended_id=False, fc_stmin=0, **kw):
         return bytes([0x7F, 0x10, 0x78])  # always pending, never resolves
 
-    can = type("FakeCan", (), {"notifier": object()})()
+    can = type("FakeCan", (), {"notifier": _FakeNotifier()})()
     mgr = OtaTesterDownloadManager(can, fake_send, fake_receive)
 
     with pytest.raises(Exception) as exc_info:
@@ -582,6 +597,64 @@ def test_uds_request_with_retry_raises_after_max_consecutive_pending():
     assert getattr(exc_info.value, "nrc", None) == 0x78
     # still only ever sent once, even after exhausting every pending retry
     assert len(send_calls) == 1
+
+
+def test_uds_request_with_retry_reuses_same_reader_across_pending_retries():
+    """The actual fix for "0x78 다음 실제 응답이 왔는데도 타임아웃으로 실패한다":
+    a fresh listener per attempt leaves a gap between attempts where the
+    real final response can arrive and be missed entirely (see
+    isotp_service.receive()'s `reader` docstring). Verify the manager
+    passes the *same* reader object into every _isotp_receive() call within
+    one retry sequence instead of a new one each time."""
+    readers_seen = []
+    responses = [bytes([0x7F, 0x10, 0x78]), bytes([0x50, 0x02])]
+
+    def fake_receive(can, rx_id, tx_id, timeout_s=1.0, is_extended_id=False, fc_stmin=0, reader=None, **kw):
+        readers_seen.append(reader)
+        return responses.pop(0)
+
+    can = type("FakeCan", (), {"notifier": _FakeNotifier()})()
+    mgr = OtaTesterDownloadManager(can, lambda *a, **kw: {"sent": True}, fake_receive)
+
+    result = mgr._uds_request_with_retry(bytearray([0x10, 0x02]), 0.05, "diagnosticSessionControl")
+
+    assert result["positive"] is True
+    assert len(readers_seen) == 2
+    assert readers_seen[0] is not None
+    assert readers_seen[0] is readers_seen[1]
+
+
+# ---- Suppress Positive Response bit (subfunction | 0x80) ------------------
+
+
+def test_ota_suppress_bit_timeout_is_success_not_failure():
+    """0x81 = session 0x01 | suppress bit -- the ECU is required to send
+    nothing back, so a plain receive timeout must be treated as success
+    instead of propagating as an uncaught isotp_service.IsoTpError (which
+    _execute_step()'s `except UdsError` could never catch, aborting the
+    entire run instead of just this one step)."""
+
+    def fake_receive(can, rx_id, tx_id, **kw):
+        raise Exception("응답 프레임을 기다리다 시간 초과되었습니다")
+
+    can = type("FakeCan", (), {"notifier": _FakeNotifier()})()
+    mgr = OtaTesterDownloadManager(can, lambda *a, **kw: {"sent": True}, fake_receive)
+
+    result = mgr._uds_request_with_retry(bytearray([0x10, 0x81]), 0.05, "diagnosticSessionControl(suppressed)")
+    assert result["positive"] is True
+    assert result.get("suppressed") is True
+
+
+def test_ota_suppress_bit_does_not_forgive_an_actual_negative_response():
+    def fake_receive(can, rx_id, tx_id, **kw):
+        return bytes([0x7F, 0x10, 0x22])  # conditionsNotCorrect
+
+    can = type("FakeCan", (), {"notifier": _FakeNotifier()})()
+    mgr = OtaTesterDownloadManager(can, lambda *a, **kw: {"sent": True}, fake_receive)
+
+    with pytest.raises(Exception) as exc_info:
+        mgr._uds_request_with_retry(bytearray([0x10, 0x81]), 0.05, "diagnosticSessionControl(suppressed)")
+    assert getattr(exc_info.value, "nrc", None) == 0x22
 
 
 # ---- P2/P2* timing read from a case's XML (startCommunication step) -------
@@ -642,7 +715,7 @@ def test_uds_request_with_retry_uses_the_xml_derived_p2_star_value(tmp_path):
         receive_timeouts.append(timeout_s)
         return responses.pop(0)
 
-    can = type("FakeCan", (), {"notifier": object()})()
+    can = type("FakeCan", (), {"notifier": _FakeNotifier()})()
     mgr = OtaTesterDownloadManager(can, fake_send, fake_receive)
     path = _write_xml(tmp_path, "comm.xml", COMM_CONFIG_XML)
     mgr.add_case("hook-1", "VersionCheck", "hook", path, order=0)

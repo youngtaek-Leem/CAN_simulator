@@ -115,6 +115,10 @@ body {
   color: var(--text);
 }
 
+.page-tab-drag-over {
+  box-shadow: inset 2px 0 0 var(--accent);
+}
+
 .page-tab-label {
   background: transparent;
   border: none;

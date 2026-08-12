@@ -253,6 +253,7 @@ def receive(
     fc_block_size: int = 0,
     is_fd: Optional[bool] = None,
     bitrate_switch: Optional[bool] = None,
+    reader: Optional[can.BufferedReader] = None,
 ) -> bytes:
     """Receive an ISO-TP message on the given arbitration ID.
 
@@ -272,6 +273,19 @@ def receive(
         STmin value to send in Flow Control (default 0x00 = 0ms).
     fc_block_size : int
         Block Size to send in Flow Control (default 0 = unlimited).
+    reader : can.BufferedReader, optional
+        Reuse an already-registered listener instead of creating and tearing
+        one down for just this call. A caller that needs to issue several
+        receive() calls back-to-back -- e.g. re-waiting with a longer
+        timeout after an NRC 0x78 "response pending" -- should create one
+        reader, pass it to every call in that sequence, and remove it itself
+        only once at the end. Without this, each call's own
+        add_listener()/remove_listener() leaves a gap between calls during
+        which python-can's Notifier has nowhere registered to dispatch an
+        arriving frame to for this consumer -- if the real final response
+        lands in that gap, it's gone, and the next call times out waiting
+        for a frame that already went by. When omitted (the default), this
+        function creates and tears down its own reader exactly as before.
     is_fd : bool, optional
         CAN frame type for the outgoing Flow Control frame. Defaults to
         ``can_manager.fd_enabled`` when not given.
@@ -296,8 +310,10 @@ def receive(
     if bitrate_switch is None:
         bitrate_switch = is_fd
 
-    reader = can.BufferedReader()
-    can_manager.notifier.add_listener(reader)
+    owns_reader = reader is None
+    if owns_reader:
+        reader = can.BufferedReader()
+        can_manager.notifier.add_listener(reader)
     t0 = time.perf_counter()
 
     try:
@@ -393,4 +409,5 @@ def receive(
             raise IsoTpError(f"알 수 없는 PCI 타입: 0x{pci:02x}")
 
     finally:
-        can_manager.notifier.remove_listener(reader)
+        if owns_reader:
+            can_manager.notifier.remove_listener(reader)

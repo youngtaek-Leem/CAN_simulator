@@ -2261,3 +2261,121 @@ Flow Control을 보내며 Consecutive Frame을 수집해 재조립한 뒤 화면
 브라우저 자동화 도구가 없어 실제 하드웨어로 요청→응답→FC 왕복을 확인하지는
 못했다 -- 사용자가 다음 실사용 시(원래 재현했던 것과 같은 시나리오,
 `22 F1 C1` 같은 ReadDataByIdentifier 요청) 확인해줄 것을 권장한다.
+
+## 페이지 탭 드래그 재배치 (2026-08-12, 사용자 요청)
+
+페이지 탭 순서를 바꿀 UI가 전혀 없었다(추가/이름변경/삭제만 가능, 순서는 생성
+순서로 고정) -- 새 의존성 없이 표준 HTML5 Drag and Drop API로 드래그 재배치를
+추가했다.
+
+- **`frontend/src/App.tsx`**: `reorderPages(fromId, toId)` 추가 — 드래그한
+  페이지를 배열에서 뺀 뒤, **뺀 다음 기준으로** 목표 페이지의 인덱스를 다시
+  찾아 그 바로 앞에 끼워 넣는다(제거 전 인덱스를 그대로 쓰면 오른쪽으로 끌 때
+  목표보다 한 칸 더 밀려 들어가는 문제가 있어, 드래그 방향과 무관하게 항상
+  "놓은 자리 바로 앞"에 오도록 통일). `PageTabs`에 `draggable`/`onDragStart`/
+  `onDragOver`/`onDrop`/`onDragEnd` 핸들러 추가 — **편집 모드에서만** 드래그
+  가능(이름변경/삭제와 동일한 게이팅, 평상시 탭 클릭이 드래그로 오인되는 일이
+  없게 함). 드래그 중인 대상 위에 올라가면 파란 테두리로 표시.
+- **`frontend/src/styles.css`**: `.page-tab-drag-over` 추가.
+
+검증: 프론트 `tsc -b --noEmit`/`vite build`/`oxlint` 클린(새 경고 없음). 백엔드는
+무관. 브라우저 자동화 도구가 없어 실제 드래그 동작은 코드 검토로만 확인했다 --
+사용자가 다음 실사용 시(편집 모드에서 탭을 드래그해 순서가 바뀌는지, 저장 후
+다시 불러왔을 때도 그 순서가 유지되는지) 확인해줄 것을 권장한다.
+
+## UDS suppress-bit / NRC 0x78 / CAN 표시창 버그 3건 수정 (2026-08-12, 사용자
+요청 — 조사 서브에이전트로 원인 특정 후 수정)
+
+사용자가 세 가지를 보고: ① suppressPosRspMsgIndicationBit(구독함수 바이트의
+0x80)이 설정된 요청은 타임아웃이 정상인데 실패로 처리됨, ② `783: 03 22 F1 B1
+...` → `78b: 03 7f 22 78 ...`(NRC 0x78, Pending) → `78b: 07 62 F1 B1 ...`(실제
+응답) 시나리오에서 실제 응답이 왔는데도 "응답 프레임을 기다리다 시간
+초과되었습니다"로 실패, ③ CAN 메시지 표시창을 "스크롤" 모드로 두면 일정 시간
+지나면 메시지가 지워짐. 조사 서브에이전트로 `backend/` 전체를 훑어 세 가지 모두
+실제 버그로 확인했다.
+
+### ①+② 원인 (uds_download_manager.py / ota_tester_download_manager.py /
+isotp_service.py)
+
+- **① Suppress bit 미처리**: 어느 호출 지점도 요청의 subfunction 바이트
+  0x80 비트를 확인하지 않고, receive() 타임아웃을 무조건 실패로 처리했다.
+  `ota_tester_download_manager.py`의 `_uds_request_with_retry`는 더 심해서
+  send/receive에 try/except가 전혀 없어 타임아웃이 `isotp_service.IsoTpError`
+  그대로 새어나가고, `_execute_step`은 `except UdsError`만 잡아서
+  `confirmPositiveResponse="no"`로도 못 막고 **케이스 전체가 ERROR로 중단**됐다
+  (실제로 이 프로젝트의 참조 XML에 `diagnosticSessionType="0x81"
+  confirmPositiveResponse="no"`가 이미 있어 바로 재현 가능한 상태였다).
+- **② NRC 0x78 재시도 로직 자체는 이미 맞게 구현돼 있었다**(P2*Server_max로
+  타임아웃 연장, 재전송 안 함) — 진짜 원인은 그보다 미묘했다:
+  `isotp_service.receive()`가 **호출마다** 새 `can.BufferedReader`를
+  `add_listener`→`remove_listener`로 열고 닫는데, 0x78 수신 후 재시도(로그+
+  `time.sleep(retry_delay_s)`)와 그다음 `receive()` 호출 사이에 리스너가 전혀
+  등록되지 않은 공백이 생긴다. python-can의 `Notifier`는 그 순간 등록된
+  리스너에게만 프레임을 전달하므로, 하필 그 공백에 도착한 진짜 최종 응답은
+  이 수신 경로 입장에서는 그냥 사라지고, 다음 시도는 이미 지나가 버린 프레임을
+  기다리며 타임아웃난다 — 사용자가 보고한 바로 그 증상.
+
+**수정**:
+- `uds_core.py`: `expects_no_response(request)`(subfunction 기반 서비스
+  {0x10,0x11,0x28,0x31,0x3E,0x85}만 대상, 0x22 같은 비-subfunction 서비스의
+  DID 상위 바이트가 우연히 0x80을 가진 경우를 오검출하지 않도록 서비스 목록으로
+  제한) + `suppressed_response_result(request)`(성공 응답과 동일한 shape의
+  synthetic 결과) 추가.
+- `isotp_service.py`의 `receive()`에 `reader: Optional[can.BufferedReader] =
+  None` 파라미터 추가 — 넘겨주면 그 리스너를 그대로 쓰고 자기가 안 만들고 안
+  지운다(호출자가 수명 관리). 안 넘기면(기존 모든 호출자) 원래 동작 그대로.
+- `uds_download_manager.py`/`ota_tester_download_manager.py`의
+  `_uds_request`/`_uds_request_with_retry`: (a) receive 실패 시
+  `expects_no_response()`이고 타임아웃 메시지("시간 초과")면 `UdsError`
+  대신 `suppressed_response_result()`를 반환, (b) 재시도 루프 전체에 걸쳐
+  **하나의 리스너**를 만들어 모든 `_isotp_receive()` 호출에 `reader=`로
+  넘기고 끝에서 한 번만 정리 — 재시도 사이 공백을 없앰. `ota_tester_download_
+  manager.py`의 `_uds_request_with_retry`엔 send/receive try/except도 새로
+  추가해 어떤 실패든 `UdsError`로 감싸지도록 함(이게 없어서 이전엔
+  `confirmPositiveResponse="no"`가 타임아웃을 못 막았다).
+- `uds_download_manager.py`의 ECUReset 호출 지점(`_uds_request` +
+  `except UdsError: pass`)은 건드리지 않았다 — 이미 임의 실패를 관용하는
+  의도적 설계로 보이고(리셋 명령은 ECU가 응답하기 전에 재부팅될 수 있음),
+  이번 fix로 suppress-bit 타임아웃은 이제 그 블록 없이도 정상 성공 처리된다.
+
+검증: `tests/test_isotp_service.py`(20개, 기존 회귀 확인), `tests/
+test_uds_download_manager.py`(4개 신규: reader 재사용 확인, suppress-bit
+타임아웃 성공 2가지 경로, 실제 negative response는 여전히 실패, non-suppress
+타임아웃은 여전히 실패), `tests/test_ota_tester_download_manager.py`(3개
+신규: 동일 항목). 기존 두 테스트 파일의 fake CAN 매니저(`type("FakeCan", (),
+{"notifier": object()})()`)가 이제 `add_listener`/`remove_listener`를
+호출받게 돼 `_FakeNotifier`(no-op) 클래스로 전체 교체(27곳). 백엔드 전체
+240개 테스트 통과.
+
+### ③ 원인 (canStore.ts / displays.tsx)
+
+`canStore.trace`(스크롤 모드가 읽는 원시 프레임 배열)가 들어오는 프레임 배치마다
+**최근 60초 초과 + 3만개 초과분을 무조건 삭제**한다(사용자가 지금 무엇을 보고
+있는지와 무관하게) -- "고정" 모드가 읽는 `canStore.frames`(ID별 Map)는 안 지워짐,
+"스크롤" 모드만 해당. 게다가 살아있는(일시중지 안 한) 스크롤 뷰는 새 프레임이
+올 때마다 맨 아래로 강제 스크롤하는 효과가 있어, 일시중지 없이 위로 스크롤해도
+다음 프레임에 곧바로 바닥으로 끌려 내려간다.
+
+기존에 "일시중지" 버튼이 이미 이 문제의 해법으로 존재했다(누르는 순간 스냅샷을
+고정). 사용자가 "스크롤 중엔 자동으로 캐치/일시중지"를 선택해, 수동 버튼 없이도
+위로 스크롤하는 순간 자동으로 얼리는 동작을 추가했다.
+
+- `frontend/src/widgets/displays.tsx`의 `TraceView`: live 모드의 "새 프레임마다
+  바닥으로" 효과를 "사용자가 이미 바닥에 있을 때만 바닥으로 붙임, 아니면(위로
+  스크롤한 상태) 강제로 끌어내리지 않고 `onScrollAway` 콜백으로 부모에게
+  넘김"으로 변경 — 스크롤 이벤트가 아니라 **다음 프레임이 도착하는 시점**에
+  현재 스크롤 위치를 확인하는 방식이라, 이 effect 자신의 프로그래매틱 스크롤과
+  경쟁하는 레이스가 없다(감지가 스크롤 즉시가 아니라 다음 프레임 도착 시점이라는
+  트레이드오프는 있음 -- 보통 수신 주기 내라 체감상 즉시에 가까움). 얼려진(비
+  live) 상태에서 바닥으로 다시 스크롤하면 `onScrollToBottom` 콜백.
+- `MessageDisplayCore`: `autoFrozen`(새 state, `paused`와 별개)를 추가 —
+  `onScrollAway`가 오면 스냅샷을 찍고 `autoFrozen=true`(수동 "일시중지"와 동일한
+  스냅샷 로직 재사용), `onScrollToBottom`이 오면 `autoFrozen`만 해제(수동
+  `paused`는 버튼으로만 해제 -- 자동으로 멈춘 것만 자동으로 풀리게, 사용자가
+  의도적으로 누른 일시중지는 스크롤만으로 안 풀리게). 툴바 힌트에 "자동
+  정지(스크롤 중)" 상태 추가.
+
+검증: 프론트 `tsc -b --noEmit`/`vite build`/`oxlint` 클린(새 경고 없음). 백엔드
+무관. 브라우저 자동화 도구가 없어 실제 스크롤 동작(위로 스크롤 시 자동 정지,
+바닥으로 스크롤 시 자동 재개)은 코드 검토로만 확인했다 -- 사용자가 다음
+실사용 시 확인해줄 것을 권장한다.
