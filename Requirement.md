@@ -3068,3 +3068,32 @@ CAN-FD(`_pad_fd()`, 8/12/16/20/24/32/48/64 유효 길이로 채움) 양쪽 모�
 (`test_single_frame_no_fc_needed`, `test_multi_frame_bs_zero_sends_all_cf_at_once`).
 백엔드 전체 264개 테스트 통과. 프론트엔드 변경 없음(패딩은 서버가 실제
 전송 시 채워 넣으므로 프론트엔드에 별도 패딩 로직이 없음).
+
+## CAN-SWDL: 실행 중인 스텝 강조색을 빨강→파랑, 실패 시에만 빨강으로 변경
+(2026-08-13, 사용자 요청)
+
+앞서 추가했던 "현재 실행 중인 스텝을 빨간색으로" 강조를, 실행 중일 때는
+파란색으로 바꾸고 실패했을 때만 빨간색이 되도록 요청.
+
+**구현** (`frontend/src/widgets/UdsSwdlWidget.tsx`만 변경, 백엔드 로직은
+이미 갖춰져 있어 그대로 재사용): 백엔드의 `current_step_idx`는 정상
+완료(`STATE_COMPLETED`) 시에만 -1로 리셋되고, 실패로 멈추면 그 실패한
+스텝의 인덱스를 계속 들고 있다(`_run_procedure`가 예외로 중단되면 그
+리셋 줄까지 도달하지 못함). 이 특성을 그대로 활용:
+- `isCurrentStep = current_step_idx === stepIdx`
+- `isFailedStep = isCurrentStep && slot.status.state === 'ERROR'` → 빨강
+  (`#dc2626`)
+- `isRunningStep = isCurrentStep && running && !isFailedStep` → 파랑
+  (`#2563eb`)
+- 에러 복구(error-rule) 절차가 도는 동안은 `state`가 이미 `ERROR`로
+  바뀌었지만 `running`은 아직 `true`인 애매한 구간이 있는데, `isFailedStep`을
+  먼저 판정해 `isRunningStep`에서 제외함으로써 이 구간엔 빨강이 우선
+  적용되도록 함.
+- 새 실행을 시작하면 `start()`가 `current_step_idx`를 다시 -1로 리셋하므로
+  (이전 세션에 이미 반영됨) 이전 실패 표시가 자동으로 사라짐.
+
+검증: `tsc -b --noEmit`/`vite build`/`oxlint` 클린. 백엔드 변경 없음(기존
+`current_step_idx` 리셋/유지 로직을 그대로 재사용, 별도 회귀 테스트
+불필요). 브라우저 자동화 도구가 없어 실제 색상 전환은 코드 검토로만
+확인 -- 사용자가 다음 실사용 시 정상 실행(파랑)과 실패(빨강) 양쪽을
+확인해줄 것을 권장한다.

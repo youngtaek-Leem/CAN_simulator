@@ -565,13 +565,23 @@ export default function UdsSwdlWidget({ config }: Props) {
                 {slot.steps.map((step, stepIdx) => {
                   const isChecked = (selectedSteps[idx] ?? new Set()).has(stepIdx);
                   const displayName = SERVICE_DISPLAY_NAMES[step.service] || step.service;
-                  const isRunningStep = !!slot.status?.running && slot.status?.progress?.current_step_idx === stepIdx;
+                  const isCurrentStep = slot.status?.progress?.current_step_idx === stepIdx;
+                  // current_step_idx keeps pointing at the step that failed
+                  // (the backend only resets it to -1 on a clean COMPLETED
+                  // finish -- see uds_download_manager.py's _run_procedure),
+                  // so once the run stops in ERROR state, the same index
+                  // that was blue while running turns red instead of just
+                  // going back to plain text -- overlap during error-rule
+                  // recovery (still `running`, but `state` already flipped
+                  // to ERROR) is resolved in favor of red.
+                  const isFailedStep = isCurrentStep && slot.status?.state === 'ERROR';
+                  const isRunningStep = isCurrentStep && !!slot.status?.running && !isFailedStep;
 
                   return (
                     <div key={`${idx}-${stepIdx}`} style={{ border: '1px solid #f0f0f0', borderRadius: '3px', padding: '3px', marginBottom: '3px', background: isChecked ? '#f0fdf4' : '#fafafa' }}>
                       <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
                         <input type="checkbox" checked={isChecked} onChange={() => toggleStep(idx, stepIdx)} style={{ margin: 0 }} />
-                        <span style={{ fontSize: '10px', fontWeight: 700, color: isRunningStep ? '#dc2626' : '#000' }}>{displayName}</span>
+                        <span style={{ fontSize: '10px', fontWeight: 700, color: isFailedStep ? '#dc2626' : isRunningStep ? '#2563eb' : '#000' }}>{displayName}</span>
                       </div>
                        {/* Session Type Selector for diagnosticSessionControl */}
                        {step.service === 'diagnosticSessionControl' && (() => {
