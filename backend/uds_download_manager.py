@@ -35,6 +35,7 @@ from uds_core import (
     build_request_download,
     build_transfer_data,
     build_transfer_exit,
+    build_tester_present,
     parse_response,
     parse_request_download_response,
     generate_key,
@@ -57,6 +58,11 @@ def _is_timeout_error(exc: Exception) -> bool:
     return "시간 초과" in str(exc)
 
 MAX_EVENTS = 500
+
+# TransferData keep-alive: send a suppressed TesterPresent [3E 80] at least
+# this often while a block transfer is in progress, so the ECU's S3 session
+# timer doesn't trip during a long binary transfer.
+TESTER_PRESENT_INTERVAL_S = 2.0
 
 # States
 STATE_IDLE = "IDLE"
@@ -948,6 +954,26 @@ class UdsDownloadManager:
         self._download_memory_addr = mem_addr
         self._download_memory_size = mem_size
 
+    def _send_tester_present(self) -> None:
+        """Fire-and-forget suppressed TesterPresent [3E 80] -- always a
+        Single Frame, so isotp_service.send() returns immediately without
+        waiting for anything, and the suppress bit means the ECU shouldn't
+        answer at all. A send failure here must never abort the actual
+        transfer it's protecting, so it's logged and swallowed."""
+        proc = self._procedure
+        if proc is None:
+            return
+        tx_id = proc.request_id
+        rx_id = proc.response_id
+        is_ext = (proc.request_id > 0x7FF) or (proc.response_id > 0x7FF)
+        request = build_tester_present(suppress_pos_rsp=True)
+        try:
+            self._isotp_send(self._can, tx_id, rx_id, request, is_extended_id=is_ext)
+            self._log(level="INFO", service="CAN_TX",
+                      msg=f"Tx CAN_ID=0x{tx_id:03X} DATA=[{request.hex(' ').upper()}] (TesterPresent keep-alive)")
+        except Exception as exc:
+            self._log(level="WARN", msg=f"TesterPresent 전송 실패(무시): {exc}")
+
     def _execute_transfer_data(self, step: UdsStep, modified_params: Optional[dict[str, dict]] = None) -> None:
         """Execute TransferData: send binary in blocks."""
         binary = self._binary_data
@@ -983,6 +1009,12 @@ class UdsDownloadManager:
 
         seq_num = 1
         offset = seek_addr
+        # A large binary can take long enough between diagnostic requests
+        # that the ECU's own S3 session timer (no traffic for ~5s = drop
+        # back to the default session) trips mid-transfer -- a suppressed
+        # TesterPresent every 2s keeps the session alive without waiting for
+        # (or expecting) a response.
+        last_tester_present_ts = time.time()
 
         self._log(level="INFO", msg=f"TransferData 시작: seekAddress=0x{seek_addr:X}, writeSize=0x{write_size:X}, "
                       f"endOffset=0x{end_offset:X}, blockSize={block_size}, totalBlocks={total_blocks}")
@@ -990,6 +1022,11 @@ class UdsDownloadManager:
         while offset < end_offset:
             if self._stop_event.is_set():
                 raise RuntimeError("사용자에 의해 전송 중단됨")
+
+            now = time.time()
+            if now - last_tester_present_ts >= TESTER_PRESENT_INTERVAL_S:
+                self._send_tester_present()
+                last_tester_present_ts = now
 
             chunk = binary[offset:min(offset + block_size, end_offset)]
             request = build_transfer_data(seq_num & 0xFF, chunk)

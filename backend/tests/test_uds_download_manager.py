@@ -11,10 +11,12 @@ UdsDownloadManager._uds_request_with_retry.
 
 from __future__ import annotations
 
+import time
 from unittest.mock import patch
 
 import pytest
 
+import uds_download_manager as udm
 from uds_download_manager import UdsDownloadManager
 from uds_xml_parser import UdsProcedure, UdsRule, UdsStep
 
@@ -421,3 +423,48 @@ def test_run_auto_logs_failure_on_uds_error():
 
     assert spy.calls[0] == ("start", "foo")
     assert spy.calls[-1] == ("stop", False)
+
+
+def test_send_tester_present_sends_suppressed_pdu_without_waiting():
+    """[3E 80] (suppress positive response) -- fire-and-forget, no response
+    wait, since a Single Frame send never blocks on Flow Control."""
+    sent: list[tuple] = []
+
+    def fake_send(can, tx_id, rx_id, data, **kw):
+        sent.append((tx_id, rx_id, bytes(data)))
+        return {"sent": True}
+
+    can = type("FakeCan", (), {"notifier": _FakeNotifier()})()
+    mgr = UdsDownloadManager(can, fake_send, lambda *a, **kw: b"")
+    mgr._procedure = UdsProcedure(request_id=0x783, response_id=0x78B)
+
+    mgr._send_tester_present()
+
+    assert sent == [(0x783, 0x78B, bytes([0x3E, 0x80]))]
+
+
+def test_transfer_data_sends_tester_present_keepalive_periodically(monkeypatch):
+    """Bug report: a long TransferData block transfer runs long enough
+    without any other diagnostic traffic to trip the ECU's S3 session timer.
+    A suppressed TesterPresent must go out at least every
+    TESTER_PRESENT_INTERVAL_S while blocks are still being sent."""
+    monkeypatch.setattr(udm, "TESTER_PRESENT_INTERVAL_S", 0.05)
+
+    can = type("FakeCan", (), {"notifier": _FakeNotifier()})()
+    mgr = UdsDownloadManager(can, lambda *a, **kw: {"sent": True}, lambda *a, **kw: b"")
+    mgr._procedure = UdsProcedure(request_id=0x783, response_id=0x78B)
+    mgr._binary_data = bytes(range(24))
+    mgr._download_block_size = 4  # -> 6 blocks
+
+    tp_calls = []
+    mgr._send_tester_present = lambda: tp_calls.append(time.time())
+
+    def fake_retry(self, request, timeout_s, label, retry_delay_s=0.1):
+        time.sleep(0.03)  # let real elapsed time cross the (shrunk) interval
+        return {"data": bytearray([0x76, request[1]])}
+
+    step = UdsStep(service="transferData", params={"seekAddress": "0x0000", "writeSize": "0x18"})
+    with patch.object(UdsDownloadManager, "_uds_request_with_retry", fake_retry):
+        mgr._execute_transfer_data(step, modified_params=None)
+
+    assert len(tp_calls) >= 2

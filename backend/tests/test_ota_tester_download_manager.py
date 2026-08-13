@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import textwrap
 import threading
+import time
 
 import pytest
 
@@ -873,3 +874,45 @@ def test_run_case_steps_auto_logs_pass_and_fail_per_case():
     failing_case = {"label": "case-B", "steps": [{"service": "startCommunication", "params": {}}], "selected_steps": None}
     assert mgr._run_case_steps(failing_case) is False
     assert spy.calls == [("start", "case-B"), ("stop", False)]
+
+
+# ---- TransferData TesterPresent keep-alive ----------------------------------
+
+
+def test_send_tester_present_sends_suppressed_pdu_without_waiting():
+    sent: list[tuple] = []
+
+    def fake_send(can, tx_id, rx_id, data, **kw):
+        sent.append((tx_id, rx_id, bytes(data)))
+        return {"sent": True}
+
+    can = type("FakeCan", (), {"notifier": _FakeNotifier()})()
+    mgr = OtaTesterDownloadManager(can, fake_send, lambda *a, **kw: b"")
+
+    mgr._send_tester_present()
+
+    assert sent == [(mgr._request_id, mgr._response_id, bytes([0x3E, 0x80]))]
+
+
+def test_transfer_data_sends_tester_present_keepalive_periodically(monkeypatch):
+    """Bug report: a long TransferData block transfer runs long enough
+    without any other diagnostic traffic to trip the ECU's S3 session timer.
+    A suppressed TesterPresent must go out at least every
+    TESTER_PRESENT_INTERVAL_S while blocks are still being sent."""
+    import ota_tester_download_manager as otdm
+    monkeypatch.setattr(otdm, "TESTER_PRESENT_INTERVAL_S", 0.05)
+
+    def slow_send(can, tx_id, rx_id, data, **kw):
+        time.sleep(0.03)  # let real elapsed time cross the (shrunk) interval
+        return {"sent": True}
+
+    can = type("FakeCan", (), {"notifier": _FakeNotifier()})()
+    mgr = OtaTesterDownloadManager(can, slow_send, lambda *a, **kw: bytes([0x76, 0x01]))
+
+    tp_calls = []
+    mgr._send_tester_present = lambda: tp_calls.append(time.time())
+
+    case = {"label": "block-1", "binary_data": bytes(range(24))}
+    mgr._execute_transfer_data(case, {"seekAddress": "0x0000", "writeSize": "0x18", "maxNumberOfBlockLength": "0x04"})
+
+    assert len(tp_calls) >= 2

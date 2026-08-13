@@ -2921,3 +2921,49 @@ OTA Tester를 돌려도 둘 다 각자 파일에 기록되며 서로 간섭하�
 `canlog_<timestamp>_<라벨>_success.asc`/`_fail.asc` 파일이 실제로 생기고
 Vector 등 ASC 뷰어로 열리는지는 사용자가 다음 실사용 때 확인해줄 것을
 권장한다.
+
+## TransferData 중 TesterPresent 주기 전송 추가, STmin 미적용 문의에 대한 답변
+(2026-08-13, 사용자 요청 2건)
+
+### 1. TransferData 도중 2초마다 TesterPresent [3E 80] 전송
+큰 바이너리를 전송하는 동안 다른 진단 트래픽이 한동안 없으면 ECU의 S3(세션
+타임아웃) 타이머가 만료돼 세션이 기본 세션으로 떨어질 수 있다는 요청.
+CAN-SWDL(`uds_download_manager.py`)/OTA Tester(`ota_tester_download_manager.py`)
+양쪽 `_execute_transfer_data()`에 동일하게 적용:
+- `TESTER_PRESENT_INTERVAL_S = 2.0` 상수 추가.
+- `_send_tester_present()`: 응답을 기다리지 않는 fire-and-forget 전송 —
+  `build_tester_present(suppress_pos_rsp=True)`([3E 80])는 항상 Single
+  Frame이라 `isotp_service.send()`가 즉시 반환하고, suppress bit 때문에
+  ECU도 응답하지 않는다. 전송 실패는 로그만 남기고 무시(키프얼라이브
+  실패로 실제 전송 자체를 중단시키면 안 됨).
+- 블록 전송 루프마다 마지막 TesterPresent 이후 경과 시간을 확인해
+  `TESTER_PRESENT_INTERVAL_S` 이상이면 전송 — 블록 전송 자체를 지연시키지
+  않고 루프 안에 끼워 넣는 방식.
+
+### 2. STmin 값을 바꿔도 TransferData 전송 시간에 영향이 없다는 문의 — 버그
+아님, 사실 확인 후 답변
+`isotp_service.py`의 `send()`/`receive()`를 코드로 직접 확인한 결과,
+"STmin"이 실제로 관여하는 지점은 정확히 하나다: **우리가 멀티프레임을
+수신할 때** 우리 쪽 Flow Control 프레임에 넣어 보내는 값(`receive()`의
+`fc_stmin` → `_build_fc(FS_CTS, fc_block_size, fc_stmin)`). TransferData는
+반대로 **우리가 큰 페이로드를 ECU로 송신**하는 경우라, `send()`는 ECU가
+보내는 실제 Flow Control 프레임의 `stmin`(`fc[2]`를 `_decode_stmin()`으로
+해석)만 사용하고 우리가 설정한 STmin은 이 경로에서 아예 읽지도 않는다
+(`_get_fc_stmin()`이 어디서 호출되는지 전수 확인 — 전부 `receive()` 계열
+호출부뿐, `send()` 계열엔 없음). 이건 ISO 15765-2 스펙 자체가 그렇게
+정의돼 있다: STmin은 항상 "수신측이 송신측에게 요구하는 최소 간격"이라
+송신자가 자기 자신에게 적용할 수 있는 값이 아니다 — TransferData의 실제
+전송 속도는 100% ECU가 보내는 Flow Control(blockSize/STmin)에 달려 있고,
+현재 코드는 그 값을 정확히 읽어 반영하고 있다(이미 `time.sleep(stmin)`으로
+존중 중). 따라서 UI의 "STmin" 설정이 TransferData 속도에 영향을 주지
+않는 것은 버그가 아니라 설계상 정상 동작 — 전송이 느리다면 원인은 ECU
+쪽의 Flow Control 응답(blockSize/STmin) 또는 요청한 blockSize 자체이지,
+클라이언트 설정으로 우회할 수 있는 부분이 아니다.
+
+검증: `test_uds_download_manager.py`/`test_ota_tester_download_manager.py`에
+각각 2개씩 신규 테스트 추가 — `_send_tester_present()`가 정확히 `[3E 80]`을
+보내는지(응답 대기 없이), 그리고 다중 블록 전송 도중 `TESTER_PRESENT_INTERVAL_S`
+경과마다 실제로 호출되는지(테스트에서는 간격을 0.05s로 줄이고 각 블록
+전송에 짧은 실제 sleep을 넣어 실시간 기준으로 검증, `time.time`을
+모킹하지 않아 흔들림 없이 안정적). 백엔드 전체 260개 테스트 통과.
+프론트엔드 변경 없음(완전 자동 백그라운드 동작).

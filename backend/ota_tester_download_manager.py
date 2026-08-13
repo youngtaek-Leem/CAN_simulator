@@ -58,6 +58,12 @@ except ImportError:
 
 MAX_EVENTS = 500
 
+# TransferData keep-alive: send a suppressed TesterPresent [3E 80] at least
+# this often while a block transfer is in progress, so the ECU's S3 session
+# timer doesn't trip during a long binary transfer (matches
+# uds_download_manager.py's CAN-SWDL behavior).
+TESTER_PRESENT_INTERVAL_S = 2.0
+
 # securityAccess sub-function levels used for this ECU's RequestSeed/SendKey
 # ([27 11]/[27 12], not build_security_access_*()'s ISO-default [27 01]/
 # [27 02]) -- matches uds_download_manager.py's own default accessMode when
@@ -835,6 +841,21 @@ class OtaTesterDownloadManager:
             self._ecu_max_block_length = max_block_length
         self._log(level="INFO", msg=f"RequestDownload 성공: ECU maxBlockLength={max_block_length}")
 
+    def _send_tester_present(self) -> None:
+        """Fire-and-forget suppressed TesterPresent [3E 80] -- always a
+        Single Frame, so isotp_service.send() returns immediately without
+        waiting for anything, and the suppress bit means the ECU shouldn't
+        answer at all. A send failure here must never abort the actual
+        transfer it's protecting, so it's logged and swallowed."""
+        request = build_tester_present(suppress_pos_rsp=True)
+        try:
+            self._isotp_send(self._can, self._request_id, self._response_id, request,
+                              is_extended_id=self._is_extended())
+            self._log(level="INFO", service="CAN_TX",
+                      msg=f"Tx CAN_ID=0x{self._request_id:03X} DATA=[{request.hex(' ').upper()}] (TesterPresent keep-alive)")
+        except Exception as exc:
+            self._log(level="WARN", msg=f"TesterPresent 전송 실패(무시): {exc}")
+
     def _execute_transfer_data(self, case: dict, params: dict) -> None:
         """Send binary[seekAddress : seekAddress+writeSize] in blocks."""
         binary = case.get("binary_data")
@@ -875,9 +896,15 @@ class OtaTesterDownloadManager:
         )
 
         last_seq = 0
+        # See TESTER_PRESENT_INTERVAL_S's comment above.
+        last_tester_present_ts = time.time()
         for seq_num, offset, chunk in iter_transfer_chunks(binary, seek_addr, write_size, block_size):
             if self._stop_event.is_set():
                 raise UdsError("사용자에 의해 전송 중단됨")
+            now = time.time()
+            if now - last_tester_present_ts >= TESTER_PRESENT_INTERVAL_S:
+                self._send_tester_present()
+                last_tester_present_ts = now
             request = build_transfer_data(seq_num, chunk)
             self._uds_request_with_retry(
                 request, timeout_s,
