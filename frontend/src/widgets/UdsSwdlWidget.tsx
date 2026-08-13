@@ -372,6 +372,20 @@ export default function UdsSwdlWidget({ config }: Props) {
 
                 const newSlots = Array.from({ length: NUM_SLOTS }, () => makeEmptySlot());
                 const uploadPromises: Promise<void>[] = [];
+                // Collected here instead of calling setSlotParamOverrides() from inside
+                // each per-slot closure below -- all 3 slots upload concurrently, and
+                // setSlotParamOverrides() reads `allParamOverrides` (captured once from
+                // this render's `config` prop) to build its merged write. Three
+                // concurrent closures all reading that same stale snapshot means
+                // whichever slot's upload settles last overwrites the whole
+                // paramOverrides object with only its own entry, silently discarding
+                // the other two slots' auto-selected session type (this is exactly
+                // what a real multi-slot XML load hit: only the last-resolving slot's
+                // diagnosticSessionControl override survived, so the others fell back
+                // to sending *both* the main and background session -- see
+                // Requirement.md). Stashing each slot's result here and writing once
+                // after every upload has settled makes it a single atomic update.
+                const autoParamsBySlot: Record<number, Record<string, string>> = {};
 
                 for (let slotIdx = 0; slotIdx < NUM_SLOTS; slotIdx++) {
                   const xmlFile = slotXmlFiles[slotIdx];
@@ -412,12 +426,9 @@ export default function UdsSwdlWidget({ config }: Props) {
                           });
                         }
 
-                        // Fresh package load -- reset this slot's overrides rather than
-                        // merging with whatever a previously loaded package left behind.
-                        setSlotParamOverrides(
-                          slotIdx,
-                          Object.keys(autoParams).length > 0 ? { diagnosticSessionControl: { ...autoParams } } : {},
-                        );
+                        // Stashed for the single merged write after Promise.all below
+                        // (see autoParamsBySlot's comment above) -- not written here.
+                        autoParamsBySlot[slotIdx] = autoParams;
                         setSlots(prev => prev.map((s, si) => (si === slotIdx ? { ...s, steps, status: null } : s)));
                       }
                       if (newSlots[slotIdx].binFile) {
@@ -429,6 +440,19 @@ export default function UdsSwdlWidget({ config }: Props) {
                 setSlots(newSlots);
 
                 await Promise.all(uploadPromises);
+
+                // Single atomic write of every slot's auto-selected params, now that
+                // every upload has settled -- see autoParamsBySlot's comment above.
+                // Fresh package load -- reset each touched slot's overrides rather
+                // than merging with whatever a previously loaded package left behind.
+                if (Object.keys(autoParamsBySlot).length > 0) {
+                  const mergedOverrides = { ...allParamOverrides };
+                  for (const [slotIdxStr, autoParams] of Object.entries(autoParamsBySlot)) {
+                    mergedOverrides[Number(slotIdxStr)] =
+                      Object.keys(autoParams).length > 0 ? { diagnosticSessionControl: { ...autoParams } } : {};
+                  }
+                  updateWidget({ ...config, options: { ...config.options, paramOverrides: mergedOverrides } });
+                }
 
                 // Final status refresh
                 const allStatus = await api.udsStatus();
