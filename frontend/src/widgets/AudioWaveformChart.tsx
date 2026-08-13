@@ -394,8 +394,10 @@ export function AudioWaveformChart({
     const overXAxisStrip = px >= g.plotLeft && px <= g.plotLeft + g.plotW && py > g.plotTop + g.plotH;
     const overYAxisStrip = py >= g.plotTop && py <= g.plotTop + g.plotH && px < g.plotLeft;
 
+    // Plot-area wheel zoom is X-only -- Y still zooms when the wheel is over
+    // the left Y-axis strip, but no longer also inside the plot itself.
     const zoomX = overXAxisStrip || (inX && inY);
-    const zoomY = overYAxisStrip || (inX && inY);
+    const zoomY = overYAxisStrip;
     const xv = xViewRef.current;
     const yv = yViewRef.current;
 

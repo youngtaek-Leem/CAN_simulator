@@ -49,7 +49,7 @@ const PALETTE = [
 ];
 
 const MARGIN = { left: 52, right: 10, top: 8, bottom: 22 };
-const ZOOM_STEP = 1.15;
+const ZOOM_STEP = 1.10;
 const DOT_RADIUS = 2.5;
 const DEFAULT_X_WINDOW_MS = 10_000;
 const MIN_X_WINDOW_MS = 500;
@@ -384,8 +384,10 @@ function SignalChart({
     const overXAxisStrip = px >= g.plotLeft && px <= g.plotLeft + g.plotW && py > g.plotTop + g.plotH;
     const overYAxisStrip = py >= g.plotTop && py <= g.plotTop + g.plotH && px < g.plotLeft;
 
+    // Plot-area wheel zoom is X-only -- Y still zooms when the wheel is over
+    // the left Y-axis strip, but no longer also inside the plot itself.
     const zoomX = overXAxisStrip || (inX && inY);
-    const zoomY = overYAxisStrip || (inX && inY);
+    const zoomY = overYAxisStrip;
     const v = viewRef.current;
 
     if (zoomX) {

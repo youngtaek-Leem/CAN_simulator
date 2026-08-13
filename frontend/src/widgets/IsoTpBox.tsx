@@ -62,7 +62,7 @@ export function IsoTpBox({ config }: { config: WidgetConfig }) {
   // respId, sending our own Flow Control if it's multi-frame -- previously
   // this widget only ever sent, never listened for or flow-controlled a
   // response at all (see Requirement.md).
-  const waitForResponse = opts.waitForResponse ?? false;
+  const waitForResponse = opts.waitForResponse ?? true;
   const respId = opts.respId ?? '78B';
   const respTimeoutMs = opts.respTimeoutMs ?? 2000;
   const respFcBlockSize = opts.respFcBlockSize ?? 0;

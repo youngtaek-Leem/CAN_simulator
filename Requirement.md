@@ -2612,3 +2612,67 @@ resp_id 테스트로 회귀 확인.
 표시까지는 코드 검토로만 확인 -- 사용자가 실제 XML로 CAN-SWDL 위젯을 열어
 (1) 세션타입 기본값, (2) `accessMode` 표시, (3) `skipTask` 미표시를
 확인해줄 것을 권장한다.
+
+## "CAN-오디오 지연 확인" 위젯: 그래프 영역 휠 확대/축소가 X/Y 동시에 적용되던 버그 수정 (2026-08-13, 사용자 요청)
+
+사용자가 그래프 플롯 영역 안에서 휠로 확대/축소하면 X축과 Y축이 동시에
+바뀌고, 왼쪽 Y축 눈금 영역(플롯 바깥쪽 세로 스트립)에서 휠을 돌리면 Y축만
+바뀌는 게 이미 잘 동작한다고 보고 (전자만 수정 요청, 후자는 그대로 유지).
+
+**원인**: `onWheel` 핸들러가 "플롯 영역 안(`inX && inY`)"을 X 줌 조건과 Y 줌
+조건 양쪽에 모두 걸어뒀다 (`zoomX = overXAxisStrip || (inX && inY)`,
+`zoomY = overYAxisStrip || (inX && inY)`). 플롯 영역 밖 X축 눈금 스트립
+(`overXAxisStrip`)/Y축 눈금 스트립(`overYAxisStrip`)에서는 각각 해당 축만
+바뀌지만, 플롯 영역 내부에서는 두 조건이 동시에 참이 되어 X/Y가 함께
+줌됐다. 이 로직이 두 곳에 거의 동일하게 복제돼 있었다: 오디오 채널 차트
+공용 컴포넌트(`AudioWaveformChart.tsx`, `AudioMonitorWidget`과
+`CanAudioLatencyWidget` 양쪽에서 재사용)와, `CanAudioLatencyWidget.tsx`
+자체의 CAN 시그널 차트(오디오 파형과 다른 데이터소스라 공용 컴포넌트를
+안 씀).
+
+**수정**: 두 파일 모두 `zoomY`에서 `(inX && inY)` 항을 제거해
+`zoomY = overYAxisStrip`로 변경 -- 플롯 영역 안에서는 X만 줌되고
+(`zoomX`는 그대로 `overXAxisStrip || (inX && inY)`라 변화 없음), Y축
+스트립에서만 Y가 줌된다. `AudioMonitorWidget`은 `AudioWaveformChart`를
+그대로 재사용하므로 같은 수정이 자동으로 적용된다 (요청 범위는 아니지만
+동일 버그였으므로 일관되게 고침). 일반 그래프 위젯(`GraphWidget.tsx`)에도
+같은 패턴이 있으나 이번 요청 범위 밖이라 그대로 뒀다.
+
+검증: `tsc -b --noEmit`/`vite build`/`oxlint` 클린. 백엔드 변경 없음.
+브라우저 자동화 도구가 없어 실제 휠 동작은 코드 검토로만 확인 -- 사용자가
+실제로 플롯 영역/Y축 스트립에서 휠 동작을 확인해줄 것을 권장한다.
+
+## "CAN 신호 그래프" 위젯에도 동일한 X전용 휠 확대/축소 적용 + 줌 비율 10%로 변경 (2026-08-13, 사용자 요청)
+
+바로 위 항목에서 오디오/CAN-오디오 지연 위젯을 고치면서 `GraphWidget.tsx`
+(일반 CAN 신호 그래프 위젯)에도 같은 패턴의 버그가 있다고 보고했는데,
+사용자가 이 위젯도 동일한 방식으로 고쳐달라고 요청. 추가로 휠 1틱당
+확대/축소 비율을 10% 단위로 지정.
+
+**수정** (`frontend/src/widgets/GraphWidget.tsx`):
+- `onWheel`의 `zoomY`에서 `(inX && inY)` 항을 제거해
+  `zoomY = overYAxisStrip`로 변경 -- 플롯 영역 안에서는 X만 줌되고, 왼쪽
+  Y축 눈금 스트립에서만 Y가 줌된다 (`AudioWaveformChart.tsx`/
+  `CanAudioLatencyWidget.tsx`와 동일한 수정).
+- `ZOOM_STEP`을 `1.15`(15%)에서 `1.10`(10%)으로 변경. 이 위젯만 요청받아
+  변경했고, 같은 상수를 각자 갖고 있는 `AudioWaveformChart.tsx`/
+  `CanAudioLatencyWidget.tsx`의 `ZOOM_STEP`(1.15)은 이번 요청 범위가
+  아니라 그대로 뒀다.
+
+검증: `tsc -b --noEmit`/`vite build`/`oxlint src/widgets/GraphWidget.tsx`
+클린. 백엔드 변경 없음. 브라우저 자동화 도구가 없어 실제 휠 동작은 코드
+검토로만 확인.
+
+## "ISO-TP 전송" 위젯 "응답 대기" 기본값을 OFF에서 ON으로 변경 (2026-08-13, 사용자 요청)
+
+`IsoTpBox.tsx`의 `waitForResponse`는 `config.options.waitForResponse ??
+false`로 기본 꺼짐 상태였다 (2026-08-11 "응답 대기" 기능 추가 당시 신규
+위젯 기본 동작을 바꾸지 않으려고 OFF로 시작한 것 — Requirement.md 해당
+항목 참고). 사용자 요청으로 기본값을 `true`로 변경.
+
+**수정**: `const waitForResponse = opts.waitForResponse ?? true;` 한 줄만
+변경. 응답 대기가 켜졌을 때 필요한 `respId` 등은 이미 기본값(`78B`)이
+있어 `canSend` 조건에 영향 없음 -- 새로 올린 위젯도 바로 전송 가능.
+
+검증: `tsc -b --noEmit`/`vite build`/`oxlint src/widgets/IsoTpBox.tsx`
+클린. 백엔드 변경 없음.
