@@ -41,7 +41,7 @@ SF_MAX_LEN = 7
 FF_DATA_LEN = 6
 CF_DATA_LEN = 7
 MAX_ISOTP_LEN = 4095
-PAD_BYTE = 0x00
+PAD_BYTE = 0x55
 
 # CAN-FD (ISO 15765-2:2016) framing limits: escape-form Single Frame and
 # First Frame carry up to 62 data bytes (frame length 64 minus a 2-byte PCI),

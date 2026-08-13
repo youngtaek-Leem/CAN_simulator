@@ -70,7 +70,7 @@ def test_single_frame_no_fc_needed(stack):
         "duration_ms": result["duration_ms"],
     }
     msg = peer.recv(timeout=1.0)
-    assert msg.data == bytes([0x05, 0x01, 0x02, 0x03, 0x04, 0x05, 0x00, 0x00])
+    assert msg.data == bytes([0x05, 0x01, 0x02, 0x03, 0x04, 0x05, 0x55, 0x55])
 
 
 def test_single_frame_boundary_7_bytes(stack):
@@ -102,7 +102,7 @@ def test_multi_frame_bs_zero_sends_all_cf_at_once(stack):
         frames = [f for f in drain(monitor, 4) if f.arbitration_id == TX_ID]
         assert bytes(frames[0].data) == bytes([0x10, 0x0F]) + data[:6]
         assert bytes(frames[1].data) == bytes([0x21]) + data[6:13]
-        assert bytes(frames[2].data) == bytes([0x22]) + data[13:15] + bytes([0, 0, 0, 0, 0])
+        assert bytes(frames[2].data) == bytes([0x22]) + data[13:15] + bytes([0x55] * 5)
     finally:
         monitor.shutdown()
 

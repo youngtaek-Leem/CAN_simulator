@@ -3049,3 +3049,22 @@ Tester는 `self._request_id`, 확장 주소면 29비트일 수도 있음)로 전
 검증: 두 매니저의 기존 `_send_tester_present` 테스트를 새 기대값(0x7DF)으로
 갱신 — `test_send_tester_present_sends_suppressed_pdu_functionally_without_waiting`.
 백엔드 전체 264개 테스트 통과. 프론트엔드 변경 없음.
+
+## CAN 프레임 패딩 바이트를 0x00에서 0x55로 변경 (2026-08-13, 사용자 요청)
+
+`isotp_service.py`의 `PAD_BYTE = 0x00`가 실제로 쓰이는 유일한 패딩
+값이었다 -- classic CAN(`_pad()`, 8바이트 미만이면 0x00으로 채움)과
+CAN-FD(`_pad_fd()`, 8/12/16/20/24/32/48/64 유효 길이로 채움) 양쪽 모두
+이 상수를 쓰고, CAN-SWDL/OTA Tester/수동 ISO-TP 전송 위젯 등 모든 UDS
+프레임 송신이 이 함수들을 거치므로 사실상 앱 전체의 CAN 송신 패딩이 이
+값 하나로 결정된다. `0x55`로 변경.
+
+**참고 (건드리지 않음)**: `uds_core.py`에 `PADDING_BYTE = 0xCC`라는 별도
+상수가 정의돼 있지만 코드베이스 전체에서 실제로 참조하는 곳이 한 곳도
+없는 죽은 코드였다 — 실제 패딩 동작과 무관해 이번 변경 대상이 아니다.
+
+검증: `test_isotp_service.py`의 기존 테스트 2개가 패딩 바이트를 0x00으로
+하드코딩해 검증하고 있어 0x55로 갱신
+(`test_single_frame_no_fc_needed`, `test_multi_frame_bs_zero_sends_all_cf_at_once`).
+백엔드 전체 264개 테스트 통과. 프론트엔드 변경 없음(패딩은 서버가 실제
+전송 시 채워 넣으므로 프론트엔드에 별도 패딩 로직이 없음).
