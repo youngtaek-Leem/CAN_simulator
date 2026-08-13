@@ -27,6 +27,7 @@ from typing import Optional, Callable, Any
 import can
 
 from log_service import AutoCanLogger
+from isotp_service import decode_stmin
 
 from uds_core import (
     UdsError,
@@ -61,8 +62,13 @@ MAX_EVENTS = 500
 # TransferData keep-alive: send a suppressed TesterPresent [3E 80] at least
 # this often while a block transfer is in progress, so the ECU's S3 session
 # timer doesn't trip during a long binary transfer (matches
-# uds_download_manager.py's CAN-SWDL behavior).
+# uds_download_manager.py's CAN-SWDL behavior). Sent functionally
+# (broadcast) on the standard 11-bit OBD/UDS functional request ID rather
+# than this case's own physical request_id -- always classic 11-bit
+# regardless of whatever addressing (including 29-bit extended) the rest of
+# this case otherwise uses.
 TESTER_PRESENT_INTERVAL_S = 2.0
+FUNCTIONAL_REQUEST_ID = 0x7DF
 
 # securityAccess sub-function levels used for this ECU's RequestSeed/SendKey
 # ([27 11]/[27 12], not build_security_access_*()'s ISO-default [27 01]/
@@ -681,6 +687,7 @@ class OtaTesterDownloadManager:
                 self._isotp_send(
                     self._can, self._request_id, self._response_id, request,
                     is_extended_id=is_ext, fc_timeout_s=timeout_s, reader=reader,
+                    min_stmin_s=decode_stmin(self._get_fc_stmin()),
                 )
             except Exception as exc:
                 raise UdsError(f"ISO-TP 송신 실패 ({label}): {exc}")
@@ -842,17 +849,18 @@ class OtaTesterDownloadManager:
         self._log(level="INFO", msg=f"RequestDownload 성공: ECU maxBlockLength={max_block_length}")
 
     def _send_tester_present(self) -> None:
-        """Fire-and-forget suppressed TesterPresent [3E 80] -- always a
-        Single Frame, so isotp_service.send() returns immediately without
-        waiting for anything, and the suppress bit means the ECU shouldn't
-        answer at all. A send failure here must never abort the actual
-        transfer it's protecting, so it's logged and swallowed."""
+        """Fire-and-forget suppressed TesterPresent [3E 80], sent functionally
+        on FUNCTIONAL_REQUEST_ID (0x7DF) rather than this case's own physical
+        request_id -- always a Single Frame, so isotp_service.send() returns
+        immediately without waiting for anything, and the suppress bit means
+        no ECU should answer at all (never listened for here regardless). A
+        send failure here must never abort the actual transfer it's
+        protecting, so it's logged and swallowed."""
         request = build_tester_present(suppress_pos_rsp=True)
         try:
-            self._isotp_send(self._can, self._request_id, self._response_id, request,
-                              is_extended_id=self._is_extended())
+            self._isotp_send(self._can, FUNCTIONAL_REQUEST_ID, FUNCTIONAL_REQUEST_ID, request, is_extended_id=False)
             self._log(level="INFO", service="CAN_TX",
-                      msg=f"Tx CAN_ID=0x{self._request_id:03X} DATA=[{request.hex(' ').upper()}] (TesterPresent keep-alive)")
+                      msg=f"Tx CAN_ID=0x{FUNCTIONAL_REQUEST_ID:03X} DATA=[{request.hex(' ').upper()}] (TesterPresent keep-alive, functional)")
         except Exception as exc:
             self._log(level="WARN", msg=f"TesterPresent 전송 실패(무시): {exc}")
 

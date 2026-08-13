@@ -44,6 +44,7 @@ from uds_core import (
 )
 from uds_xml_parser import parse_xml, UdsProcedure, UdsStep, UdsRule, find_step
 from log_service import AutoCanLogger
+from isotp_service import decode_stmin
 
 logger = logging.getLogger(__name__)
 
@@ -61,8 +62,14 @@ MAX_EVENTS = 500
 
 # TransferData keep-alive: send a suppressed TesterPresent [3E 80] at least
 # this often while a block transfer is in progress, so the ECU's S3 session
-# timer doesn't trip during a long binary transfer.
+# timer doesn't trip during a long binary transfer. Sent functionally
+# (broadcast) on the standard 11-bit OBD/UDS functional request ID rather
+# than the procedure's own physical request_id -- ISO 15765-4/14229's
+# standard functional addressing ID, always classic 11-bit regardless of
+# whatever addressing (including 29-bit extended) the rest of this
+# procedure otherwise uses.
 TESTER_PRESENT_INTERVAL_S = 2.0
+FUNCTIONAL_REQUEST_ID = 0x7DF
 
 # States
 STATE_IDLE = "IDLE"
@@ -490,6 +497,7 @@ class UdsDownloadManager:
                     is_extended_id=is_ext,
                     fc_timeout_s=timeout_s,
                     reader=reader,
+                    min_stmin_s=decode_stmin(fc_stmin),
                 )
             except Exception as exc:
                 raise UdsError(f"ISO-TP 송신 실패 ({label}): {exc}")
@@ -585,7 +593,13 @@ class UdsDownloadManager:
         self._can.notifier.add_listener(reader)
         try:
             try:
-                self._isotp_send(self._can, tx_id, rx_id, request, is_extended_id=is_ext, fc_timeout_s=timeout_s, reader=reader)
+                self._isotp_send(
+                    self._can, tx_id, rx_id, request,
+                    is_extended_id=is_ext,
+                    fc_timeout_s=timeout_s,
+                    reader=reader,
+                    min_stmin_s=decode_stmin(fc_stmin),
+                )
             except Exception as exc:
                 raise UdsError(f"ISO-TP 송신 실패 ({label}): {exc}")
 
@@ -955,22 +969,20 @@ class UdsDownloadManager:
         self._download_memory_size = mem_size
 
     def _send_tester_present(self) -> None:
-        """Fire-and-forget suppressed TesterPresent [3E 80] -- always a
-        Single Frame, so isotp_service.send() returns immediately without
-        waiting for anything, and the suppress bit means the ECU shouldn't
-        answer at all. A send failure here must never abort the actual
+        """Fire-and-forget suppressed TesterPresent [3E 80], sent functionally
+        on FUNCTIONAL_REQUEST_ID (0x7DF) rather than this procedure's own
+        physical request_id -- always a Single Frame, so isotp_service.send()
+        returns immediately without waiting for anything, and the suppress
+        bit means no ECU should answer at all (never listened for here
+        regardless). A send failure here must never abort the actual
         transfer it's protecting, so it's logged and swallowed."""
-        proc = self._procedure
-        if proc is None:
+        if self._procedure is None:
             return
-        tx_id = proc.request_id
-        rx_id = proc.response_id
-        is_ext = (proc.request_id > 0x7FF) or (proc.response_id > 0x7FF)
         request = build_tester_present(suppress_pos_rsp=True)
         try:
-            self._isotp_send(self._can, tx_id, rx_id, request, is_extended_id=is_ext)
+            self._isotp_send(self._can, FUNCTIONAL_REQUEST_ID, FUNCTIONAL_REQUEST_ID, request, is_extended_id=False)
             self._log(level="INFO", service="CAN_TX",
-                      msg=f"Tx CAN_ID=0x{tx_id:03X} DATA=[{request.hex(' ').upper()}] (TesterPresent keep-alive)")
+                      msg=f"Tx CAN_ID=0x{FUNCTIONAL_REQUEST_ID:03X} DATA=[{request.hex(' ').upper()}] (TesterPresent keep-alive, functional)")
         except Exception as exc:
             self._log(level="WARN", msg=f"TesterPresent 전송 실패(무시): {exc}")
 

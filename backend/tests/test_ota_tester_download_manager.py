@@ -879,7 +879,9 @@ def test_run_case_steps_auto_logs_pass_and_fail_per_case():
 # ---- TransferData TesterPresent keep-alive ----------------------------------
 
 
-def test_send_tester_present_sends_suppressed_pdu_without_waiting():
+def test_send_tester_present_sends_suppressed_pdu_functionally_without_waiting():
+    """[3E 80] -- sent on the functional broadcast ID (0x7DF), not this
+    case's own physical request_id, and fire-and-forget."""
     sent: list[tuple] = []
 
     def fake_send(can, tx_id, rx_id, data, **kw):
@@ -891,7 +893,7 @@ def test_send_tester_present_sends_suppressed_pdu_without_waiting():
 
     mgr._send_tester_present()
 
-    assert sent == [(mgr._request_id, mgr._response_id, bytes([0x3E, 0x80]))]
+    assert sent == [(0x7DF, 0x7DF, bytes([0x3E, 0x80]))]
 
 
 def test_transfer_data_sends_tester_present_keepalive_periodically(monkeypatch):
@@ -916,3 +918,26 @@ def test_transfer_data_sends_tester_present_keepalive_periodically(monkeypatch):
     mgr._execute_transfer_data(case, {"seekAddress": "0x0000", "writeSize": "0x18", "maxNumberOfBlockLength": "0x04"})
 
     assert len(tp_calls) >= 2
+
+
+def test_uds_request_with_retry_passes_configured_stmin_as_send_floor():
+    """The UI's global STmin override must reach isotp_service.send() as
+    min_stmin_s so it can deliberately slow a TransferData block send down
+    even when the ECU's own Flow Control asks for less -- see
+    isotp_service.send()'s min_stmin_s docstring."""
+    sent_kwargs = {}
+
+    def fake_send(can, tx_id, rx_id, request, **kw):
+        sent_kwargs.update(kw)
+        return {"sent": True}
+
+    def fake_receive(can, rx_id, tx_id, **kw):
+        return bytes([0x76, 0x01])
+
+    can = type("FakeCan", (), {"notifier": _FakeNotifier()})()
+    mgr = OtaTesterDownloadManager(can, fake_send, fake_receive)
+    mgr._global_stmin_tx = 0x32  # 50ms, matches decode_stmin(0x32) == 0.05s
+
+    mgr._uds_request_with_retry(bytearray([0x36, 0x01, 0xAA]), 0.05, "TransferData(seq=1)")
+
+    assert sent_kwargs["min_stmin_s"] == pytest.approx(0.05)

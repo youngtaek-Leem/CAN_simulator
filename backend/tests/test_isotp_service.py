@@ -133,6 +133,39 @@ def test_multi_frame_reassembles_correctly_for_various_lengths(stack):
             monitor.shutdown()
 
 
+def test_min_stmin_s_raises_gap_when_ecu_says_zero(stack):
+    """send()'s min_stmin_s is a floor the caller can use to deliberately
+    slow a multi-frame send down (e.g. CAN-SWDL/OTA Tester's STmin UI
+    setting) even when the ECU's own Flow Control asks for no delay at
+    all -- per ISO 15765-2 the sender may always wait *longer* than the
+    receiver's stated minimum, just never shorter."""
+    cm, peer = stack
+    stop, t, _ = start_fc_responder(peer, fs=0x0, bs=0x00, stmin=0x00)
+    try:
+        data = bytes(range(20))  # FF(6) + CF(7) + CF(7) -> exactly one inter-CF gap
+        result = isotp_service.send(cm, TX_ID, FC_ID, data, fc_timeout_s=1.0, min_stmin_s=0.08)
+    finally:
+        stop.set()
+        t.join(timeout=1)
+    assert result["frames_sent"] == 3
+    assert result["duration_ms"] >= 70  # ECU asked for 0ms; floor forces >=80ms (small tolerance)
+
+
+def test_min_stmin_s_never_shrinks_a_larger_ecu_required_stmin(stack):
+    """The floor is one-directional -- it must never let a send go *faster*
+    than what the ECU's real Flow Control requires."""
+    cm, peer = stack
+    stop, t, _ = start_fc_responder(peer, fs=0x0, bs=0x00, stmin=0x32)  # ECU asks for 50ms
+    try:
+        data = bytes(range(20))
+        result = isotp_service.send(cm, TX_ID, FC_ID, data, fc_timeout_s=1.0, min_stmin_s=0.001)
+    finally:
+        stop.set()
+        t.join(timeout=1)
+    assert result["frames_sent"] == 3
+    assert result["duration_ms"] >= 45  # ECU's 50ms must still be honored, not shrunk to 1ms
+
+
 def test_fc_block_size_limits_frames_per_block(stack):
     cm, peer = stack
     # BS=1: DUT must send a fresh FC before every single CF

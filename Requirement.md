@@ -2967,3 +2967,85 @@ CAN-SWDL(`uds_download_manager.py`)/OTA Tester(`ota_tester_download_manager.py`)
 전송에 짧은 실제 sleep을 넣어 실시간 기준으로 검증, `time.time`을
 모킹하지 않아 흔들림 없이 안정적). 백엔드 전체 260개 테스트 통과.
 프론트엔드 변경 없음(완전 자동 백그라운드 동작).
+
+## STmin 설정이 TransferData 전송 속도에도 영향을 주도록 확장 (2026-08-13,
+사용자 요청 — 사전 질의로 목적 확인: "의도적으로 느리게, 테스트/시뮬레이션용")
+
+### 배경
+직전 항목에서 "STmin이 TransferData 속도에 영향이 없는 것은 ISO 15765-2
+스펙상 정상"이라고 답했었다 -- STmin은 항상 "수신측이 송신측에게 요구하는
+최소 간격"이라 송신자가 자기 자신에게 강제로 적용할 수 있는 값이 아니기
+때문. 사용자에게 "전송을 빠르게(ECU가 요구하는 것보다 작은 STmin)" 대
+"전송을 의도적으로 느리게(테스트/시뮬레이션용)" 중 목적을 물었고, 후자로
+확인 — 이 방향은 스펙을 어기지 않고 안전하게 구현 가능하다(전자는 실제
+ECU의 RX 버퍼 오버플로/프레임 드롭 위험이 있어 권장하지 않음).
+
+### 구현: "STmin"을 송신측 최소 간격의 하한(floor)으로도 사용
+ISO 15765-2상 송신자는 수신자가 요구한 최소 간격보다 *길게* 기다리는 것은
+항상 허용된다(짧게는 안 됨). 그래서 사용자가 설정한 STmin을, 실제 ECU가
+보낸 Flow Control의 STmin과 `max()`로 비교해 "더 큰 쪽"을 실제 대기시간으로
+쓰도록 했다 -- 설정값이 ECU 요구치보다 크면 그만큼 느려지고(요청하신 동작),
+ECU 요구치보다 작으면 ECU 값이 그대로 유지되어(안전) 절대 스펙 위반이
+일어나지 않는다.
+
+- **`backend/isotp_service.py`**: `_decode_stmin`를 `decode_stmin`으로
+  공개(다른 모듈이 자신의 STmin 오버라이드를 초 단위로 변환하는 데 필요).
+  `send()`에 `min_stmin_s: float = 0.0` 파라미터 추가 — CF 전송 루프에서
+  `stmin = max(decode_stmin(fc[2]), min_stmin_s)`로 실제 사용할 간격을
+  결정(이전엔 ECU의 FC 값만 사용). 기본값 0.0이라 이 파라미터를 넘기지
+  않는 기존 호출부(예: `/api/isotp/send` 수동 전송 위젯)는 동작 변화 없음.
+- **`backend/uds_download_manager.py`**(CAN-SWDL): `_uds_request()`/
+  `_uds_request_with_retry()`가 `_isotp_send()` 호출 시
+  `min_stmin_s=decode_stmin(fc_stmin)`을 추가로 전달 — 이미 계산해두고
+  `receive()`의 FC 생성에 쓰던 `fc_stmin`(전역 오버라이드 → XML `stmin_tx`
+  → 기본값 우선순위, `_get_fc_stmin()`)을 송신 경로에도 그대로 재사용.
+  TransferData는 내부적으로 이 `_uds_request_with_retry()`를 거치므로
+  자동으로 적용됨.
+- **`backend/ota_tester_download_manager.py`**: 동일 패턴으로
+  `_uds_request_with_retry()`에 `min_stmin_s=decode_stmin(self._get_fc_stmin())`
+  추가.
+- **`frontend/src/widgets/UdsGlobalControls.tsx`**: "STmin" 입력의 툴팁에
+  이제 수신 시 FC뿐 아니라 송신 시(TransferData 등) ECU 요구치보다 느리게
+  강제하는 최소 간격으로도 쓰인다는 설명 추가(동작 변경에 따른 문서화만,
+  로직 변경 없음).
+
+### 의도적으로 하지 않은 것
+ECU의 FC가 요구하는 값보다 *작은* STmin으로 강제로 더 빠르게 보내는 기능은
+구현하지 않았다 -- 사용자가 명시적으로 "느리게(테스트용)" 목적만 확인했고,
+더 빠르게 보내는 쪽은 스펙 위반이라 실제 하드웨어에서 ECU RX 버퍼
+오버플로/프레임 손실로 펌웨어 플래싱 데이터가 손상될 위험이 있어 별도
+승인 없이는 넣지 않는다.
+
+검증: `backend/tests/test_isotp_service.py`에 `send()`의 `min_stmin_s`
+동작 회귀 테스트 2개 추가 — 실제 virtual CAN 버스 + 백그라운드 FC
+응답기로 (1) ECU가 STmin=0을 요구해도 설정한 floor만큼 실제로 느려지는지
+`duration_ms`로 확인, (2) ECU가 더 큰 STmin(50ms)을 요구할 때 훨씬 작은
+floor(1ms)를 설정해도 ECU 값이 줄어들지 않는지 확인.
+`test_uds_download_manager.py`/`test_ota_tester_download_manager.py`에도
+각각 1개씩 추가 — 전역 STmin 오버라이드가 실제로 `isotp_service.send()`의
+`min_stmin_s`로 정확히 전달되는지 스파이로 확인. 백엔드 전체 264개 테스트
+통과. 프론트 `tsc -b --noEmit`/`vite build`/`oxlint` 클린. 실제 ECU로
+TransferData 도중 STmin을 올려 전송이 실제로 느려지는지는 사용자가 다음
+실사용 때 확인해줄 것을 권장한다.
+
+## TesterPresent 키프얼라이브를 기능적(functional) 주소 0x7DF로 전송하도록 수정
+(2026-08-13, 사용자 요청)
+
+바로 위 항목에서 추가한 TransferData 중 TesterPresent 키프얼라이브가 지금까지
+절차의 물리적(physical) 요청 ID(예: CAN-SWDL은 XML의 `request_id`, OTA
+Tester는 `self._request_id`, 확장 주소면 29비트일 수도 있음)로 전송되고
+있었는데, 이를 표준 11비트 OBD/UDS 기능적 주소 **0x7DF**로 broadcast하고,
+(원래도 응답을 기다리지 않았지만) 명시적으로 다시 확인.
+
+**수정** (`backend/uds_download_manager.py`, `backend/ota_tester_download_manager.py`
+양쪽 동일):
+- `FUNCTIONAL_REQUEST_ID = 0x7DF` 상수 추가.
+- `_send_tester_present()`가 이제 절차의 물리 ID 대신 `FUNCTIONAL_REQUEST_ID`
+  로, 그리고 절차가 확장(29비트) 주소를 쓰더라도 0x7DF는 항상 표준 11비트
+  ID이므로 `is_extended_id=False`로 고정해 전송. 응답은 원래부터 기다리지
+  않았음(Single Frame이라 `isotp_service.send()`가 즉시 반환, suppress bit로
+  ECU도 응답하지 않아야 함) — 이 부분은 변경 없음, 그대로 유지.
+
+검증: 두 매니저의 기존 `_send_tester_present` 테스트를 새 기대값(0x7DF)으로
+갱신 — `test_send_tester_present_sends_suppressed_pdu_functionally_without_waiting`.
+백엔드 전체 264개 테스트 통과. 프론트엔드 변경 없음.

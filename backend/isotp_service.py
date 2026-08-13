@@ -88,8 +88,10 @@ def _pad_fd(data: bytes) -> bytes:
     return data + bytes([PAD_BYTE]) * (target - len(data))
 
 
-def _decode_stmin(byte: int) -> float:
-    """STmin byte -> seconds. 0x00-0x7F = 0-127 ms, 0xF1-0xF9 = 100-900 us."""
+def decode_stmin(byte: int) -> float:
+    """STmin byte -> seconds. 0x00-0x7F = 0-127 ms, 0xF1-0xF9 = 100-900 us.
+    Public (not module-private) since callers of send() need it to convert
+    their own configured STmin override into the ``min_stmin_s`` it takes."""
     if byte <= 0x7F:
         return byte / 1000.0
     if 0xF1 <= byte <= 0xF9:
@@ -149,6 +151,7 @@ def send(
     is_fd: Optional[bool] = None,
     bitrate_switch: Optional[bool] = None,
     reader: Optional[can.BufferedReader] = None,
+    min_stmin_s: float = 0.0,
 ) -> dict:
     """``reader``, when given, is reused for waiting on Flow Control frames
     during a multi-frame send instead of creating/tearing down one just for
@@ -162,7 +165,18 @@ def send(
     python-can's Notifier has nowhere to dispatch an arriving frame -- an
     ECU that answers fast enough (observed: 4.688ms after a TransferData
     request) can have its response land exactly in that gap and be lost for
-    good, timing out the receive despite the ECU having actually answered."""
+    good, timing out the receive despite the ECU having actually answered.
+
+    ``min_stmin_s``: per ISO 15765-2, the receiver's Flow Control STmin is a
+    *minimum* the sender must honor -- the sender is always free to wait
+    longer between Consecutive Frames, just never shorter. Passing a value
+    here raises the actual inter-CF delay to at least this many seconds
+    even when the peer's own FC asks for less (or none), without ever
+    going below what the peer required. Deliberately one-directional: this
+    can only slow a multi-frame send down, never speed it up past what the
+    receiving ECU said it can handle -- doing the latter would violate the
+    spec and risk a real ECU's RX buffer overflowing mid-transfer. 0.0
+    (default) leaves this exactly as before (peer's own STmin only)."""
     if not data:
         raise IsoTpError("전송할 데이터가 없습니다")
     if len(data) > MAX_ISOTP_LEN:
@@ -226,7 +240,7 @@ def send(
                 raise IsoTpError(f"알 수 없는 Flow Control 상태 값({fs})입니다")
 
             block_size = fc[1]
-            stmin = _decode_stmin(fc[2])
+            stmin = max(decode_stmin(fc[2]), min_stmin_s)
             block_count = 0
             while remaining and (block_size == 0 or block_count < block_size):
                 if stmin > 0 and block_count > 0:

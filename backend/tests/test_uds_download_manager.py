@@ -425,9 +425,11 @@ def test_run_auto_logs_failure_on_uds_error():
     assert spy.calls[-1] == ("stop", False)
 
 
-def test_send_tester_present_sends_suppressed_pdu_without_waiting():
-    """[3E 80] (suppress positive response) -- fire-and-forget, no response
-    wait, since a Single Frame send never blocks on Flow Control."""
+def test_send_tester_present_sends_suppressed_pdu_functionally_without_waiting():
+    """[3E 80] (suppress positive response) -- sent on the functional
+    broadcast ID (0x7DF), not the procedure's own physical request_id, and
+    fire-and-forget (no response wait, since a Single Frame send never
+    blocks on Flow Control and nothing here ever calls receive())."""
     sent: list[tuple] = []
 
     def fake_send(can, tx_id, rx_id, data, **kw):
@@ -440,7 +442,7 @@ def test_send_tester_present_sends_suppressed_pdu_without_waiting():
 
     mgr._send_tester_present()
 
-    assert sent == [(0x783, 0x78B, bytes([0x3E, 0x80]))]
+    assert sent == [(0x7DF, 0x7DF, bytes([0x3E, 0x80]))]
 
 
 def test_transfer_data_sends_tester_present_keepalive_periodically(monkeypatch):
@@ -468,3 +470,27 @@ def test_transfer_data_sends_tester_present_keepalive_periodically(monkeypatch):
         mgr._execute_transfer_data(step, modified_params=None)
 
     assert len(tp_calls) >= 2
+
+
+def test_uds_request_with_retry_passes_configured_stmin_as_send_floor():
+    """The UI's global STmin override must reach isotp_service.send() as
+    min_stmin_s so it can deliberately slow a TransferData block send down
+    even when the ECU's own Flow Control asks for less -- see
+    isotp_service.send()'s min_stmin_s docstring."""
+    sent_kwargs = {}
+
+    def fake_send(can, tx_id, rx_id, request, **kw):
+        sent_kwargs.update(kw)
+        return {"sent": True}
+
+    def fake_receive(can, rx_id, tx_id, **kw):
+        return bytes([0x76, 0x01])
+
+    can = type("FakeCan", (), {"notifier": _FakeNotifier()})()
+    mgr = UdsDownloadManager(can, fake_send, fake_receive)
+    mgr._procedure = UdsProcedure(request_id=0x783, response_id=0x78B)
+    mgr._global_stmin_tx = 0x32  # 50ms, matches decode_stmin(0x32) == 0.05s
+
+    mgr._uds_request_with_retry(bytearray([0x36, 0x01, 0xAA]), 0.05, "TransferData(seq=1)")
+
+    assert sent_kwargs["min_stmin_s"] == pytest.approx(0.05)

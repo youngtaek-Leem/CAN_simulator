@@ -68,7 +68,7 @@ export function UdsGlobalControls() {
             color: 'inherit',
             flexShrink: 0,
           }}
-          title="Flow Control STmin (hex), unit 0.1ms"
+          title="Flow Control STmin (hex), unit 0.1ms. 응답 수신 시 우리가 보내는 FC의 STmin이자, TransferData 등 송신 시 ECU가 요구하는 값보다 느리게(만) 강제하는 최소 간격으로도 쓰입니다."
         />
         <span style={{ fontSize: '9px', color: '#6b7280', whiteSpace: 'nowrap' }}>×0.1ms</span>
       </span>
