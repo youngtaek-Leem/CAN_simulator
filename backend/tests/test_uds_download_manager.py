@@ -334,3 +334,90 @@ def test_second_diagnostic_session_control_step_uses_its_own_session_choice():
     # Only the two chosen session switches -- no extra "Background" send for
     # either step.
     assert sent == ["SessionControl(0x02)", "SessionControl(0x01)"]
+
+
+def test_progress_current_step_idx_tracks_the_running_step_and_resets_when_done():
+    """UI feature: highlight the currently-executing step in the checklist.
+    _run_steps must report each selected step's global index via
+    _update_progress(current_step_idx=...) as it runs, and reset it to -1
+    once the whole procedure completes."""
+    can = type("FakeCan", (), {"notifier": _FakeNotifier()})()
+    mgr = UdsDownloadManager(can, lambda *a, **kw: {"sent": True}, lambda *a, **kw: b"")
+
+    proc = UdsProcedure(request_id=0x783, response_id=0x78B)
+    proc.processing_rule = UdsRule(
+        preparation=[UdsStep(service="startCommunication", params={}, sub_steps=[UdsStep(service="cfg", params={})])],
+        unit=[UdsStep(service="controlDTCSetting", params={}), UdsStep(service="communicationControl", params={})],
+        complete=[],
+    )
+    mgr._procedure = proc
+    mgr._binary_data = b"x"
+
+    seen_idx: list[int] = []
+    orig_update_progress = UdsDownloadManager._update_progress
+
+    def spy_update_progress(self, **fields):
+        if "current_step_idx" in fields:
+            seen_idx.append(fields["current_step_idx"])
+        orig_update_progress(self, **fields)
+
+    with patch.object(UdsDownloadManager, "_update_progress", spy_update_progress):
+        mgr._run_procedure(selected_steps=None, modified_params=None)
+
+    # step[0] startCommunication, step[1]/step[2] the two logging-only
+    # services -- then reset to -1 once the run finishes.
+    assert seen_idx == [0, 1, 2, -1]
+    assert mgr._progress["current_step_idx"] == -1
+
+
+class _SpyAutoLogger:
+    """Records start()/stop() calls instead of touching a real CAN bus/file
+    -- see uds_download_manager.py's _run() for how the real AutoCanLogger
+    is used."""
+
+    def __init__(self):
+        self.calls: list[tuple] = []
+
+    def start(self, label):
+        self.calls.append(("start", label))
+
+    def stop(self, success):
+        self.calls.append(("stop", success))
+
+
+def test_run_auto_logs_success_with_xml_stem_label():
+    can = type("FakeCan", (), {"notifier": _FakeNotifier()})()
+    mgr = UdsDownloadManager(can, lambda *a, **kw: {"sent": True}, lambda *a, **kw: b"")
+    mgr._procedure = UdsProcedure(request_id=0x783, response_id=0x78B)
+    mgr._procedure.processing_rule = UdsRule(
+        preparation=[UdsStep(service="startCommunication", params={}, sub_steps=[UdsStep(service="cfg", params={})])],
+    )
+    mgr._binary_data = b"x"
+    mgr._xml_path = "/uploads/udswdl/RS4PE_96370T4AA0_01_2672.xml"
+    spy = _SpyAutoLogger()
+    mgr._auto_logger = spy
+
+    mgr._run(selected_steps=None, modified_params=None)
+
+    assert spy.calls == [("start", "RS4PE_96370T4AA0_01_2672"), ("stop", True)]
+
+
+def test_run_auto_logs_failure_on_uds_error():
+    def fake_receive(can, rx_id, tx_id, **kw):
+        raise Exception("응답 프레임을 기다리다 시간 초과되었습니다")
+
+    can = type("FakeCan", (), {"notifier": _FakeNotifier()})()
+    mgr = UdsDownloadManager(can, lambda *a, **kw: {"sent": True}, fake_receive)
+    mgr._procedure = UdsProcedure(request_id=0x783, response_id=0x78B)
+    mgr._procedure.processing_rule = UdsRule(
+        preparation=[UdsStep(service="diagnosticSessionControl", params={"diagnosticSessionType": "0x03"})],
+    )
+    mgr._binary_data = b"x"
+    mgr._xml_path = "/uploads/udswdl/foo.xml"
+    spy = _SpyAutoLogger()
+    mgr._auto_logger = spy
+
+    mgr._run(selected_steps=None, modified_params=None)
+
+    assert spy.calls[0] == ("start", "foo")
+    assert spy.calls[-1] == ("stop", False)

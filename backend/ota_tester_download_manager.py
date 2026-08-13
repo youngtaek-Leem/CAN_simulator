@@ -21,9 +21,12 @@ import logging
 import os
 import threading
 import time
+from pathlib import Path
 from typing import Optional, Callable, Any
 
 import can
+
+from log_service import AutoCanLogger
 
 from uds_core import (
     UdsError,
@@ -134,6 +137,7 @@ class OtaTesterDownloadManager:
         isotp_send_fn: Callable[..., dict],
         isotp_receive_fn: Callable[..., bytes],
         seedkey_service=None,
+        log_dir: Optional[Path] = None,
     ):
         self._can = can_manager
         self._isotp_send = isotp_send_fn
@@ -142,6 +146,11 @@ class OtaTesterDownloadManager:
         # loaded) -> _execute_security_access() falls back to uds_core's
         # dummy generate_key().
         self._seedkey_service = seedkey_service
+        # Auto ASCII CAN log per case (Start through pass/fail) -- None when
+        # the caller didn't provide a log_dir (e.g. tests), which makes every
+        # _auto_logger call below a no-op via the `is not None` guards. Same
+        # helper/behavior as uds_download_manager.py's CAN-SWDL slots.
+        self._auto_logger = AutoCanLogger(can_manager, log_dir) if log_dir is not None else None
 
         self._lock = threading.RLock()
         self._state = _STATE_IDLE
@@ -155,6 +164,18 @@ class OtaTesterDownloadManager:
         self._current_case_index = -1
         self._current_case: Optional[dict] = None
         self._current_step_index = -1
+        # TransferData block progress, mirroring uds_download_manager.py's
+        # _progress (CAN-SWDL) so the UI can show the same kind of progress
+        # bar here -- only meaningfully populated while a transferData step
+        # is running (see _execute_transfer_data); reset per-case so a new
+        # case's steps don't start out showing the previous case's leftover
+        # percent.
+        self._progress: dict[str, Any] = {
+            "current_step": "",
+            "total_blocks": 0,
+            "current_block": 0,
+            "percent": 0.0,
+        }
         self._download_block_size = 0x0C02
         # None = use the default below; an int overrides it for every step in
         # every case, set right before start() (mirrors uds_download_manager's
@@ -445,6 +466,7 @@ class OtaTesterDownloadManager:
                 "current_case_label": self._current_case["label"] if self._current_case else None,
                 "current_step_index": self._current_step_index,
                 "total_steps_in_case": len(self._current_case["steps"]) if self._current_case else 0,
+                "progress": dict(self._progress),
                 "events": self.events,
                 "error": self._error_message,
             }
@@ -464,6 +486,10 @@ class OtaTesterDownloadManager:
             self._events.append(entry)
             if len(self._events) > MAX_EVENTS:
                 del self._events[: len(self._events) - MAX_EVENTS]
+
+    def _update_progress(self, **fields: Any) -> None:
+        with self._lock:
+            self._progress.update(fields)
 
     # ---- Internal: run loop ------------------------------------------------
 
@@ -513,11 +539,32 @@ class OtaTesterDownloadManager:
                 self._running = False
 
     def _run_case_steps(self, case: dict) -> bool:
+        if self._auto_logger is not None:
+            self._auto_logger.start(case["label"])
+        try:
+            ok = self._run_case_steps_inner(case)
+        except Exception:
+            # _run_case_steps_inner only ever *returns* False for an
+            # expected UDS failure (see _execute_step) -- an actual raised
+            # exception here means something unexpected blew up mid-case.
+            # Still a failed case for logging purposes; re-raise unchanged
+            # so _run_all_cases' own handler still sees and reports it.
+            if self._auto_logger is not None:
+                self._auto_logger.stop(success=False)
+            raise
+        if self._auto_logger is not None:
+            self._auto_logger.stop(success=ok)
+        return ok
+
+    def _run_case_steps_inner(self, case: dict) -> bool:
         steps = case["steps"]
         selected_steps = case.get("selected_steps")  # None = all
+        self._update_progress(current_step="", total_blocks=0, current_block=0, percent=0.0)
         for idx, step in enumerate(steps):
             if self._stop_event.is_set():
                 self._log(level="INFO", msg="사용자에 의해 중단됨")
+                with self._lock:
+                    self._error_message = f"{case['label']}: 사용자에 의해 중단됨"
                 return False
             with self._lock:
                 self._current_step_index = idx
@@ -806,6 +853,7 @@ class OtaTesterDownloadManager:
             raise UdsError(f"seekAddress(0x{seek_addr:X})가 BIN 파일 크기({len(binary)} bytes)를 초과")
         if write_size == 0:
             self._log(level="INFO", msg="TransferData 건너뜀: writeSize=0")
+            self._update_progress(current_step="TransferData", total_blocks=0, current_block=0, percent=100.0)
             return
 
         end_offset = min(seek_addr + write_size, len(binary))
@@ -816,12 +864,14 @@ class OtaTesterDownloadManager:
             )
 
         total_size = end_offset - seek_addr
+        total_blocks = (total_size + block_size - 1) // block_size
+        self._update_progress(current_step="TransferData", total_blocks=total_blocks, current_block=0, percent=0.0)
         timeout_s = max(self._p2_star_can_server_max / 1000.0, 2.0)
 
         self._log(
             level="INFO",
             msg=f"TransferData 시작: seekAddress=0x{seek_addr:X}, writeSize=0x{write_size:X}, "
-                f"endOffset=0x{end_offset:X}, blockSize={block_size}",
+                f"endOffset=0x{end_offset:X}, blockSize={block_size}, totalBlocks={total_blocks}",
         )
 
         last_seq = 0
@@ -837,6 +887,7 @@ class OtaTesterDownloadManager:
             last_seq = seq_num
             bytes_sent = offset + len(chunk) - seek_addr
             pct = min(100.0, (bytes_sent / total_size) * 100.0)
+            self._update_progress(current_block=seq_num, percent=round(pct, 1))
             if seq_num % 10 == 0:
                 self._log(level="INFO", msg=f"전송 진도: 0x{offset + len(chunk):X}/0x{end_offset:X} bytes ({pct:.1f}%)")
 

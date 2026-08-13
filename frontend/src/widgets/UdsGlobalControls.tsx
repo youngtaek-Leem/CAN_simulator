@@ -74,8 +74,8 @@ export function UdsGlobalControls() {
       </span>
       <span style={{ display: 'inline-flex', alignItems: 'center', gap: '3px' }}>
         <label style={{
-          padding: '2px 6px', fontSize: '10px', border: '1px solid var(--border)', borderRadius: '3px',
-          cursor: 'pointer', whiteSpace: 'nowrap', background: 'var(--panel)', color: 'inherit',
+          padding: '2px 6px', fontSize: '10px', border: 'none', borderRadius: '3px',
+          cursor: 'pointer', whiteSpace: 'nowrap', background: '#3b82f6', color: '#fff',
         }}>
           ASK 선택
           <input type="file" accept=".dll" style={{ display: 'none' }}

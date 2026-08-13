@@ -223,6 +223,7 @@ export interface UdsProgress {
   current_block: number;
   percent: number;
   phase: string;
+  current_step_idx: number;
 }
 
 export interface UdsCommInfo {
@@ -307,6 +308,13 @@ export interface OtaTesterStepInfo {
   pdu_note: string | null;
 }
 
+export interface OtaTesterProgress {
+  current_step: string;
+  total_blocks: number;
+  current_block: number;
+  percent: number;
+}
+
 export interface OtaTesterStatus {
   state: string;
   running: boolean;
@@ -316,6 +324,7 @@ export interface OtaTesterStatus {
   current_case_label: string | null;
   current_step_index: number;
   total_steps_in_case: number;
+  progress: OtaTesterProgress;
   events: UdsEvent[];
   error: string | null;
 }

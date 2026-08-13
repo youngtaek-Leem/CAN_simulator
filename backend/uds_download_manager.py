@@ -42,6 +42,7 @@ from uds_core import (
     suppressed_response_result,
 )
 from uds_xml_parser import parse_xml, UdsProcedure, UdsStep, UdsRule, find_step
+from log_service import AutoCanLogger
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +72,8 @@ STATE_ERROR = "ERROR"
 class UdsDownloadManager:
     """Manages UDS software download from XML procedure + BIN file."""
 
-    def __init__(self, can_manager, isotp_send_fn, isotp_receive_fn, seedkey_service=None):
+    def __init__(self, can_manager, isotp_send_fn, isotp_receive_fn, seedkey_service=None,
+                 log_dir: Optional[Path] = None, slot_label: str = "slot"):
         self._can = can_manager
         self._isotp_send = isotp_send_fn
         self._isotp_receive = isotp_receive_fn
@@ -79,6 +81,12 @@ class UdsDownloadManager:
         # loaded) -> _execute_security_access() falls back to uds_core's
         # dummy generate_key().
         self._seedkey_service = seedkey_service
+        # Auto ASCII CAN log for this slot's whole run (Start through
+        # Complete/Error, including error-rule recovery) -- None when the
+        # caller didn't provide a log_dir (e.g. tests), which makes every
+        # _auto_logger call below a no-op via the `is not None` guards.
+        self._auto_logger = AutoCanLogger(can_manager, log_dir) if log_dir is not None else None
+        self._slot_label = slot_label
 
         self._lock = threading.RLock()
         self._state = STATE_IDLE
@@ -94,6 +102,13 @@ class UdsDownloadManager:
             "current_block": 0,
             "percent": 0.0,
             "phase": "",
+            # Global step index (matches get_procedure_steps()' flat list) of
+            # the step currently executing, or -1 when none is (idle/between
+            # runs). Only set for the main procedure's own steps -- error-rule
+            # recovery runs its own separate, shorter step list (see
+            # _run_error_recovery) whose indices would otherwise collide with
+            # unrelated main-procedure steps of the same number.
+            "current_step_idx": -1,
         }
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
@@ -247,7 +262,7 @@ class UdsDownloadManager:
                 raise RuntimeError("CAN 버스가 연결되어 있지 않습니다")
 
             self._events = []
-            self._progress = {"current_step": "", "total_blocks": 0, "current_block": 0, "percent": 0.0, "phase": ""}
+            self._progress = {"current_step": "", "total_blocks": 0, "current_block": 0, "percent": 0.0, "phase": "", "current_step_idx": -1}
             self._error_message = None
             self._running = True
             # Capture immutable copies for the worker thread. We also keep
@@ -613,6 +628,9 @@ class UdsDownloadManager:
     def _run(self, selected_steps: Optional[list[int]], modified_params: Optional[dict[str, dict]]) -> None:
         # Thread entry point. selected_steps and modified_params are the
         # immutable copies captured at start() time.
+        if self._auto_logger is not None:
+            label = Path(self._xml_path).stem if self._xml_path else self._slot_label
+            self._auto_logger.start(label)
         try:
             self._run_procedure(selected_steps, modified_params)
         except Exception as exc:
@@ -627,6 +645,8 @@ class UdsDownloadManager:
         finally:
             with self._lock:
                 self._running = False
+            if self._auto_logger is not None:
+                self._auto_logger.stop(success=(self._state == STATE_COMPLETED))
 
     def _run_procedure(self, selected_steps: Optional[list[int]], modified_params: Optional[dict[str, dict]]) -> None:
         proc = self._procedure
@@ -668,7 +688,7 @@ class UdsDownloadManager:
             )
 
         self._set_state(STATE_COMPLETED)
-        self._update_progress(current_step="Complete", percent=100.0)
+        self._update_progress(current_step="Complete", percent=100.0, current_step_idx=-1)
         self._log(level="INFO", msg="===== 다운로드 완료 =====")
 
     def _run_steps(self, steps: list[UdsStep], phase_name: str, start_idx: int = 0,
@@ -703,6 +723,13 @@ class UdsDownloadManager:
             if not selected:
                 step_idx += 1
                 continue
+            # force_all is only ever True for error-rule recovery (see this
+            # method's docstring) -- its step list has its own separate,
+            # shorter index space, so reporting its step_idx here would
+            # highlight an unrelated main-procedure step of the same number
+            # in the UI checklist.
+            if not force_all:
+                self._update_progress(current_step_idx=step_idx)
             self._execute_step(step, phase_name, modified_params, step_idx)
             step_idx += 1
         return step_idx
@@ -1039,10 +1066,12 @@ class MultiUdsDownloadManager:
 
     NUM_SLOTS = 3
 
-    def __init__(self, can_manager, isotp_send_fn, isotp_receive_fn, seedkey_service=None):
+    def __init__(self, can_manager, isotp_send_fn, isotp_receive_fn, seedkey_service=None,
+                 log_dir: Optional[Path] = None):
         self._managers = [
-            UdsDownloadManager(can_manager, isotp_send_fn, isotp_receive_fn, seedkey_service)
-            for _ in range(self.NUM_SLOTS)
+            UdsDownloadManager(can_manager, isotp_send_fn, isotp_receive_fn, seedkey_service,
+                                log_dir=log_dir, slot_label=f"slot{i + 1}")
+            for i in range(self.NUM_SLOTS)
         ]
 
     def get_manager(self, slot_index: int) -> UdsDownloadManager:

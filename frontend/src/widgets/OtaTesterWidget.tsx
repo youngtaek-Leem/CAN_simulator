@@ -499,6 +499,22 @@ export default function OtaTesterWidget({ config }: Props) {
               height: '100%', backgroundColor: '#3b82f6', borderRadius: 4, transition: 'width 0.3s',
             }} />
           </div>
+          {/* TransferData block progress -- separate from the case/step bar above
+              since one "Step" can itself be a long-running multi-block firmware
+              transfer with no visible movement otherwise (matches CAN-SWDL). */}
+          {st.running && st.progress && st.progress.total_blocks > 0 && (
+            <div style={{ marginTop: 4 }}>
+              <div style={{ height: 4, backgroundColor: '#374151', borderRadius: 2 }}>
+                <div style={{
+                  width: `${Math.min(100, st.progress.percent)}%`, height: '100%',
+                  backgroundColor: '#3b82f6', borderRadius: 2, transition: 'width 0.3s',
+                }} />
+              </div>
+              <div style={{ fontSize: 9, color: '#9ca3af' }}>
+                {st.progress.current_step} {st.progress.current_block}/{st.progress.total_blocks} blocks ({st.progress.percent.toFixed(1)}%)
+              </div>
+            </div>
+          )}
         </div>
       )}
 

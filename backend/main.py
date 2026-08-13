@@ -172,6 +172,7 @@ uds_download_manager = MultiUdsDownloadManager(
     isotp_service.send,
     isotp_service.receive,
     seedkey_service,
+    log_dir=CAN_LOG_DIR,
 )
 
 ota_tester_manager = OtaTesterDownloadManager(
@@ -179,6 +180,7 @@ ota_tester_manager = OtaTesterDownloadManager(
     isotp_service.send,
     isotp_service.receive,
     seedkey_service,
+    log_dir=CAN_LOG_DIR,
 )
 
 settings = {"ws_flush_ms": 30}

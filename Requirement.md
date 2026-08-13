@@ -2816,3 +2816,108 @@ vitest/jest 등 없음, 기존 검증도 항상 tsc/vite/oxlint까지만) 경쟁
 세션전환 스텝이 있는 슬롯이 있다면 그 슬롯의 세션타입 오버라이드가
 남아있는지(각 슬롯 카드에서 "세션 타입" 드롭다운이 자동 선택된 상태로
 보이는지) 확인해줄 것을 권장한다.
+
+## UX 개선 6건: OTA Tester 진행률, 텍스트 표시창 초기화, CAN-SWDL 시인성
+(2026-08-13, 사용자 요청 7건 중 1~6번 — 7번 CAN 로그 자동저장은 별도 계획 승인 대기)
+
+### 1. OTA Tester에 TransferData 블록 진행률 표시 (CAN-SWDL에 이미 있던 것과 동일)
+`ota_tester_download_manager.py`는 기존에 "케이스 N/M · Step X/Y" 수준의
+진행률만 있었고, TransferData처럼 한 스텝 안에서 블록 수백 개를 오래
+전송하는 동안은 그 바가 전혀 움직이지 않았다. CAN-SWDL(`uds_download_manager.py`)
+의 `_progress`(current_step/total_blocks/current_block/percent) 패턴을
+그대로 포팅: `__init__`에 `_progress` dict + `_update_progress()` 헬퍼
+추가, `_execute_transfer_data()`에서 블록마다 갱신, `_run_case_steps()`
+시작 시 케이스 전환 때마다 리셋, `get_status_dict()`에 `progress` 포함.
+프론트(`OtaTesterWidget.tsx`)는 기존 케이스/스텝 바 아래에 CAN-SWDL과
+동일한 스타일의 블록/퍼센트 바를 추가(`total_blocks>0`일 때만 표시).
+`types.ts`에 `OtaTesterProgress` 타입 추가.
+
+### 2. "텍스트 표시창" 위젯에 초기화 버튼 추가
+`canStore.ts`에 `clearActivity()`(activityLog를 비우고 `markDirty()`)
+추가, `displays.tsx`의 `TextDisplay`에 작은 헤더 바 + "초기화" 버튼 추가.
+
+### 3. CAN-SWDL: 현재 실행 중인 진단 스텝을 빨간색으로 표기
+백엔드에 `_progress.current_step_idx`(현재 실행 중인 스텝의 전역 인덱스,
+`get_procedure_steps()`의 평평한 리스트와 동일 인덱스 체계, 유휴 시 -1)
+추가 -- `_run_steps()`가 스텝을 실행하기 직전에 갱신. 단, `force_all=True`
+(에러 복구 전용 -- 별도의 짧은 인덱스 체계를 쓰므로 메인 프로시저 스텝과
+번호가 우연히 겹치면 엉뚱한 스텝이 빨갛게 표시될 수 있음)일 때는 갱신하지
+않음. 프론트에서 `slot.status.running && slot.status.progress.current_step_idx
+=== stepIdx`인 스텝의 서비스명 텍스트를 빨간색으로 표시.
+
+### 4~6. CAN-SWDL/공용 위젯 시인성 개선 (스타일만, 로직 변경 없음)
+- `UdsGlobalControls.tsx`: "ASK 선택" 버튼을 "SeedKey DLL 업로드"와 동일한
+  파란 배경/흰 글자로 변경.
+- `UdsSwdlWidget.tsx`: "이 슬롯 전체 선택"/"이 슬롯 전체 해제" 버튼도 동일한
+  파란 배경/흰 글자로 통일.
+- `UdsSwdlWidget.tsx`: 진단 서비스명(보안 액세스, 루틴 제어 등) 텍스트를
+  `fontWeight: 700` + 검정(`#000`)으로 변경 (실행 중일 때는 위 3번 규칙에
+  따라 빨간색으로 대체됨).
+
+검증: 백엔드 `test_uds_download_manager.py`에 회귀 테스트
+`test_progress_current_step_idx_tracks_the_running_step_and_resets_when_done`
+추가 — 선택된 스텝마다 인덱스가 올바르게 보고되고 완료 시 -1로 리셋되는지,
+에러복구 경로에서는 보고되지 않는지 확인. 백엔드 전체 247개 테스트 통과.
+프론트 `tsc -b --noEmit`/`vite build`/`oxlint` 클린. 브라우저 자동화
+도구가 없어 실제 화면(진행률 바 움직임, 빨간 강조, 버튼 색상)은 코드
+검토로만 확인 -- 사용자가 다음 실사용 시 확인해줄 것을 권장한다.
+
+## 7. CAN-SWDL/OTA Tester 실행 시 자동 CAN 로그 저장 (2026-08-13, 사용자 요청
+7건 중 마지막 — 사전 질의로 3가지 확정 후 진행)
+
+### 확정된 사양 (사용자 답변)
+1. **분리 단위**: CAN-SWDL은 슬롯(파일)마다, OTA Tester는 "파일 단위"(=
+   케이스마다, 케이스 하나가 XML 파일 하나에서 옴) — 각각 별도 로그 파일.
+2. **중단(Stop) 시**: 성공/실패 어느 쪽도 아니지만 `_fail`로 처리(파일명
+   규칙을 `_success`/`_fail` 둘로만 단순하게 유지).
+3. **ASCII 포맷**: Vector ASC(`.asc`) — python-can이 이미 내장 지원하는
+   포맷(`can.ASCWriter`/`can.ASCReader`)이고, 기존 수동 BLF 로거
+   (`log_service.py`)와 완전히 같은 구조라 리스크가 낮음.
+
+### 설계
+기존 수동 "CAN 로그 저장"(`LogService`, 전역 BLF 토글, `canlog_<timestamp>.blf`
+이름)과는 완전히 독립된 별도 자동 로거로 구현 -- `CanManager.add_listener()`가
+리스너를 여러 개 동시에 지원하므로 사용자가 수동 로깅을 켠 채로 CAN-SWDL/
+OTA Tester를 돌려도 둘 다 각자 파일에 기록되며 서로 간섭하지 않는다.
+
+- **`backend/log_service.py`**: 새 클래스 `AutoCanLogger` 추가.
+  `start(label)`가 `canlog_<timestamp>_<label>.asc`를 열고
+  `can.ASCWriter`를 리스너로 등록(라벨의 파일시스템에 안전하지 않은 문자는
+  `_`로 치환); `stop(success)`가 리스너를 해제하고 파일명에
+  `_success`/`_fail`을 붙여 rename. 이미 실행 중이거나 CAN이 연결 안 된
+  상태의 `start()`, 시작 안 된 상태의 `stop()`은 조용히 no-op(로깅
+  실패/미연결이 실제 다운로드를 막아선 안 됨).
+- **`backend/uds_download_manager.py`**: `UdsDownloadManager.__init__`에
+  `log_dir`/`slot_label` 파라미터 추가, `log_dir`가 주어지면 자체
+  `AutoCanLogger` 생성(테스트 등에서 생략하면 `None`이라 전부 no-op).
+  스레드 진입점 `_run()`에서 프로시저 실행 직전 `start(label)`(라벨은 로드된
+  XML 파일명의 stem, 없으면 `slot{N}`), `finally`에서
+  `stop(success=(state==COMPLETED))` — 에러 복구(error-rule) 구간까지
+  포함해 슬롯의 전체 실행을 하나의 로그로 담는다. `MultiUdsDownloadManager`
+  는 `log_dir`를 받아 슬롯별로 `slot1`/`slot2`/`slot3` 라벨과 함께 전달.
+- **`backend/ota_tester_download_manager.py`**: 같은 패턴, 케이스 단위로
+  `_run_case_steps()`를 감싸 케이스 시작 시 `start(case['label'])`, 그
+  케이스가 끝나면(성공 반환/실패 반환/예외 모두) `stop(success=...)` —
+  `_run_case_steps_inner()`로 기존 로직을 그대로 옮기고 바깥쪽
+  `_run_case_steps()`가 try/except로 감싸 정상 반환값과 예상 밖 예외
+  양쪽 다 정확한 성공/실패로 기록되도록 함(케이스는 실패 시 즉시 전체 순차
+  실행이 멈추므로, 다음 케이스가 실행될 때 `_error_message`가 이전
+  케이스의 값으로 오염돼 있을 일이 없음을 확인).
+- **`backend/main.py`**: 두 매니저 생성 시 기존 수동 로거와 같은
+  `CAN_LOG_DIR`(`backend/can_logs/`)를 `log_dir=`로 전달.
+
+### 항목 1(OTA Tester 진행률)에서 이미 추가한 `_progress`와의 관계
+서로 무관 -- 하나는 UI 진행률 표시, 하나는 CAN 로그 파일 저장. 우연히 같은
+날 같은 파일(`ota_tester_download_manager.py`)에 손을 대서 언급.
+
+검증: `backend/tests/test_log_service.py`에 `AutoCanLogger` 단위 테스트
+6개 추가(실제 virtual CAN 버스 + 실제 `.asc` 파일 쓰기/rename까지 확인,
+`can.ASCReader`로 재읽기해 프레임 수·ID까지 검증). `test_uds_download_manager.py`/
+`test_ota_tester_download_manager.py`에 각각 `_run()`/`_run_case_steps()`
+가 성공/실패에 맞춰 정확히 start/stop을 호출하는지 스파이 더블로 확인하는
+테스트 추가. 백엔드 전체 256개 테스트 통과(기존 246 + 이번 세션에서 추가한
+총 10개). 프론트엔드 변경 없음(완전 자동 백그라운드 기능이라 UI가 필요
+없음). 실제 하드웨어로 CAN-SWDL/OTA Tester를 돌려 `backend/can_logs/`에
+`canlog_<timestamp>_<라벨>_success.asc`/`_fail.asc` 파일이 실제로 생기고
+Vector 등 ASC 뷰어로 열리는지는 사용자가 다음 실사용 때 확인해줄 것을
+권장한다.

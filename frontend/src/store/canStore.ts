@@ -189,6 +189,11 @@ class CanStore {
     this.markDirty();
   }
 
+  clearActivity() {
+    this.activityLog = [];
+    this.markDirty();
+  }
+
   /** Log a widget-driven CAN signal send, subject to the two display rules
    * from Requirement.md: a Periodic signal only logs when its value actually
    * changed, and an Event signal never logs an "invalid" send. The latter is

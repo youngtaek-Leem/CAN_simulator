@@ -839,3 +839,37 @@ def test_uds_request_with_retry_uses_the_xml_derived_p2_star_value(tmp_path):
     mgr._uds_request_with_retry(bytearray([0x10, 0x02]), 0.05, "diagnosticSessionControl")
 
     assert receive_timeouts[1] == 8.0  # p2StarCanServerMax="8000" from the XML
+
+
+# ---- Auto CAN log per case (see log_service.AutoCanLogger) -----------------
+
+
+class _SpyAutoLogger:
+    """Records start()/stop() calls instead of touching a real CAN bus/file
+    -- see ota_tester_download_manager.py's _run_case_steps() for how the
+    real AutoCanLogger is used."""
+
+    def __init__(self):
+        self.calls: list[tuple] = []
+
+    def start(self, label):
+        self.calls.append(("start", label))
+
+    def stop(self, success):
+        self.calls.append(("stop", success))
+
+
+def test_run_case_steps_auto_logs_pass_and_fail_per_case():
+    mgr = _mgr()
+    spy = _SpyAutoLogger()
+    mgr._auto_logger = spy
+
+    passing_case = {"label": "case-A", "steps": [], "selected_steps": None}
+    assert mgr._run_case_steps(passing_case) is True
+    assert spy.calls == [("start", "case-A"), ("stop", True)]
+
+    spy.calls.clear()
+    mgr._stop_event.set()  # simulate a user Stop mid-case -> counts as a failed case
+    failing_case = {"label": "case-B", "steps": [{"service": "startCommunication", "params": {}}], "selected_steps": None}
+    assert mgr._run_case_steps(failing_case) is False
+    assert spy.calls == [("start", "case-B"), ("stop", False)]

@@ -85,3 +85,54 @@ class LogService:
                     else 0.0
                 ),
             }
+
+
+class AutoCanLogger:
+    """Per-execution-unit ASCII (Vector .asc, human-readable) CAN log,
+    auto Start/Stop'd by the caller around ONE CAN-SWDL slot download or ONE
+    OTA Tester case -- independent of LogService's manual global BLF
+    recorder above (both can be active at once; CanManager.add_listener
+    supports any number of simultaneous listeners). The success/fail suffix
+    can't be chosen at open time since the outcome is only known once the
+    run finishes, so start() writes a bare `<label>` filename and stop()
+    renames it in place with `_success`/`_fail` appended.
+    """
+
+    def __init__(self, can_manager, log_dir: Path):
+        self._can = can_manager
+        self._log_dir = log_dir
+        self._log_dir.mkdir(parents=True, exist_ok=True)
+        self._listener: Optional[can.Listener] = None
+        self._path: Optional[Path] = None
+
+    @property
+    def active(self) -> bool:
+        return self._listener is not None
+
+    def start(self, label: str) -> None:
+        """``label``: short identifier for this run (e.g. the slot's loaded
+        XML filename stem, or an OTA Tester case label) -- appended to the
+        same ``canlog_<timestamp>`` prefix LogService's manual BLF log uses.
+        No-op (not an error) if already logging or the bus isn't connected --
+        a logging failure must never abort the actual download."""
+        if self._listener is not None or not self._can.connected:
+            return
+        safe_label = "".join(c if (c.isalnum() or c in "-_") else "_" for c in label) or "run"
+        filename = f"canlog_{time.strftime('%Y%m%d_%H%M%S')}_{safe_label}.asc"
+        self._path = self._log_dir / filename
+        self._listener = can.ASCWriter(str(self._path))
+        self._can.add_listener(self._listener)
+
+    def stop(self, success: bool) -> None:
+        if self._listener is None:
+            return
+        self._can.remove_listener(self._listener)
+        self._listener.stop()
+        self._listener = None
+        path, self._path = self._path, None
+        if path is not None and path.exists():
+            suffix = "_success" if success else "_fail"
+            try:
+                path.rename(path.with_name(path.stem + suffix + path.suffix))
+            except OSError:
+                pass  # best-effort -- keep the un-suffixed file rather than losing it

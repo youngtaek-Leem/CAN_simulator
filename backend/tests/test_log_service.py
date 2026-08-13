@@ -4,7 +4,7 @@ import can
 import pytest
 
 from can_manager import CanManager
-from log_service import LogService
+from log_service import AutoCanLogger, LogService
 
 
 @pytest.fixture
@@ -74,3 +74,72 @@ def test_status_while_idle(tmp_path):
         "count": 0,
         "duration_s": 0.0,
     }
+
+
+# ---- AutoCanLogger (per-slot/per-case auto ASCII log, CAN-SWDL/OTA Tester) ----
+
+
+def test_auto_can_logger_writes_asc_and_renames_on_success(stack):
+    cm, peer, _svc, tmp_path = stack
+    logger = AutoCanLogger(cm, tmp_path)
+    logger.start("slot1_RS4PE_01")
+
+    for i in range(3):
+        peer.send(can.Message(arbitration_id=0x783, data=bytes([i] * 4), is_extended_id=False))
+    time.sleep(0.2)
+
+    logger.stop(success=True)
+
+    files = list(tmp_path.glob("canlog_*_slot1_RS4PE_01_success.asc"))
+    assert len(files) == 1
+    with can.ASCReader(str(files[0])) as reader:
+        frames = list(reader)
+    assert len(frames) == 3
+    assert all(f.arbitration_id == 0x783 for f in frames)
+
+
+def test_auto_can_logger_renames_on_failure(stack):
+    cm, peer, _svc, tmp_path = stack
+    logger = AutoCanLogger(cm, tmp_path)
+    logger.start("case-A")
+    logger.stop(success=False)
+
+    files = list(tmp_path.glob("canlog_*_case-A_fail.asc"))
+    assert len(files) == 1
+
+
+def test_auto_can_logger_start_is_noop_when_not_connected(tmp_path):
+    cm = CanManager()  # never connected
+    logger = AutoCanLogger(cm, tmp_path)
+    logger.start("slot1")
+    assert logger.active is False
+    assert list(tmp_path.glob("*.asc")) == []
+
+
+def test_auto_can_logger_double_start_is_noop(stack):
+    cm, _peer, _svc, tmp_path = stack
+    logger = AutoCanLogger(cm, tmp_path)
+    logger.start("slot1")
+    logger.start("slot1-again")  # ignored -- already logging
+    logger.stop(success=True)
+    # Only the first start's file exists (the second start() call never opened one).
+    assert len(list(tmp_path.glob("canlog_*.asc"))) == 1
+
+
+def test_auto_can_logger_stop_without_start_is_noop(tmp_path):
+    cm = CanManager()
+    logger = AutoCanLogger(cm, tmp_path)
+    logger.stop(success=True)  # must not raise
+    assert logger.active is False
+
+
+def test_auto_can_logger_sanitizes_unsafe_label_characters(stack):
+    cm, _peer, _svc, tmp_path = stack
+    logger = AutoCanLogger(cm, tmp_path)
+    logger.start("weird label/with:chars*?")
+    logger.stop(success=True)
+
+    files = list(tmp_path.glob("canlog_*_success.asc"))
+    assert len(files) == 1
+    # None of the filesystem-unsafe characters survived into the filename.
+    assert not any(c in files[0].name for c in "/:*?")

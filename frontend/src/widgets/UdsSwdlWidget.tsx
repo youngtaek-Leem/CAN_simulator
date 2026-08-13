@@ -548,12 +548,12 @@ export default function UdsSwdlWidget({ config }: Props) {
               <div style={{ display: 'flex', gap: '4px' }}>
                 <button
                   onClick={() => setSelectedSteps(prev => ({ ...prev, [idx]: new Set(slot.steps!.map((_, si) => si)) }))}
-                  style={{ fontSize: '9px', padding: '1px 4px', border: '1px solid #d1d5db', borderRadius: '2px', background: '#f9fafb' }}>
+                  style={{ fontSize: '9px', padding: '1px 4px', border: 'none', borderRadius: '2px', background: '#3b82f6', color: '#fff' }}>
                   이 슬롯 전체 선택
                 </button>
                 <button
                   onClick={() => setSelectedSteps(prev => ({ ...prev, [idx]: new Set() }))}
-                  style={{ fontSize: '9px', padding: '1px 4px', border: '1px solid #d1d5db', borderRadius: '2px', background: '#f9fafb' }}>
+                  style={{ fontSize: '9px', padding: '1px 4px', border: 'none', borderRadius: '2px', background: '#3b82f6', color: '#fff' }}>
                   이 슬롯 전체 해제
                 </button>
               </div>
@@ -565,12 +565,13 @@ export default function UdsSwdlWidget({ config }: Props) {
                 {slot.steps.map((step, stepIdx) => {
                   const isChecked = (selectedSteps[idx] ?? new Set()).has(stepIdx);
                   const displayName = SERVICE_DISPLAY_NAMES[step.service] || step.service;
+                  const isRunningStep = !!slot.status?.running && slot.status?.progress?.current_step_idx === stepIdx;
 
                   return (
                     <div key={`${idx}-${stepIdx}`} style={{ border: '1px solid #f0f0f0', borderRadius: '3px', padding: '3px', marginBottom: '3px', background: isChecked ? '#f0fdf4' : '#fafafa' }}>
                       <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
                         <input type="checkbox" checked={isChecked} onChange={() => toggleStep(idx, stepIdx)} style={{ margin: 0 }} />
-                        <span style={{ fontSize: '10px', fontWeight: 500 }}>{displayName}</span>
+                        <span style={{ fontSize: '10px', fontWeight: 700, color: isRunningStep ? '#dc2626' : '#000' }}>{displayName}</span>
                       </div>
                        {/* Session Type Selector for diagnosticSessionControl */}
                        {step.service === 'diagnosticSessionControl' && (() => {

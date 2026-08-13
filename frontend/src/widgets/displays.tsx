@@ -462,13 +462,20 @@ export function TextDisplay(_: { config: WidgetConfig }) {
   }, [entries.length]);
 
   return (
-    <div className="text-display" ref={bodyRef}>
-      {entries.length === 0 && <div className="hint">아직 발생한 이벤트가 없습니다</div>}
-      {entries.map((e, i) => (
-        <div className="text-display-line mono" key={i}>
-          <span className="text-display-time">{fmtClock(e.ts)}</span> {e.text}
-        </div>
-      ))}
+    <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+      <div style={{ display: 'flex', justifyContent: 'flex-end', padding: '2px 4px', flexShrink: 0 }}>
+        <button className="icon-btn" title="이벤트 로그 초기화" onClick={() => canStore.clearActivity()}>
+          초기화
+        </button>
+      </div>
+      <div className="text-display" ref={bodyRef} style={{ flex: 1, minHeight: 0 }}>
+        {entries.length === 0 && <div className="hint">아직 발생한 이벤트가 없습니다</div>}
+        {entries.map((e, i) => (
+          <div className="text-display-line mono" key={i}>
+            <span className="text-display-time">{fmtClock(e.ts)}</span> {e.text}
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
