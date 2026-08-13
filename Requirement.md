@@ -2563,3 +2563,52 @@ resp_id 테스트로 회귀 확인.
 `canStore.status`(백엔드 실시간 조회)로만 표시되며, 레이아웃 저장 JSON에도
 연결 플래그가 없다. 사용자에게 재현 경로(레이아웃 불러오기 후? 프론트만
 새로고침? 백엔드까지 재시작?)를 확인 요청, 답변 대기 중.
+
+## CAN-SWDL 진단 세션전환/보안 액세스 디코딩 표시 수정 (2026-08-13, 사용자 요청)
+
+사용자가 `UdsSwdlWidget.tsx`(CAN-SWDL 위젯)의 XML 파라미터 표시/기본값에 대해
+4가지를 요청:
+
+1. `diagnosticSessionControl` 스텝에 `diagnosticSessionType`과
+   `background_diagnosticSessionType`이 둘 다 있을 때, 기본 선택값이 XML
+   속성 순서(예: `background_diagnosticSessionType="0x03"
+   diagnosticSessionType="0x02"`처럼 background가 먼저 나오면 0x03이 기본
+   선택됨)를 따라가고 있었다. 즉시 세션(`diagnosticSessionType`)이 항상
+   기본값이어야 함 (예시 기준 0x02).
+2. `securityAccess` 스텝은 `algorithm`만 표시되고, 실제 `[27 11]` 요청을
+   결정하는 `requestSeed` 하위 스텝의 `accessMode`(예: 0x11)는 위젯에 전혀
+   보이지 않았다. 표시 추가 요청.
+3. `diagnosticSessionControl`의 `skipTask` 속성이 위젯에 입력창으로
+   노출되고 있었다 (백엔드에서는 사용되지 않는 값). 삭제 요청.
+4. `securityAccess`의 `skipTask`도 동일하게 삭제, `accessMode` 표시 추가.
+
+**조사 결과**: 백엔드(`uds_download_manager.py`
+`_execute_security_access()`)는 이미 XML의 `requestSeed`/`sendKey` 하위
+스텝 `accessMode`를 그대로 읽어 `[0x27, accessMode]`로 전송하고 있어
+(`access_mode_seed = int(seed_step.params.get("accessMode", "0x11"), 16)`,
+`access_mode_key = ... "0x12"`) 실제 전송 로직은 이미 요구사항대로
+동작 중이었다. 문제는 프론트엔드 표시 쪽: (a) 세션타입 기본 선택이 XML
+속성 순서에 의존, (b) `accessMode`가 UI에 아예 표시되지 않음, (c) 쓸모없는
+`skipTask`가 편집 가능한 입력창으로 노출.
+
+**수정** (`frontend/src/widgets/UdsSwdlWidget.tsx`만 변경, 백엔드 변경 없음):
+- `SESSION_TYPE_ORDER = ['diagnosticSessionType', 'background_diagnosticSessionType']`
+  상수를 추가하고, 세션타입 후보를 모으는 3곳(업로드 시 자동 선택, 폴더
+  자동로드 시 자동 선택, 드롭다운 옵션 목록)을 모두 이 고정 순서로
+  필터링하도록 교체 -- `diagnosticSessionType`이 항상 우선 선택/표시된다.
+- `securityAccess` 스텝에 `step.sub_steps`에서 `requestSeed`를 찾아
+  `accessMode`를 읽기 전용으로 표시하는 블록 추가 (편집 가능한 입력은 아님
+  -- 백엔드가 sub-step 파라미터 오버라이드 경로를 갖고 있지 않아, 편집
+  가능하게 만들면 실제로는 반영되지 않는 필드가 되어 오히려 오해를 부름).
+- 파라미터 렌더링 루프에서 `pk === 'skipTask'`인 경우 `return null`로
+  완전히 숨김 (모든 서비스 공통 -- `diagnosticSessionControl`,
+  `securityAccess` 둘 다 적용됨). 기존에 `skipTask`와 함께 묶여 있던
+  `confirmPositiveResponse` 분기는 삭제해도 동작 변화 없음 (일반 파라미터
+  렌더링 분기와 JSX가 완전히 동일했던 죽은 특수 케이스였음).
+
+검증: `tsc -b --noEmit`/`vite build`/`oxlint src/widgets/UdsSwdlWidget.tsx`
+클린. 백엔드는 변경하지 않았으므로 기존 테스트 스위트에 영향 없음(별도
+재실행 안 함). 브라우저 자동화 도구가 없어 실제 XML 업로드 후 화면
+표시까지는 코드 검토로만 확인 -- 사용자가 실제 XML로 CAN-SWDL 위젯을 열어
+(1) 세션타입 기본값, (2) `accessMode` 표시, (3) `skipTask` 미표시를
+확인해줄 것을 권장한다.

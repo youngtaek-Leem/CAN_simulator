@@ -12,6 +12,11 @@ interface Props {
 
 const NUM_SLOTS = 3;
 
+// diagnosticSessionType is the immediate session switch; background_diagnosticSessionType
+// is a secondary follow-up switch. When an XML step carries both, the immediate one must
+// win as the default choice regardless of XML attribute order.
+const SESSION_TYPE_ORDER = ['diagnosticSessionType', 'background_diagnosticSessionType'] as const;
+
 const STATE_LABELS: Record<string, string> = {
   IDLE: '대기',
   LOADING: '로딩 중',
@@ -216,9 +221,9 @@ export default function UdsSwdlWidget({ config }: Props) {
       if (steps) {
         steps.forEach((step, stepIdx) => {
           if (step.service === 'diagnosticSessionControl') {
-            const sessionKeys = Object.keys(step.params).filter(k => k === 'diagnosticSessionType' || k === 'background_diagnosticSessionType');
+            const sessionKeys = SESSION_TYPE_ORDER.filter(k => k in step.params);
             if (sessionKeys.length > 1) {
-              autoParams[`_sessionType_${stepIdx}`] = sessionKeys[0]; // Preselect first as default
+              autoParams[`_sessionType_${stepIdx}`] = sessionKeys[0]; // diagnosticSessionType wins by default
             }
           }
         });
@@ -399,7 +404,7 @@ export default function UdsSwdlWidget({ config }: Props) {
                         if (steps) {
                           steps.forEach((step, stepIdx) => {
                             if (step.service === 'diagnosticSessionControl') {
-                              const sessionKeys = Object.keys(step.params).filter(k => k === 'diagnosticSessionType' || k === 'background_diagnosticSessionType');
+                              const sessionKeys = SESSION_TYPE_ORDER.filter(k => k in step.params);
                               if (sessionKeys.length > 1) {
                                 autoParams[`_sessionType_${stepIdx}`] = sessionKeys[0];
                               }
@@ -545,14 +550,8 @@ export default function UdsSwdlWidget({ config }: Props) {
                       </div>
                        {/* Session Type Selector for diagnosticSessionControl */}
                        {step.service === 'diagnosticSessionControl' && (() => {
-                         const sessionTypes: string[] = [];
-                         // Collect all available session type options from params
-                         const paramKeys = Object.keys(step.params);
-                         for (const pk of paramKeys) {
-                           if (pk === 'diagnosticSessionType' || pk === 'background_diagnosticSessionType') {
-                             if (step.params[pk]) sessionTypes.push(pk);
-                           }
-                         }
+                         // Collect available session type options, diagnosticSessionType first
+                         const sessionTypes = SESSION_TYPE_ORDER.filter(k => step.params[k]);
                          // If there are multiple session types to choose from, show a dropdown
                          if (sessionTypes.length > 1) {
                            // Determine current selection
@@ -589,6 +588,19 @@ export default function UdsSwdlWidget({ config }: Props) {
                          return null;
                        })()}
 
+                       {/* accessMode readout for securityAccess -- sourced from the requestSeed
+                           sub-step, since it's what the backend actually sends [27 <accessMode>] with. */}
+                       {step.service === 'securityAccess' && (() => {
+                         const accessMode = step.sub_steps.find(s => s.service === 'requestSeed')?.params?.accessMode;
+                         if (!accessMode) return null;
+                         return (
+                           <div style={{ marginLeft: '14px', marginTop: '2px', display: 'flex', alignItems: 'center', gap: '3px', fontSize: '9px' }}>
+                             <span style={{ color: '#6b7280', width: '70px' }} title="accessMode">accessMode</span>
+                             <span style={{ flex: 1, padding: '1px 4px', color: '#374151' }}>{accessMode}</span>
+                           </div>
+                         );
+                       })()}
+
                        {/* Parameter inputs (non-session-selector params) */}
                        {Object.keys(step.params).length > 0 && (
                          <div style={{ marginLeft: '14px', marginTop: '2px' }}>
@@ -596,33 +608,11 @@ export default function UdsSwdlWidget({ config }: Props) {
                              // Skip diagnosticSessionType params that are handled by the dropdown above
                              if (step.service === 'diagnosticSessionControl' && (pk === 'diagnosticSessionType' || pk === 'background_diagnosticSessionType')) {
                                // Only show as plain text if there's only one type
-                               const sessionTypes = Object.keys(step.params).filter(k => k === 'diagnosticSessionType' || k === 'background_diagnosticSessionType');
+                               const sessionTypes = SESSION_TYPE_ORDER.filter(k => step.params[k]);
                                if (sessionTypes.length > 1) return null; // handled by dropdown
                              }
-                             // For skipTask/skipConfirm etc, still show as input
-                             if (pk === 'skipTask' || pk === 'confirmPositiveResponse' || pk === 'skipTask') {
-                               const overrideVal = paramOverridesFor(idx)[step.service]?.[pk] ?? '';
-                               const isModified = overrideVal !== '';
-                               return (
-                                 <div key={pk} style={{ display: 'flex', alignItems: 'center', gap: '3px', fontSize: '9px', marginTop: '1px' }}>
-                                   <span style={{ color: '#6b7280', width: '70px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={pk}>{pk}</span>
-                                   <input
-                                     value={overrideVal}
-                                     placeholder={pv}
-                                     onChange={e => setParam(idx, step.service, pk, e.target.value)}
-                                     style={{
-                                       flex: 1,
-                                       fontSize: '10px',
-                                       padding: '1px 4px',
-                                       border: isModified ? '1px solid #3b82f6' : '1px solid #d1d5db',
-                                       borderRadius: '2px',
-                                       backgroundColor: isModified ? '#eff6ff' : '#fff',
-                                       color: isModified ? '#1d4ed8' : '#374151',
-                                     }}
-                                   />
-                                 </div>
-                               );
-                             }
+                             // skipTask is not used by the backend and is not user-configurable -- hide it.
+                             if (pk === 'skipTask') return null;
                              // Regular params (memoryAddress, etc)
                              const overrideVal = paramOverridesFor(idx)[step.service]?.[pk] ?? '';
                              const isModified = overrideVal !== '';
