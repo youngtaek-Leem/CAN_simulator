@@ -124,6 +124,44 @@ def test_uds_request_with_retry_raises_after_max_consecutive_pending():
     assert len(send_calls) == 1  # still only ever sent once
 
 
+def test_uds_request_with_retry_stop_event_interrupts_unlimited_pending_wait():
+    """Regression for "TransferData 도중 Stop을 눌러도 수십초 후에야 멈춘다":
+    with max_retries=None (2026-08-12 default -- ISO 14229-1 puts no cap on
+    the number of pending responses) an ECU that keeps sending 0x78 forever
+    used to make this loop unresponsive to the Stop button, since nothing
+    inside it ever checked _stop_event -- only between whole steps/blocks.
+    Setting _stop_event (as UdsDownloadManager.stop() does) from another
+    thread must interrupt the wait promptly instead of retrying forever."""
+    import threading
+
+    def fake_send(can, tx_id, rx_id, data, is_extended_id=False, fc_timeout_s=1.0, **kw):
+        return {"sent": True}
+
+    def fake_receive(can, rx_id, tx_id, timeout_s=1.0, is_extended_id=False, fc_stmin=0, **kw):
+        return bytes([0x7F, 0x10, 0x78])  # always pending, never resolves
+
+    mgr = _manager(fake_send, fake_receive)
+
+    def _stop_after_delay():
+        time.sleep(0.05)
+        mgr._stop_event.set()
+
+    threading.Thread(target=_stop_after_delay, daemon=True).start()
+
+    start = time.perf_counter()
+    with pytest.raises(Exception) as exc_info:
+        mgr._uds_request_with_retry(
+            bytearray([0x10, 0x02]), 0.01, "transferData", retry_delay_s=0.5
+        )
+    elapsed = time.perf_counter() - start
+
+    assert "중단" in str(exc_info.value)
+    # Without the fix this would hang indefinitely (max_retries=None, ECU
+    # never stops sending 0x78) -- with it, the wait is cut short well
+    # before even one full retry_delay_s (0.5s).
+    assert elapsed < 0.5
+
+
 def test_uds_request_with_retry_raises_without_procedure_loaded():
     mgr = _manager(lambda *a, **k: {"sent": True}, lambda *a, **k: bytes([0x50, 0x02]))
     mgr._procedure = None

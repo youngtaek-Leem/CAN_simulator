@@ -104,6 +104,44 @@ def test_global_run_gate():
         client.post("/api/disconnect")
 
 
+def test_run_stop_also_stops_running_swdl_and_ota_downloads():
+    """Regression: POST /api/run/stop (the top-bar global Stop) used to
+    leave an in-progress CAN-SWDL/OTA Tester TransferData completely
+    untouched -- neither manager was ever called from run_stop(), so the
+    transfer kept running in the background regardless of the button. Only
+    a slot that's actually mid-run should be told to stop; an idle/READY
+    slot must be left alone."""
+    from unittest.mock import MagicMock, patch
+
+    with make_client() as client:
+        fake_running_slot = MagicMock(running=True)
+        fake_idle_slot = MagicMock(running=False)
+        fake_uds_mgr = MagicMock()
+        fake_uds_mgr.get_manager.side_effect = (
+            lambda idx: fake_running_slot if idx == 0 else fake_idle_slot
+        )
+        fake_uds_mgr.all_status.return_value = []
+
+        fake_ota_mgr = MagicMock(running=True)
+        fake_ota_mgr.status.return_value = {}
+
+        try:
+            with patch.object(main, "uds_download_manager", fake_uds_mgr), \
+                 patch.object(main, "ota_tester_manager", fake_ota_mgr):
+                r = client.post("/api/run/stop")
+                assert r.status_code == 200
+
+            fake_running_slot.stop.assert_called_once()
+            fake_idle_slot.stop.assert_not_called()
+            fake_ota_mgr.stop.assert_called_once()
+        finally:
+            # run_state/tx_scheduler are process-wide singletons (main's
+            # module-level globals), not re-created per TestClient -- an
+            # unpaired /api/run/stop here would otherwise leak "stopped"
+            # into every later test in the same pytest run.
+            client.post("/api/run/start")
+
+
 def test_connect_with_fd_and_signal_send():
     with make_client() as client:
         r = client.post(

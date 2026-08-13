@@ -515,6 +515,7 @@ class UdsDownloadManager:
                     fc_timeout_s=timeout_s,
                     reader=reader,
                     min_stmin_s=self._get_send_stmin_floor_s(),
+                    stop_event=self._stop_event,
                 )
             except Exception as exc:
                 raise UdsError(f"ISO-TP 송신 실패 ({label}): {exc}")
@@ -526,6 +527,7 @@ class UdsDownloadManager:
                     is_extended_id=is_ext,
                     fc_stmin=fc_stmin,
                     reader=reader,
+                    stop_event=self._stop_event,
                 )
             except Exception as exc:
                 # Suppress Positive Response bit set -> the server is required
@@ -616,6 +618,7 @@ class UdsDownloadManager:
                     fc_timeout_s=timeout_s,
                     reader=reader,
                     min_stmin_s=self._get_send_stmin_floor_s(),
+                    stop_event=self._stop_event,
                 )
             except Exception as exc:
                 raise UdsError(f"ISO-TP 송신 실패 ({label}): {exc}")
@@ -630,6 +633,7 @@ class UdsDownloadManager:
                         is_extended_id=is_ext,
                         fc_stmin=fc_stmin,
                         reader=reader,
+                        stop_event=self._stop_event,
                     )
                 except Exception as exc:
                     # Suppress Positive Response bit set -> no response at
@@ -650,7 +654,15 @@ class UdsDownloadManager:
                         level="WARN",
                         msg=f"NRC 0x78 (ResponsePending) 대기 {attempt + 1}/{limit_str} (P2*={pending_timeout_s:.1f}s)",
                     )
-                    time.sleep(retry_delay_s)
+                    # Event.wait() returns True immediately if _stop_event is
+                    # set concurrently (by the Stop button), instead of
+                    # sleeping out the full retry_delay_s regardless -- with
+                    # unlimited pending retries (max_retries=None is the
+                    # default), a plain time.sleep() here was one more place
+                    # Stop couldn't take effect until the current attempt's
+                    # wait finished on its own.
+                    if self._stop_event.wait(retry_delay_s):
+                        raise UdsError(f"ISO-TP 수신 실패 ({label}): 사용자에 의해 중단됨")
                     attempt += 1
                     continue
                 raise UdsError(

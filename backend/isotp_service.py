@@ -32,6 +32,7 @@ Reception (receive function):
 - Timeout handling for each phase
 """
 
+import threading
 import time
 from typing import Optional
 
@@ -104,30 +105,53 @@ def _build_fc(flow_status: int, block_size: int = 0, stmin: int = 0) -> bytes:
     return bytes([PCI_FC | flow_status, block_size & 0xFF, stmin & 0xFF])
 
 
-def _wait_for_frame(reader: can.BufferedReader, rx_id: int, timeout_s: float) -> Optional[can.Message]:
+# When a stop_event is given, waits below poll in chunks of at most this
+# long instead of blocking for the full remaining timeout in one
+# reader.get_message() call -- a plain blocking wait has no way to notice
+# stop_event.set() from another thread until it either gets a frame or
+# times out, which is exactly what let a UDS download's Stop button sit
+# unresponsive for as long as a single P2*Server_max wait (or, compounded
+# over several NRC 0x78 ResponsePending retries, tens of seconds -- see
+# Requirement.md's TransferData Stop-delay investigation).
+_STOP_POLL_S = 0.05
+
+
+def _wait_for_frame(
+    reader: can.BufferedReader, rx_id: int, timeout_s: float,
+    stop_event: Optional[threading.Event] = None,
+) -> Optional[can.Message]:
     """Wait for a CAN message with the given arbitration ID."""
     deadline = time.perf_counter() + timeout_s
     while True:
+        if stop_event is not None and stop_event.is_set():
+            raise IsoTpError("사용자에 의해 중단됨")
         remaining = deadline - time.perf_counter()
         if remaining <= 0:
             return None
-        msg = reader.get_message(timeout=remaining)
+        wait_s = min(remaining, _STOP_POLL_S) if stop_event is not None else remaining
+        msg = reader.get_message(timeout=wait_s)
         if msg is None:
-            return None
+            continue
         if msg.arbitration_id == rx_id:
             return msg
         # ignore unrelated frames
 
 
-def _wait_for_fc(reader: can.BufferedReader, fc_id: int, timeout_s: float) -> Optional[bytes]:
+def _wait_for_fc(
+    reader: can.BufferedReader, fc_id: int, timeout_s: float,
+    stop_event: Optional[threading.Event] = None,
+) -> Optional[bytes]:
     deadline = time.perf_counter() + timeout_s
     while True:
+        if stop_event is not None and stop_event.is_set():
+            raise IsoTpError("사용자에 의해 중단됨")
         remaining = deadline - time.perf_counter()
         if remaining <= 0:
             return None
-        msg = reader.get_message(timeout=remaining)
+        wait_s = min(remaining, _STOP_POLL_S) if stop_event is not None else remaining
+        msg = reader.get_message(timeout=wait_s)
         if msg is None:
-            return None
+            continue
         if msg.arbitration_id != fc_id or len(msg.data) < 3:
             continue
         if (msg.data[0] & 0xF0) != PCI_FC:
@@ -152,6 +176,7 @@ def send(
     bitrate_switch: Optional[bool] = None,
     reader: Optional[can.BufferedReader] = None,
     min_stmin_s: float = 0.0,
+    stop_event: Optional[threading.Event] = None,
 ) -> dict:
     """``reader``, when given, is reused for waiting on Flow Control frames
     during a multi-frame send instead of creating/tearing down one just for
@@ -176,7 +201,13 @@ def send(
     can only slow a multi-frame send down, never speed it up past what the
     receiving ECU said it can handle -- doing the latter would violate the
     spec and risk a real ECU's RX buffer overflowing mid-transfer. 0.0
-    (default) leaves this exactly as before (peer's own STmin only)."""
+    (default) leaves this exactly as before (peer's own STmin only).
+
+    ``stop_event``: when given and set (by another thread) while this call
+    is blocked waiting on a Flow Control frame or sleeping between
+    Consecutive Frames, raises IsoTpError("사용자에 의해 중단됨") instead of
+    continuing to wait out the full timeout -- lets a caller's Stop button
+    interrupt a multi-frame send promptly."""
     if not data:
         raise IsoTpError("전송할 데이터가 없습니다")
     if len(data) > MAX_ISOTP_LEN:
@@ -225,7 +256,7 @@ def send(
         wait_count = 0
 
         while remaining:
-            fc = _wait_for_fc(reader, fc_id, fc_timeout_s)
+            fc = _wait_for_fc(reader, fc_id, fc_timeout_s, stop_event=stop_event)
             if fc is None:
                 raise IsoTpError("Flow Control 프레임을 기다리다 시간 초과되었습니다")
             fs = fc[0] & 0x0F
@@ -244,7 +275,11 @@ def send(
             block_count = 0
             while remaining and (block_size == 0 or block_count < block_size):
                 if stmin > 0 and block_count > 0:
-                    time.sleep(stmin)
+                    if stop_event is not None:
+                        if stop_event.wait(stmin):
+                            raise IsoTpError("사용자에 의해 중단됨")
+                    else:
+                        time.sleep(stmin)
                 chunk, remaining = remaining[:cf_data_len], remaining[cf_data_len:]
                 can_manager.send(
                     tx_id,
@@ -285,6 +320,7 @@ def receive(
     is_fd: Optional[bool] = None,
     bitrate_switch: Optional[bool] = None,
     reader: Optional[can.BufferedReader] = None,
+    stop_event: Optional[threading.Event] = None,
 ) -> bytes:
     """Receive an ISO-TP message on the given arbitration ID.
 
@@ -322,6 +358,12 @@ def receive(
         ``can_manager.fd_enabled`` when not given.
     bitrate_switch : bool, optional
         Defaults to ``is_fd`` when not given.
+    stop_event : threading.Event, optional
+        When given and set (by another thread) while this call is blocked
+        waiting for the first frame or a Consecutive Frame, raises
+        IsoTpError("사용자에 의해 중단됨") instead of continuing to wait out
+        the full timeout -- lets a caller's Stop button interrupt a
+        multi-frame receive promptly.
 
     Returns
     -------
@@ -349,7 +391,7 @@ def receive(
 
     try:
         # Wait for the first frame (either SF or FF)
-        msg = _wait_for_frame(reader, rx_id, timeout_s)
+        msg = _wait_for_frame(reader, rx_id, timeout_s, stop_event=stop_event)
         if msg is None:
             raise IsoTpError("응답 프레임을 기다리다 시간 초과되었습니다")
 
@@ -405,7 +447,7 @@ def receive(
                 if cf_timeout <= 0:
                     raise IsoTpError("Consecutive Frame 수신 중 시간 초과되었습니다")
 
-                cf_msg = _wait_for_frame(reader, rx_id, cf_timeout)
+                cf_msg = _wait_for_frame(reader, rx_id, cf_timeout, stop_event=stop_event)
                 if cf_msg is None:
                     raise IsoTpError("Consecutive Frame 수신 중 시간 초과되었습니다")
 

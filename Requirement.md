@@ -3128,3 +3128,159 @@ OTA Tester의 `_local_stmin_override`로 폴백하지 않음). `_isotp_send()`
 0.01이 나와 실패했을 테스트). 체크박스 ON 시나리오를 검증하던 기존 테스트도
 그대로 통과 확인. 백엔드 전체 266개 테스트 통과. 프론트엔드 변경 없음
 (체크박스 자체는 기존 그대로, 백엔드가 그 값을 잘못 해석하던 부분만 수정).
+
+## TransferData 중 전역 Stop이 수십 초 지연되는 문제 진단 및 수정 (2026-08-13,
+사용자 보고)
+
+### 증상
+사용자가 두 가지를 보고: ① TransferData 후 상단바 전역 Stop을 눌러도 실제
+정지까지 수십 초가 걸림. ② TransferData 도중 `cansim.tx_scheduler`의 tick
+delay와 `cansim.http`의 broadcast loop tick delay가 계속 증가함. 사용자가
+붙여준 로그에는 `cansim.audio` 경고가 전혀 없었고(오디오 위젯은 닫혀 있었다고
+확인), `/api/udswdl/status`도 300ms 슬로우 리퀘스트 경고에 걸리지 않아
+기존에 문서화된 "오디오 위젯의 `waveform_slice()`가 GIL을 오래 쥔다" 메커니즘
+(위 "CAN periodic 신호 영향 점검" 항목)과는 다른 상황임을 확인했다.
+
+### ① 원인: `/api/run/stop`이 진행 중인 CAN-SWDL/OTA Tester를 전혀 건드리지 않음
+`backend/main.py`의 `run_stop()`은 `tx_scheduler`/`replay_service`/
+`test_runner_service`만 정지시키고 `uds_download_manager`/
+`ota_tester_manager`는 호출 목록에 아예 없었다 — TransferData가 진행 중일 때
+전역 Stop을 눌러도 다운로드 스레드는 그대로 계속 돌아간다. 사용자 확인 결과
+이건 오디오 스트림처럼 "각자 자기 Stop 버튼으로만 멈추는" 의도된 설계가
+아니라, 하드웨어 안전(플래시 쓰기 도중 강제 중단 방지)을 지키면서 함께
+정지되어야 하는 누락으로 확정됐다.
+
+**수정**: `run_stop()`에 3개 CAN-SWDL 슬롯과 OTA Tester 중 실제로 실행 중인
+것만 `stop()`을 호출하도록 추가(`mgr.running`으로 가드 — READY/IDLE처럼
+실행 중이 아닌 슬롯까지 건드려 상태를 불필요하게 IDLE로 되돌리지 않기
+위함). 블록 경계 안전성은 아래 ②의 수정이 보장한다(ISO-TP 문단 전송을
+중간에 끊지 않고, 현재 대기 중인 지점에서만 중단).
+
+### ② 원인: NRC 0x78(ResponsePending) 무제한 대기 루프 안에서 `_stop_event`를
+전혀 확인하지 않음
+`uds_download_manager.py`/`ota_tester_download_manager.py`의
+`_uds_request_with_retry()`는 스텝 사이·TransferData 블록 사이에서만
+`_stop_event`를 확인했고, 그 안쪽(개별 요청의 응답 대기, 그리고 0x78 재시도
+사이의 `time.sleep(retry_delay_s)`)에는 확인 지점이 전혀 없었다. 2026-08-12에
+사용자 요청으로 0x78 재시도 횟수 제한을 없앤 상태라(`max_retries=None`),
+ECU가 pending을 여러 번 보내면 한 블록의 요청-응답 주기가
+`P2*Server_max × pending 횟수`만큼(수 초~수십 초) 걸릴 수 있는데, 그 동안은
+Stop을 눌러도 반응하지 않는다. `stop()`의 `thread.join(timeout=5.0)`도
+5초 후 그냥 포기하고 반환하므로(`uds_download_manager.py`), UI가 "정지됨"을
+보여줘도 실제로는 백그라운드에서 계속 송신 중일 수 있었다 — ①과 결합하면
+전역 Stop을 눌러도 다운로드가 자연스럽게 끝날 때까지(수십 초) 실제로는
+멈추지 않는 것처럼 보이는 정확한 증상과 일치한다.
+
+**수정**: `backend/isotp_service.py`의 `send()`/`receive()`에 선택적
+`stop_event: threading.Event` 파라미터를 추가 — Flow Control/First
+Frame/Consecutive Frame 대기(`_wait_for_frame`/`_wait_for_fc`)를 매번
+전체 타임아웃을 블로킹하는 대신 최대 50ms(`_STOP_POLL_S`) 단위로 쪼개
+폴링하면서 `stop_event.is_set()`을 확인하고, 설정되어 있으면 즉시
+`IsoTpError("사용자에 의해 중단됨")`을 던진다. 송신 측 CF 사이 STmin 대기도
+`time.sleep()` 대신 `stop_event.wait(stmin)`으로 바꿔 즉시 깨어나게 했다.
+`uds_download_manager.py`/`ota_tester_download_manager.py`의
+`_uds_request()`/`_uds_request_with_retry()`가 이 `stop_event`에
+`self._stop_event`를 넘기도록 수정했고, 0x78 재시도 사이의
+`time.sleep(retry_delay_s)`도 `self._stop_event.wait(retry_delay_s)`로
+바꿔(반환값이 True면 즉시 `UdsError`를 던짐) 대기 도중에도 정지 버튼이
+먹히도록 했다. "사용자에 의해 중단됨" 메시지는 `_is_timeout_error()`가
+찾는 "시간 초과" 문자열을 포함하지 않으므로, suppressPosRspMsgIndicationBit
+경로가 정지를 "정상 무응답"으로 착각해 삼키지 않는다.
+
+### ③ 진단 중 확인된 사실: TransferData 자체의 tick delay 증가 원인은 미확정
+오디오 위젯이 닫혀 있었다는 사용자 확인으로, 기존에 문서화된 GIL 경합
+메커니즘(오디오 `waveform_slice()`)은 이번 건의 원인이 아닌 것으로
+보인다. TransferData 중 대량으로 오가는 Consecutive Frame이
+`CanManager`의 리스너들(`AutoCanLogger`의 ASC 파일 쓰기, RX 브로드캐스트
+버퍼 등)을 python-can Notifier 스레드에서 프레임 단위로 계속 깨우며 GIL을
+점유하는 것이 유력한 후보로 보이지만, 실측하지 않은 가설이다 — 확정하려면
+`log_service.py`/프레임 디스패치 경로에 기존 진단 로그(`diag_log.py`)와
+같은 패턴의 소요시간 로그를 추가해 재현 시 확인해야 한다. 이번 세션
+범위에서는 진행하지 않았다 — 다음에 재현되면 추가 진단을 진행할 것.
+
+### 검증
+`backend/isotp_service.py`(`send`/`receive`/`_wait_for_frame`/`_wait_for_fc`
+전부 `stop_event` 파라미터는 옵션이라 기존 호출부는 전부 하위호환),
+`uds_download_manager.py`, `ota_tester_download_manager.py`,
+`main.py`(`run_stop()`)에 변경. 신규 테스트 3개:
+`test_uds_request_with_retry_stop_event_interrupts_unlimited_pending_wait`
+(두 다운로드 매니저 각각 — ECU가 0x78을 무한히 보내는 상황에서 `_stop_event`를
+다른 스레드에서 set하면 `retry_delay_s`를 다 기다리지 않고 즉시 중단되는지
+확인, 수정 전이었다면 `max_retries=None`이라 이 테스트 자체가 멈췄을 것),
+`test_run_stop_also_stops_running_swdl_and_ota_downloads`(`/api/run/stop`이
+실행 중인 슬롯의 `stop()`만 호출하고 idle 슬롯은 건드리지 않는지, OTA Tester도
+같이 정지되는지 확인). 백엔드 전체 269개 테스트 통과(`.venv/bin/python -m
+pytest -q`). 실기(Windows, 실제 ECU)에서 TransferData 도중 전역 Stop을
+눌렀을 때 즉시 정지되는지는 이 환경에서 직접 재현할 수 없어 사용자가 다음
+실사용 시 확인해줄 것을 권장한다 — 특히 ECU가 실제로 0x78을 여러 번 보내는
+상황(플래시 소거/쓰기 시간이 긴 블록)에서 확인하면 이번 수정의 효과가 가장
+잘 드러난다.
+
+## STmin 최소값(TransferData)에서 CAN 메시지 수신창이 심하게 렉 걸리는 문제
+개선 (2026-08-13, 사용자 요청 — "부드럽게 스크롤 할 수 있도록 개선 방법이
+있는지 확인해라")
+
+### 조사
+`_frame_to_dict()`(디코드) + `json.dumps()`가 broadcast loop 지연의 주범인지
+실측(macOS, `dbc_service.decode()`를 최대 배치 크기(`can_manager.drain_rx()`
+상한 2000프레임)로 반복 호출)했다 — DBC에 없는 ID(실제 TransferData의
+request/response ID가 이런 경우)는 `get_message_by_frame_id()`가 즉시
+KeyError로 빠지는 빠른 경로라 2000프레임에 3~10ms밖에 안 걸렸다. 이전 로그의
+broadcast loop tick delay(100~300ms)를 설명하기엔 부족해 **이 가설은
+기각**했다. STmin이 최소값(~0.6ms)일 때 다운로드 워커 스레드(0.6ms 간격)·
+tx_scheduler 스레드(1ms 간격)·asyncio 브로드캐스트 루프(30ms 간격)가 동시에
+매우 짧은 주기로 깨어나면서 생기는 GIL 핸드오프 오버헤드가 더 유력한
+후보로 보이지만, 백엔드 구조를 바꿔야 확인 가능한 영역이라 이번엔 측정하지
+않았다.
+
+백엔드 원인 규명과 별개로, 사용자 요청은 "부드러운 스크롤"이라는 프론트엔드
+UX 문제였다 — 사용자가 직접 방향을 선택(질문 도구로 확인): **수신 페이싱해서
+점진적으로 표시**(한 번에 수백 개가 몰려도 rAF마다 상한 개수씩 나누어 보여줌,
+데이터 손실 없이 스크롤만 부드럽게).
+
+### 원인
+`CanMessageDisplay`의 "스크롤"(트레이스) 모드는 이미 가상 스크롤(보이는 행만
+렌더링)과 fps 제한(rAF 기반, 기본 30fps)이 적용돼 있어 평상시엔 문제없다.
+하지만 백엔드가 30ms마다 고르게 못 보내고 불규칙하게(어떤 tick은 비고, 다음
+tick에 수백 개가 몰림) 밀어주면, 프론트는 한 번의 렌더에서 스크롤 위치가
+크게 점프하는 식으로 반영한다 — 렌더링 자체가 무거운 게 아니라 **데이터
+도착이 울퉁불퉁해서 그 울퉁불퉁함이 화면에 그대로 드러나는** 문제였다.
+
+### 수정
+`frontend/src/store/canStore.ts`: `trace`(전체, 정확한 원본 데이터)는 그대로
+두고, 라이브 스크롤 뷰가 볼 수 있는 프리픽스 길이를 나타내는 `revealedCount`를
+추가했다. `tick()`(매 rAF, ~60Hz)마다 `revealedCount`를 `trace.length`를
+향해 최대 `TRACE_REVEAL_PER_TICK`(40)만큼만 전진시키고, 새 `revealedTrace`
+getter(`trace.slice(0, revealedCount)`)가 그 결과를 노출한다 — 데이터는
+전부 `trace`에 그대로 쌓이므로 유실은 없고, 화면에 "드러나는" 속도만
+페이싱된다. `trace`가 오래된 프레임 정리(윈도우/캡)로 앞에서 잘려나갈 때는
+`revealedCount`도 같은 만큼 줄여 같은 논리적 위치를 계속 가리키게 했다.
+일시중지(스냅샷) 모드는 페이싱과 무관하게 `trace` 전체를 그대로 보여준다
+(사용자가 명시적으로 멈춰서 전체를 보려는 의도이므로).
+
+`frontend/src/widgets/displays.tsx`: 라이브 스크롤 모드가 `canStore.trace`
+대신 `canStore.revealedTrace`를 사용하도록 변경. 툴바 카운트는 실제 총
+수신량(`canStore.trace.length`)을 그대로 보여주되, 아직 다 못 따라잡았을 때는
+"919/952개 표시 중"처럼 표시해 데이터가 사라진 게 아니라 잠깐 못 따라잡고
+있을 뿐임을 드러낸다.
+
+### 검증
+`tsc -b`/`vite build`/`oxlint` 클린(canStore.ts/displays.tsx 변경 관련
+경고 없음). 이 프로젝트에 프론트엔드 단위 테스트가 없어(백엔드만 pytest),
+Playwright(시스템 Python 3.12에 설치돼 있던 것 확인 후 사용)로 실제
+dev 서버(백엔드 8000 + 프론트 5174)를 띄우고 브라우저에서 직접 확인:
+virtual CAN 연결 → 샘플 DBC 로드 → "CAN 메시지 표시창" 위젯을 스크롤 모드로
+추가 → `/api/tx/send_once`를 40개 워커로 동시에 1500회 호출해 버스트를
+발생시키며 100ms 간격으로 `.trace-body`의 `scrollTop`과 툴바 힌트 텍스트를
+샘플링. 결과: 힌트가 `0→173→426→686→"919/952개 표시 중"→1152→1337→1500`으로
+증가 — 버스트 도중 실제로 revealedCount가 총 수신량보다 뒤처졌다가(페이싱이
+작동 중이라는 직접 증거) 부드럽게 따라잡고, 최종적으로 1500/1500(RX
+카운터와 일치)로 정확히 수렴함을 확인. 콘솔 에러 없음, 스크린샷으로 UI
+정상 렌더링 확인. 백엔드 전체 269개 테스트도 그대로 통과(이번 변경은
+프론트엔드 전용, 백엔드 무변경).
+
+실기(Windows)에서 실제 TransferData·최소 STmin 상황의 체감 스무스함은
+이 환경에서 재현한 인위적 버스트와 정확히 같지 않을 수 있어, 사용자가
+다음 실사용 시 확인해줄 것을 권장한다. 백엔드 쪽 broadcast tick 자체의
+불규칙성(GIL 핸드오프 가설)은 이번에 고치지 않았다 — 필요하면 별도 조사로
+진행.

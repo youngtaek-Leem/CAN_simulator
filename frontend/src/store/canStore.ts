@@ -26,6 +26,18 @@ const TRACE_CAP = 30000; // hard memory cap for the trace buffer
 const HISTORY_CAP = 10000; // points kept per watched signal (graph widgets)
 const ACTIVITY_CAP = 300; // lines kept in the widget/test-runner activity log
 const TESTRUNNER_POLL_MS = 400; // matches TestRunnerBox's own poll cadence
+// How many newly-ingested trace rows the live "스크롤" view is allowed to
+// reveal per animation frame (~60Hz). A WS batch can carry hundreds of
+// frames at once when the backend falls behind its own flush cadence (e.g.
+// TransferData at minimum STmin) -- revealing all of them in a single
+// render jumps the live view's scroll position in one big leap, which reads
+// as stutter even though rendering itself is cheap (already virtualized).
+// Draining the backlog at a bounded rate instead spreads that same jump
+// over a handful of frames, so it reads as a smooth scroll -- no data is
+// dropped, this only paces how fast the live view catches up (see
+// revealedTrace()/tick()). A paused snapshot or the fixed-by-ID table are
+// unaffected -- both already show the true, unpaced data.
+const TRACE_REVEAL_PER_TICK = 40;
 
 export interface HistoryPoint {
   ts: number; // raw backend timestamp (seconds)
@@ -61,6 +73,14 @@ class CanStore {
   // whenever the current frame happens to decode as invalid.
   lastValidSignal = new Map<string, LastValidSignal>();
   trace: RxFrame[] = []; // chronological raw frames (last TRACE_WINDOW_S seconds)
+  // How many of trace's leading entries the live scroll view has been
+  // allowed to reveal so far -- grows toward trace.length by at most
+  // TRACE_REVEAL_PER_TICK per animation frame (see tick()). Always an index
+  // into the CURRENT trace array; adjusted in ingestFrames() whenever trace
+  // is spliced from the front (stale-window/cap pruning) so it keeps
+  // pointing at the same conceptual position instead of silently
+  // over-revealing. Read through revealedTrace(), never directly.
+  private revealedCount = 0;
   // Per-signal time series, populated only for signals with an active graph
   // widget watching them (see watchSignal/unwatchSignal) so history isn't
   // recorded for every DBC signal, just the ones actually being charted.
@@ -309,15 +329,35 @@ class CanStore {
       }
       this.trace.push(f);
     }
-    // prune the trace buffer: drop frames older than the window, then cap
+    // prune the trace buffer: drop frames older than the window, then cap.
+    // Each splice removes from the front, so revealedCount (an index into
+    // this same array) must shrink by the same amount to keep pointing at
+    // the same conceptual position -- otherwise it would silently jump
+    // ahead relative to the remaining content once older rows are dropped.
     const cutoff = rx[rx.length - 1].ts - TRACE_WINDOW_S;
     let stale = 0;
     while (stale < this.trace.length && this.trace[stale].ts < cutoff) stale++;
-    if (stale > 0) this.trace.splice(0, stale);
+    if (stale > 0) {
+      this.trace.splice(0, stale);
+      this.revealedCount = Math.max(0, this.revealedCount - stale);
+    }
     if (this.trace.length > TRACE_CAP) {
-      this.trace.splice(0, this.trace.length - TRACE_CAP);
+      const excess = this.trace.length - TRACE_CAP;
+      this.trace.splice(0, excess);
+      this.revealedCount = Math.max(0, this.revealedCount - excess);
     }
     this.markDirty();
+  }
+
+  /** The prefix of `trace` currently allowed to be shown by the live
+   * "스크롤" view -- grows toward trace.length at a bounded rate (see
+   * tick()) instead of jumping straight to it, so a bursty backend delivery
+   * (e.g. TransferData at minimum STmin) reads as a smooth scroll on
+   * screen. A paused snapshot bypasses this entirely and shows the full,
+   * unpaced `trace` -- pacing only matters while new rows are actively
+   * streaming in. */
+  get revealedTrace(): RxFrame[] {
+    return this.trace.slice(0, Math.min(this.revealedCount, this.trace.length));
   }
 
   /** ms since the first frame received after the last (re)start. */
@@ -342,6 +382,7 @@ class CanStore {
   resetTimeBase() {
     this.timeBase = null;
     this.trace = [];
+    this.revealedCount = 0;
     for (const key of this.signalHistory.keys()) this.signalHistory.set(key, []);
     this.markDirty();
   }
@@ -378,6 +419,14 @@ class CanStore {
   }
 
   private tick = (t: number) => {
+    // Advance the live trace's reveal pointer every animation frame
+    // (~60Hz), independent of the fps-gated render below -- this is what
+    // actually paces the catch-up rate; the render throttle below just
+    // controls how often React sees the (already-paced) result.
+    if (this.revealedCount < this.trace.length) {
+      this.revealedCount = Math.min(this.trace.length, this.revealedCount + TRACE_REVEAL_PER_TICK);
+      this.dirty = true;
+    }
     if (this.dirty && t - this.lastEmit >= 1000 / this.fps) {
       this.dirty = false;
       this.lastEmit = t;

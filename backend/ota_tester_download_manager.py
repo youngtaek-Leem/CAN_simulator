@@ -704,6 +704,7 @@ class OtaTesterDownloadManager:
                     self._can, self._request_id, self._response_id, request,
                     is_extended_id=is_ext, fc_timeout_s=timeout_s, reader=reader,
                     min_stmin_s=self._get_send_stmin_floor_s(),
+                    stop_event=self._stop_event,
                 )
             except Exception as exc:
                 raise UdsError(f"ISO-TP 송신 실패 ({label}): {exc}")
@@ -717,6 +718,7 @@ class OtaTesterDownloadManager:
                         timeout_s=timeout_s if attempt == 0 else pending_timeout_s,
                         is_extended_id=is_ext, fc_stmin=self._get_fc_stmin(),
                         reader=reader,
+                        stop_event=self._stop_event,
                     )
                 except Exception as exc:
                     if expects_no_response(request) and "시간 초과" in str(exc):
@@ -730,7 +732,11 @@ class OtaTesterDownloadManager:
                 if result["nrc"] == 0x78 and (max_retries is None or attempt < max_retries):
                     limit_str = "무제한" if max_retries is None else str(max_retries)
                     self._log(level="WARN", msg=f"NRC 0x78 (ResponsePending) 대기 {attempt + 1}/{limit_str} (P2*={pending_timeout_s:.1f}s)")
-                    time.sleep(retry_delay_s)
+                    # See uds_download_manager.py's matching comment: Event.wait()
+                    # lets the Stop button interrupt an unlimited-retry pending
+                    # wait immediately instead of sleeping out retry_delay_s.
+                    if self._stop_event.wait(retry_delay_s):
+                        raise UdsError(f"ISO-TP 수신 실패 ({label}): 사용자에 의해 중단됨")
                     attempt += 1
                     continue
                 raise UdsError(f"UDS Negative Response ({label}): NRC=0x{result['nrc']:02X}", nrc=result["nrc"])

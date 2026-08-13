@@ -131,7 +131,15 @@ function MessageDisplayCore({ config }: { config: WidgetConfig }) {
   const frames = [...canStore.frames.values()]
     .filter((f) => !filterActive || filterSet.has(f.id))
     .sort((a, b) => a.id - b.id);
-  const traceRows = filterActive ? canStore.trace.filter((f) => filterSet.has(f.id)) : canStore.trace;
+  // Live view uses the paced revealedTrace (see canStore.ts) so a bursty
+  // backend delivery (e.g. TransferData at minimum STmin) reads as a smooth
+  // scroll instead of the view jumping straight to every newly-arrived row.
+  // The count shown in the toolbar still reflects the true, unpaced total
+  // (canStore.trace) so it's clear no data is actually being dropped.
+  const traceRows = filterActive
+    ? canStore.revealedTrace.filter((f) => filterSet.has(f.id))
+    : canStore.revealedTrace;
+  const traceTotal = filterActive ? canStore.trace.filter((f) => filterSet.has(f.id)).length : canStore.trace.length;
   const snapshotRows = filterActive ? snapshot.filter((f) => filterSet.has(f.id)) : snapshot;
 
   return (
@@ -172,7 +180,9 @@ function MessageDisplayCore({ config }: { config: WidgetConfig }) {
             ? `일시중지 — 최근 1분 ${snapshotRows.length}개`
             : mode === 'fixed'
               ? `${frames.length} IDs`
-              : `${traceRows.length}개 (최근 1분)`}
+              : traceRows.length === traceTotal
+                ? `${traceTotal}개 (최근 1분)`
+                : `${traceRows.length}/${traceTotal}개 표시 중 (최근 1분)`}
         </span>
         <span className="spacer" />
         <button className="small-btn" onClick={() => canStore.clearFrames()}>

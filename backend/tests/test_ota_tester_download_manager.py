@@ -306,6 +306,39 @@ def test_uds_request_with_retry_registers_listener_before_sending(tmp_path):
     assert log == ["add_listener", "send", "receive", "remove_listener"]
 
 
+def test_uds_request_with_retry_stop_event_interrupts_unlimited_pending_wait():
+    """Same fix as uds_download_manager.py's matching test -- OTA Tester
+    shares this exact _uds_request_with_retry logic (see this method's own
+    docstring), so it needs the same _stop_event responsiveness."""
+    import time
+    import threading
+
+    def fake_send(can, tx_id, rx_id, data, is_extended_id=False, fc_timeout_s=1.0, **kw):
+        return {"sent": True}
+
+    def fake_receive(can, rx_id, tx_id, timeout_s=1.0, is_extended_id=False, fc_stmin=0, **kw):
+        return bytes([0x7F, 0x10, 0x78])  # always pending, never resolves
+
+    can_obj = type("FakeCan", (), {"notifier": _FakeNotifier()})()
+    mgr = OtaTesterDownloadManager(can_obj, fake_send, fake_receive)
+
+    def _stop_after_delay():
+        time.sleep(0.05)
+        mgr._stop_event.set()
+
+    threading.Thread(target=_stop_after_delay, daemon=True).start()
+
+    start = time.perf_counter()
+    with pytest.raises(Exception) as exc_info:
+        mgr._uds_request_with_retry(
+            bytearray([0x10, 0x02]), 0.01, "transferData", retry_delay_s=0.5
+        )
+    elapsed = time.perf_counter() - start
+
+    assert "중단" in str(exc_info.value)
+    assert elapsed < 0.5
+
+
 def test_local_stmin_tx_empty_attribute_parses_to_none(tmp_path):
     """Regression: nearly every real GITAuto export has a localSTMinTx
     attribute present on every step but almost always empty (""). The old

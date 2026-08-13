@@ -414,6 +414,18 @@ def run_stop():
     tx_scheduler.stop_auto()
     replay_service.stop()
     test_runner_service.stop()
+    # A running CAN-SWDL/OTA Tester download previously kept transmitting
+    # in the background after the global Stop, since neither manager was
+    # ever included here -- only each widget's own Stop button touched
+    # them. Only stop slots that are actually mid-run (mgr.stop() on an
+    # idle/READY slot would otherwise force its state back to IDLE for no
+    # reason, per UdsDownloadManager.stop()'s own state-reset logic).
+    for slot_index in range(MultiUdsDownloadManager.NUM_SLOTS):
+        mgr = uds_download_manager.get_manager(slot_index)
+        if mgr.running:
+            mgr.stop()
+    if ota_tester_manager.running:
+        ota_tester_manager.stop()
     return _status()
 
 
