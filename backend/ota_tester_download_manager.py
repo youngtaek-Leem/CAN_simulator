@@ -632,6 +632,22 @@ class OtaTesterDownloadManager:
             return self._global_stmin_tx
         return 0x0A
 
+    def _get_send_stmin_floor_s(self) -> float:
+        """Minimum inter-CF delay (seconds) to force on our own multi-frame
+        *sends* (e.g. TransferData) on top of whatever the ECU's Flow
+        Control asks for -- see isotp_service.send()'s min_stmin_s.
+
+        Deliberately NOT the same as _get_fc_stmin(): that one falls back to
+        a step's XML localSTMinTx or the 0x0A default when there's no
+        explicit global override, which is correct for the *receive*-side
+        FC we send back to an ECU but would be wrong here -- applying either
+        fallback as a *send*-side floor would slow TransferData down even
+        with the shared "STmin" checkbox off, when unchecking it is
+        supposed to go back to sending as fast as the ECU's own FC allows.
+        Only the explicit global override should ever slow the send side
+        down."""
+        return decode_stmin(self._global_stmin_tx) if self._global_stmin_tx is not None else 0.0
+
     def _uds_request_with_retry(
         self, request: bytes, timeout_s: float, label: str = "",
         max_retries: Optional[int] = None, retry_delay_s: float = 0.1,
@@ -687,7 +703,7 @@ class OtaTesterDownloadManager:
                 self._isotp_send(
                     self._can, self._request_id, self._response_id, request,
                     is_extended_id=is_ext, fc_timeout_s=timeout_s, reader=reader,
-                    min_stmin_s=decode_stmin(self._get_fc_stmin()),
+                    min_stmin_s=self._get_send_stmin_floor_s(),
                 )
             except Exception as exc:
                 raise UdsError(f"ISO-TP 송신 실패 ({label}): {exc}")

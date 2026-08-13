@@ -454,6 +454,23 @@ class UdsDownloadManager:
             return self._procedure.stmin_tx
         return 0x00
 
+    def _get_send_stmin_floor_s(self) -> float:
+        """Minimum inter-CF delay (seconds) to force on our own multi-frame
+        *sends* (e.g. TransferData) on top of whatever the ECU's Flow
+        Control asks for -- see isotp_service.send()'s min_stmin_s.
+
+        Deliberately NOT the same as _get_fc_stmin(): that one falls back to
+        the XML's own stmin_tx when there's no explicit override, which is
+        correct for the *receive*-side FC we send back to an ECU (matches
+        the XML's documented timing) but would be wrong here -- applying
+        the XML default as a *send*-side floor would slow TransferData down
+        even with the "STmin" checkbox off, when unchecking it is supposed
+        to go back to sending as fast as the ECU's own FC allows. Only an
+        explicit user override should ever slow the send side down.
+        """
+        global_override = getattr(self, '_global_stmin_tx', None)
+        return decode_stmin(global_override) if global_override is not None else 0.0
+
     def _uds_request(self, request: bytes, timeout_s: float, label: str = "") -> dict:
         """Send a UDS request and receive the response."""
         proc = self._procedure
@@ -497,7 +514,7 @@ class UdsDownloadManager:
                     is_extended_id=is_ext,
                     fc_timeout_s=timeout_s,
                     reader=reader,
-                    min_stmin_s=decode_stmin(fc_stmin),
+                    min_stmin_s=self._get_send_stmin_floor_s(),
                 )
             except Exception as exc:
                 raise UdsError(f"ISO-TP 송신 실패 ({label}): {exc}")
@@ -598,7 +615,7 @@ class UdsDownloadManager:
                     is_extended_id=is_ext,
                     fc_timeout_s=timeout_s,
                     reader=reader,
-                    min_stmin_s=decode_stmin(fc_stmin),
+                    min_stmin_s=self._get_send_stmin_floor_s(),
                 )
             except Exception as exc:
                 raise UdsError(f"ISO-TP 송신 실패 ({label}): {exc}")

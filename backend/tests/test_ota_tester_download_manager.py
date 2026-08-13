@@ -941,3 +941,27 @@ def test_uds_request_with_retry_passes_configured_stmin_as_send_floor():
     mgr._uds_request_with_retry(bytearray([0x36, 0x01, 0xAA]), 0.05, "TransferData(seq=1)")
 
     assert sent_kwargs["min_stmin_s"] == pytest.approx(0.05)
+
+
+def test_uds_request_with_retry_no_send_floor_when_stmin_checkbox_off():
+    """Unchecking the "STmin" checkbox (no _global_stmin_tx override) must
+    go back to sending as fast as the ECU's own Flow Control allows -- the
+    0x0A default (used for our own FC when *receiving*) must not leak into
+    the send-side floor."""
+    sent_kwargs = {}
+
+    def fake_send(can, tx_id, rx_id, request, **kw):
+        sent_kwargs.update(kw)
+        return {"sent": True}
+
+    def fake_receive(can, rx_id, tx_id, **kw):
+        return bytes([0x76, 0x01])
+
+    can = type("FakeCan", (), {"notifier": _FakeNotifier()})()
+    mgr = OtaTesterDownloadManager(can, fake_send, fake_receive)
+    assert mgr._global_stmin_tx is None  # checkbox off
+    assert mgr._local_stmin_override is None
+
+    mgr._uds_request_with_retry(bytearray([0x36, 0x01, 0xAA]), 0.05, "TransferData(seq=1)")
+
+    assert sent_kwargs["min_stmin_s"] == 0.0

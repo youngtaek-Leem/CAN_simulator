@@ -494,3 +494,31 @@ def test_uds_request_with_retry_passes_configured_stmin_as_send_floor():
     mgr._uds_request_with_retry(bytearray([0x36, 0x01, 0xAA]), 0.05, "TransferData(seq=1)")
 
     assert sent_kwargs["min_stmin_s"] == pytest.approx(0.05)
+
+
+def test_uds_request_with_retry_no_send_floor_when_stmin_checkbox_off():
+    """Unchecking the "STmin" checkbox (no _global_stmin_tx override) must
+    go back to sending as fast as the ECU's own Flow Control allows -- the
+    XML's own stmin_tx default (used for our own FC when *receiving*) must
+    not leak into the send-side floor, or unchecking the box would no
+    longer restore the original (pre-floor) fastest-possible send speed."""
+    sent_kwargs = {}
+
+    def fake_send(can, tx_id, rx_id, request, **kw):
+        sent_kwargs.update(kw)
+        return {"sent": True}
+
+    def fake_receive(can, rx_id, tx_id, **kw):
+        return bytes([0x76, 0x01])
+
+    can = type("FakeCan", (), {"notifier": _FakeNotifier()})()
+    mgr = UdsDownloadManager(can, fake_send, fake_receive)
+    # stmin_tx defaults to 0x0A -- would previously have leaked into the
+    # send floor if _get_fc_stmin() (not _get_send_stmin_floor_s()) were
+    # used here.
+    mgr._procedure = UdsProcedure(request_id=0x783, response_id=0x78B)
+    assert mgr._global_stmin_tx is None  # checkbox off
+
+    mgr._uds_request_with_retry(bytearray([0x36, 0x01, 0xAA]), 0.05, "TransferData(seq=1)")
+
+    assert sent_kwargs["min_stmin_s"] == 0.0
