@@ -34,11 +34,12 @@ samples/TestScript_Excel09.zip
 
 # Saved layouts can embed a loaded DBC's full text (see POST
 # /api/layouts/{name}) -- default2/3 were saved against the proprietary
-# AMP_FD DBC above and must stay local-only. default.json/default1.json are
-# tracked on purpose: they hold no embedded DBC content (filename reference
-# only) -- be careful not to re-save them while a proprietary DBC is loaded.
-backend/layouts/default2.json
-backend/layouts/default3.json
+# AMP_FD DBC above and must stay local-only. default.json/default1.json/
+# Test01.json used to be tracked on purpose (no embedded DBC content at the
+# time), but were untracked on request (2026-08-13) -- keep every
+# backend/layouts/*.json local-only from here on rather than re-auditing
+# each one's content before deciding.
+backend/layouts/*.json
 
 # Legacy Automation/ dump (proprietary OEM DBCs, Vector vxlapi DLLs, large
 # .blf CAN logs, draft scripts) -- kept local only as reference material for
