@@ -127,6 +127,16 @@ export interface AudioWaveformChartProps {
    * While `cursor.mode` is on, dragging moves the nearest cursor instead of
    * panning the view. */
   cursor?: DiffCursorState;
+  /** Shifts this chart's audio data earlier by this many ms before drawing --
+   * compensates for the sounddevice capture pipeline's fixed callback-arrival
+   * bias (a block only reaches the callback, and gets its `time.time()`
+   * stamp, after it's fully captured + any OS audio-stack buffering, so
+   * every sample is timestamped later than it actually happened; see
+   * Requirement.md's "CAN-오디오 지연 확인" entries). Also shifts the queried
+   * range so the visible window still fills edge-to-edge after the shift.
+   * 0 (default) is the old unshifted behavior -- AudioMonitorWidget doesn't
+   * pass this since it has no CAN reference to align against. */
+  xOffsetMs?: number;
 }
 
 export function AudioWaveformChart({
@@ -147,6 +157,7 @@ export function AudioWaveformChart({
   onResetClick,
   resetTitle,
   cursor,
+  xOffsetMs = 0,
 }: AudioWaveformChartProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const cursorDragRef = useRef<'a' | 'b' | null>(null);
@@ -253,7 +264,9 @@ export function AudioWaveformChart({
       }
       const maxPoints = Math.max(50, Math.round(size.w));
       try {
-        const wf = await api.audioWaveform(xMin, xMax, maxPoints);
+        // Query the raw (unshifted) range that will land in [xMin, xMax]
+        // once each point is drawn xOffsetMs earlier below.
+        const wf = await api.audioWaveform(xMin + xOffsetMs, xMax + xOffsetMs, maxPoints);
         if (cancelled) return;
         const ch = wf.channels.find((c) => c.index === channelIndex);
         pointsRef.current = ch?.points ?? [];
@@ -270,7 +283,7 @@ export function AudioWaveformChart({
       if (timer) clearTimeout(timer);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [channelIndex, xWindowMs, pollEnabled, size.w, streamStartedAtMs]);
+  }, [channelIndex, xWindowMs, pollEnabled, size.w, streamStartedAtMs, xOffsetMs]);
 
   // ---- drawing -------------------------------------------------------------
 
@@ -365,7 +378,7 @@ export function AudioWaveformChart({
       ctx.lineWidth = Math.max(1, plotW / Math.max(points.length, 1) - 0.5);
       ctx.beginPath();
       for (const p of points) {
-        const px = xToPx(p.t * 1000);
+        const px = xToPx(p.t * 1000 - xOffsetMs);
         if (px < plotLeft - 2 || px > plotLeft + plotW + 2) continue;
         ctx.moveTo(px, yToPx(p.min));
         ctx.lineTo(px, yToPx(p.max));
@@ -378,7 +391,7 @@ export function AudioWaveformChart({
 
     lastGeomRef.current = { xMin, xMax, yMin, yMax, plotLeft, plotTop, plotW, plotH };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [size, xWindowMs, xVersion]);
+  }, [size, xWindowMs, xVersion, xOffsetMs]);
 
   // ---- interaction: wheel-zoom (per-axis) + drag-to-pan ---------------------
 

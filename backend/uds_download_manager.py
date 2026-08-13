@@ -703,11 +703,12 @@ class UdsDownloadManager:
             if not selected:
                 step_idx += 1
                 continue
-            self._execute_step(step, phase_name, modified_params)
+            self._execute_step(step, phase_name, modified_params, step_idx)
             step_idx += 1
         return step_idx
 
-    def _execute_step(self, step: UdsStep, phase_name: str, modified_params: Optional[dict[str, dict]] = None) -> None:
+    def _execute_step(self, step: UdsStep, phase_name: str, modified_params: Optional[dict[str, dict]] = None,
+                       step_idx: int = -1) -> None:
         """Execute a single UDS step."""
         params = self._get_effective_params(step, modified_params)
         svc = step.service
@@ -723,18 +724,22 @@ class UdsDownloadManager:
 
         elif svc == "diagnosticSessionControl":
             # Determine which session type(s) to send.
-            # The frontend may pass _sessionType_* override to choose
-            # between diagnosticSessionType and background_diagnosticSessionType
-            # when both are present in the XML.
+            # The frontend may pass a _sessionType_<step_idx> override to
+            # choose between diagnosticSessionType and
+            # background_diagnosticSessionType when both are present in the
+            # XML. modified_params is keyed by *service name* only, so when a
+            # procedure has more than one diagnosticSessionControl step, every
+            # one of their _sessionType_* overrides ends up merged into every
+            # occurrence's step_params (see _get_effective_params) -- scanning
+            # for "any" key with that prefix (previous code) could pick up
+            # another step's override instead of this step's own, silently
+            # falling through to the "no selection" branch (which resends
+            # *both* the main and background session) whenever that other
+            # step's value didn't happen to match a key on this step. Keying
+            # directly on this step's own global index sidesteps the
+            # collision entirely.
             step_params = self._get_effective_params(step, modified_params)
-
-            # Collect all keys matching _sessionType_*
-            selected_type_keys = {k for k in step_params if k.startswith("_sessionType_")}
-            selected_session_type: Optional[str] = None
-            if selected_type_keys:
-                # Take the first match; the user selected which param to use
-                selected_k = next(iter(selected_type_keys))
-                selected_session_type = step_params.get(selected_k)
+            selected_session_type = step_params.get(f"_sessionType_{step_idx}")
 
             # Session type params live on the parent step, not on sub-steps
             session_type_str = step_params.get("diagnosticSessionType", "0x01")

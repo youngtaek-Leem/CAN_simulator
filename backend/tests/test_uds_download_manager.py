@@ -11,10 +11,12 @@ UdsDownloadManager._uds_request_with_retry.
 
 from __future__ import annotations
 
+from unittest.mock import patch
+
 import pytest
 
 from uds_download_manager import UdsDownloadManager
-from uds_xml_parser import UdsProcedure
+from uds_xml_parser import UdsProcedure, UdsRule, UdsStep
 
 
 class _FakeNotifier:
@@ -271,3 +273,64 @@ def test_non_suppress_request_still_fails_on_timeout():
 
     with pytest.raises(Exception):
         mgr._uds_request(bytearray([0x10, 0x01]), 0.05, "diagnosticSessionControl")
+
+
+def test_second_diagnostic_session_control_step_uses_its_own_session_choice():
+    """Bug report: a procedure with TWO diagnosticSessionControl steps (each
+    offering both diagnosticSessionType and background_diagnosticSessionType,
+    both defaulted by the widget to "diagnosticSessionType") sent an
+    unrequested extra background SessionControl on top of the real one.
+
+    Root cause: modified_params is keyed by *service name* only, so
+    _get_effective_params() merges every _sessionType_<idx> override for
+    every diagnosticSessionControl step in the procedure into each
+    occurrence's own params. The old code picked `next(iter(...))` off the
+    resulting set of _sessionType_* keys -- for step[1] that could just as
+    easily grab step[3]'s override key as its own (Python's str hash
+    randomization makes which one non-deterministic across process runs),
+    and when the picked key's value didn't match a real param on *this*
+    step, it silently fell through to the "no selection" branch that sends
+    both the main and background session. See uds_download_manager.py's
+    diagnosticSessionControl handler in _execute_step.
+    """
+    can = type("FakeCan", (), {"notifier": _FakeNotifier()})()
+    mgr = UdsDownloadManager(can, None, None)
+
+    proc = UdsProcedure(request_id=0x783, response_id=0x78B)
+    proc.processing_rule = UdsRule(
+        preparation=[
+            UdsStep(service="startCommunication", params={}, sub_steps=[UdsStep(service="cfg", params={})]),
+            UdsStep(service="diagnosticSessionControl",
+                    params={"diagnosticSessionType": "0x02", "background_diagnosticSessionType": "0x03"}),
+        ],
+        unit=[],
+        complete=[
+            UdsStep(service="diagnosticSessionControl",
+                    params={"diagnosticSessionType": "0x01", "background_diagnosticSessionType": "0x03"}),
+        ],
+    )
+    mgr._procedure = proc
+    mgr._binary_data = b"x"
+
+    # Mirrors what UdsSwdlWidget.tsx auto-selects for every dual-session-type
+    # step: "diagnosticSessionType" (the immediate session), keyed by each
+    # step's own global index (1 and 2 here).
+    modified_params = {
+        "diagnosticSessionControl": {
+            "_sessionType_1": "diagnosticSessionType",
+            "_sessionType_2": "diagnosticSessionType",
+        }
+    }
+
+    sent: list[str] = []
+
+    def fake_retry(self, request, timeout_s, label, retry_delay_s=0.1):
+        sent.append(label)
+        return {"data": bytearray([0x50, request[1]])}
+
+    with patch.object(UdsDownloadManager, "_uds_request_with_retry", fake_retry):
+        mgr._run_procedure(selected_steps=None, modified_params=modified_params)
+
+    # Only the two chosen session switches -- no extra "Background" send for
+    # either step.
+    assert sent == ["SessionControl(0x02)", "SessionControl(0x01)"]

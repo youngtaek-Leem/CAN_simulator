@@ -2676,3 +2676,89 @@ false`로 기본 꺼짐 상태였다 (2026-08-11 "응답 대기" 기능 추가 �
 
 검증: `tsc -b --noEmit`/`vite build`/`oxlint src/widgets/IsoTpBox.tsx`
 클린. 백엔드 변경 없음.
+
+## "CAN-오디오 지연 확인" 위젯: 오디오 캡처 지연 편향 보정 기능 추가 (2026-08-13,
+사용자 요청 — 실측 약 40ms 지연 보고)
+
+사용자가 위젯으로 CAN 트리거 → 오디오 반응 지연을 실측해보니 약 40ms의 오차가
+있다고 보고. 앞선 대화에서 원인을 리뷰한 결과: `audio_service.py`의
+sounddevice 콜백이 `time.time()`을 찍는 시점이 "그 블록을 다 캡처해서 콜백이
+막 호출된 순간"인데, 코드는 이 값을 그 블록의 **시작** 시각으로 써왔다 —
+그래서 오디오 파형 전체가 "블록 전송 시간 + OS 오디오 스택 버퍼링"만큼 항상
+실제보다 늦게 찍히는 고정 편향이 있다(Requirement.md의 "CAN-오디오 지연 확인"
+Phase 1 설계 리뷰에서 10~30ms대로 예측했던 항목과 동일, 40ms 실측치는 그
+범위와 맞음). CAN 쪽 타임스탬프는 서브 ms 오차라 오디오 쪽만 보정하면 된다.
+
+드라이버별 ADC 타임스탬프로 자동 계산하는 방식은 플랫폼 의존도가 커서 리스크가
+크므로, Phase 1 설계 문서에 이미 적어둔 대로 **사용자가 실측한 값을 수동으로
+입력하는 보정값**으로 구현(자동 감지 없음).
+
+**수정** (백엔드 변경 없음, 프론트엔드만):
+- `frontend/src/widgets/AudioWaveformChart.tsx`: `xOffsetMs?: number`(기본
+  0) prop 추가. 폴링 시 쿼리 구간을 `[xMin+xOffsetMs, xMax+xOffsetMs]`로
+  넓혀 가져오고, 그리기 시 각 점을 `p.t*1000 - xOffsetMs`로 그려 오디오
+  파형만 왼쪽(과거)으로 당겨 보이게 한다 -- 쿼리 구간도 같이 옮겨야 뷰
+  오른쪽 끝에 데이터 공백이 생기지 않는다. 기본값 0이라 `AudioMonitorWidget`
+  (이 prop을 넘기지 않음)은 동작 변화 없음.
+- `frontend/src/widgets/CanAudioLatencyWidget.tsx`: 툴바에 "오디오 보정"
+  숫자 입력 추가(`config.options.audioOffsetMs`로 영구 저장, 기본값 40 —
+  사용자의 실측값). 오디오 채널 차트에만 `xOffsetMs`로 전달, CAN 신호
+  차트는 그대로(보정 대상 아님).
+
+검증: `tsc -b --noEmit`/`vite build`/`oxlint` 클린. 백엔드 무관. 브라우저
+자동화 도구가 없어 실제 보정 결과(두 그래프가 정확히 겹치는지)는 코드
+검토로만 확인 -- 사용자가 다음 실사용 시 CAN 트리거와 오디오 반응이 기본
+40ms 보정 상태에서 잘 정렬되는지, 필요시 값을 미세조정해 확인해줄 것을
+권장한다.
+
+## CAN-SWDL: 진단 세션전환 스텝이 2개 이상일 때 선택하지 않은 백그라운드
+세션까지 잘못 전송되는 버그 수정 (2026-08-13, 사용자 실사용 보고)
+
+사용자가 "선택한 스텝만 실행되어야 하는데 잘못 동작하는 것 같다"고 보고한
+실행 로그를 분석: [1]~[7] 스텝만 체크하고 시작했는데, [1] 진단 세션 전환
+스텝이 `0x02`(선택한 세션)를 정상 전송한 직후 **체크하지 않은/선택하지 않은
+백그라운드 세션 `0x03`까지 추가로 전송**했고, ECU가 이를 거부(NRC 0x12)해
+전체 다운로드가 실패 → error-rule 복구 절차가 자동 실행되는 연쇄까지
+이어졌다.
+
+**원인 재현**: 먼저 슬롯별 스텝 선택 라우팅(`MultiUdsDownloadManager.start_all`
+의 `resolve()`)과 스텝 스킵 로직(`_is_step_selected`/`_run_steps`)을 각각
+직접 실행해 검증했는데 — 둘 다 정확했다(부분 선택 `[1,3]`을 넣으면 정확히
+그 두 스텝만 실행됨을 확인). 문제는 그 다음 단계: `_execute_step`의
+`diagnosticSessionControl` 처리부가 "이 스텝에 사용자가 선택한 세션 타입"을
+찾을 때 `step_params`에서 `_sessionType_`로 시작하는 키를 **아무거나**
+집어 썼다(`next(iter(selected_type_keys))`). 그런데 `modified_params`는
+*서비스 이름*으로만 키가 나뉘어 있어(`_get_effective_params()`), 프로시저
+안에 `diagnosticSessionControl` 스텝이 **2개 이상**이면 각 스텝의
+`_sessionType_<step_idx>` 오버라이드가 전부 한 딕셔너리에 합쳐져 모든
+occurrence의 `step_params`에 다 섞여 들어간다. 즉 스텝[1]을 실행할 때도
+스텝[9](예시) 것까지 후보에 함께 보여, `next(iter(set))`이 엉뚱한 스텝의
+오버라이드 키를 집으면 그 값이 현재 스텝의 실제 파라미터와 맞지 않아 "선택
+없음" 폴백으로 빠지고, 그 폴백은 "둘 다 있으면 둘 다 보낸다"는 기존 동작이라
+선택하지 않은 백그라운드 세션까지 전송된 것. `set`의 반복 순서는 문자열
+해시에 의존하고 CPython은 프로세스마다 해시 시드를 무작위화하므로, 같은
+XML로도 실행할 때마다 재현되거나 안 되거나 하는 비결정적 버그였다(실제로
+`next(iter({'_sessionType_1','_sessionType_3'}))`를 5번 반복 실행해보면
+매번 다른 값이 나오는 것으로 재현·확인).
+
+**수정** (`backend/uds_download_manager.py`):
+- `_run_steps()`가 `_execute_step()`을 호출할 때 그 스텝의 전역
+  `step_idx`도 함께 넘기도록 변경(`_execute_step(step, phase_name,
+  modified_params, step_idx)`).
+- `diagnosticSessionControl` 처리부에서 "아무 `_sessionType_*` 키나 집기"
+  대신 `step_params.get(f"_sessionType_{step_idx}")`로 **이 스텝 자신의**
+  오버라이드만 직접 조회하도록 변경 — 다른 스텝의 오버라이드와 충돌할 여지
+  자체를 없앴다.
+- 에러 복구(`_run_error_recovery`)는 자체 인덱스 공간(0부터 별도 카운트)을
+  쓰는 기존 설계라, 메인 프로시저와 에러룰 사이에 우연히 같은 인덱스가
+  같은 서비스로 겹치는 극단적 케이스까지는 여전히 이론적으로 남아있다 --
+  이건 이번 버그 리포트의 실제 재현 케이스가 아니고, `_run_error_recovery`
+  docstring에 이미 문서화된 기존 한계와 같은 종류라 이번 수정 범위에 넣지
+  않았다.
+
+검증: `backend/tests/test_uds_download_manager.py`에 회귀 테스트
+`test_second_diagnostic_session_control_step_uses_its_own_session_choice`
+추가(진단 세션전환 스텝 2개, 각각 `_sessionType_<idx>` 오버라이드가
+`diagnosticSessionType`을 가리키는 상황을 재현 — 수정 전 코드였다면
+프로세스 해시 시드에 따라 간헐적으로 실패했을 테스트). 백엔드 전체 246개
+테스트 통과. 프론트엔드 변경 없음.

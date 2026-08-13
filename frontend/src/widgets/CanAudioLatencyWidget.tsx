@@ -42,6 +42,7 @@ const DEFAULT_X_WINDOW_MS = 10_000;
 const MIN_X_WINDOW_MS = 200;
 const MAX_X_WINDOW_MS = 300_000;
 const X_WINDOW_STEP_FACTOR = 1.1; // +/- toolbar buttons resize the window by 10% per click
+const DEFAULT_AUDIO_OFFSET_MS = 40; // user-measured audio capture pipeline bias
 const LIVE_TICK_MS = 200; // keeps the rolling window scrolling with no new data
 // backend's get_waveform() does real per-chunk numpy work (measured
 // ~10-30ms for a typical 10s/300-point request even after the bisect/break
@@ -88,6 +89,17 @@ export function CanAudioLatencyWidget({ config }: { config: WidgetConfig }) {
 
   const [showPicker, setShowPicker] = useState(false);
   const [xWindowMs, setXWindowMs] = useState(DEFAULT_X_WINDOW_MS);
+  // Audio capture calibration: the sounddevice callback stamps every sample
+  // with the epoch time the *whole block* finished arriving (block transfer
+  // + OS audio-stack buffering), so the audio waveform is always drawn later
+  // than it actually happened relative to the CAN chart. No reliable way to
+  // auto-detect this per-device/platform, so it's a manual, persisted
+  // (survives page-switch, like paramOverrides elsewhere) offset the user
+  // dials in from a real measurement -- default 40ms is the user's own
+  // measured value on this setup (see Requirement.md).
+  const audioOffsetMs = (config.options.audioOffsetMs as number | undefined) ?? DEFAULT_AUDIO_OFFSET_MS;
+  const setAudioOffsetMs = (ms: number) =>
+    updateWidget({ ...config, options: { ...config.options, audioOffsetMs: ms } });
   const [level, setLevel] = useState<import('../types').AudioLevel | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -290,6 +302,20 @@ export function CanAudioLatencyWidget({ config }: { config: WidgetConfig }) {
         <button className={`small-btn ${canStop ? 'danger' : ''}`} onClick={stop} disabled={!canStop}>
           ■ Stop
         </button>
+        <label
+          className="graph-xwindow mono"
+          title="오디오 캡처 파이프라인의 고정 지연 편향 보정값. 오디오 파형을 이 값(ms)만큼 앞으로(과거로) 당겨서 그립니다. CAN 신호는 보정하지 않습니다 -- 실측 후 조정하세요."
+        >
+          오디오 보정
+          <input
+            type="number"
+            step={5}
+            value={audioOffsetMs}
+            onChange={(e) => setAudioOffsetMs(Number(e.target.value))}
+            style={{ width: '52px', marginLeft: '4px' }}
+          />
+          ms
+        </label>
         <span className="spacer" />
         <span className="graph-xwindow mono">{fmtWindow(xWindowMs)}</span>
         <button className="icon-btn" title="시간창 넓히기 (10%)" onClick={() => zoomXWindow(X_WINDOW_STEP_FACTOR)}>
@@ -363,6 +389,7 @@ export function CanAudioLatencyWidget({ config }: { config: WidgetConfig }) {
             onResetClick={resetEverything}
             resetTitle="두 차트 모두 X/Y 축 자동 맞춤으로 리셋"
             cursor={cursor}
+            xOffsetMs={audioOffsetMs}
           />
         ))}
       </div>
