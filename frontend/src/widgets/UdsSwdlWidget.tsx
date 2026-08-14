@@ -104,7 +104,6 @@ export default function UdsSwdlWidget({ config }: Props) {
   // Local "starting" flag purely for disabling the ▶ button while the start
   // POST is in flight; the long-running state is driven by `polling`, not this.
   const [starting, setStarting] = useState(false);
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const lastEventCountRef = useRef<Record<number, number>>({ 0: 0, 1: 0, 2: 0 });
 
   // Restore status + steps on mount -- otherwise switching to another page
@@ -133,15 +132,24 @@ export default function UdsSwdlWidget({ config }: Props) {
   // itself off once every slot's `running` flag goes false, so it stays alive
   // for the whole background download even though the start HTTP call returned
   // immediately (the backend runs the procedure in a daemon thread).
+  //
+  // Self-rescheduling (setTimeout after each request settles) instead of a
+  // plain setInterval -- same fix already applied to AudioMonitorWidget/
+  // CanAudioLatencyWidget (2026-08-10): a slow /api/udswdl/status response
+  // (observed up to ~1s under heavy CAN load) used to leave the old
+  // setInterval firing again regardless, piling up overlapping in-flight
+  // requests instead of waiting for the previous one to finish -- each
+  // overlapping request needs its own connection, which is what showed up
+  // as several different client source ports hitting the same endpoint at
+  // once.
   useEffect(() => {
-    if (!polling) {
-      if (pollRef.current) clearInterval(pollRef.current);
-      pollRef.current = null;
-      return;
-    }
-    pollRef.current = setInterval(async () => {
-      try {
-        const all = await api.udsStatus();
+    if (!polling) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const poll = () => {
+      let keepPolling = true;
+      api.udsStatus().then((all) => {
+        if (cancelled) return;
         setSlots(prev => prev.map((s, i) => ({ ...s, status: all[i] || s.status })));
 
         // Push new CAN-SWDL events into the shared TextDisplay activity log.
@@ -162,15 +170,23 @@ export default function UdsSwdlWidget({ config }: Props) {
             canStore.pushActivity(`SWDL${i + 1}: ${label}${evt.msg ?? ''}`, (evt.ts ?? Date.now() / 1000) * 1000);
           }
         }
-        // Backend finished (no slot running) -> stop polling. The status
-        // snapshot has already been refreshed above, so the UI shows the final
+        // Backend finished (no slot running) -> stop polling (both the
+        // React flag and the reschedule below). The status snapshot has
+        // already been refreshed above, so the UI shows the final
         // COMPLETED/ERROR state.
         if (!stillRunning) {
           setPolling(false);
+          keepPolling = false;
         }
-      } catch { /* ignore */ }
-    }, 500);
-    return () => { if (pollRef.current) clearInterval(pollRef.current); };
+      }).catch(() => { /* ignore */ }).finally(() => {
+        if (!cancelled && keepPolling) timer = setTimeout(poll, 500);
+      });
+    };
+    poll();
+    return () => {
+      cancelled = true;
+      if (timer) clearTimeout(timer);
+    };
   }, [polling]);
 
   const toggleStep = (slotIdx: number, stepIdx: number) => {

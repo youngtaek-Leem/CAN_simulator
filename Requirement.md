@@ -3284,3 +3284,100 @@ virtual CAN 연결 → 샘플 DBC 로드 → "CAN 메시지 표시창" 위젯을
 다음 실사용 시 확인해줄 것을 권장한다. 백엔드 쪽 broadcast tick 자체의
 불규칙성(GIL 핸드오프 가설)은 이번에 고치지 않았다 — 필요하면 별도 조사로
 진행.
+
+## 위 스크롤 페이싱 수정이 만든 회귀: CAN 메시지 수신창 깜빡임·검은 화면
+지속 (2026-08-14, 사용자 보고 — 로그 첨부)
+
+### 증상 및 원인
+사용자가 `ws_flush_ms`를 150ms로 올린 뒤 실사용 로그를 첨부하며 "CAN메시지
+표시창에 업데이트될 때 깜빡임이 심하고 때로는 black 화면이 지속되는 경우도
+있다"고 보고. 코드를 다시 보니 바로 위 항목("STmin 최소값에서 CAN 메시지
+수신창이 렉 걸리는 문제")에서 추가한 페이싱 구현 자체에 새 회귀가 있었다:
+`MessageDisplayCore`가 **모드(고정/스크롤)나 일시중지 여부와 무관하게 매
+렌더마다 무조건** `canStore.revealedTrace`를 호출하고 있었는데, 이 getter가
+`trace.slice(0, revealedCount)` -- 즉 `trace`가 커질수록(대용량 TransferData
+중이면 최대 `TRACE_CAP`=30,000까지 금방 커진다) 매번 최대 3만 개짜리 배열을
+새로 복사하는 연산이었다. fps(10~60)마다 이 복사가 반복되니 렌더 한 번마다
+브라우저 메인 스레드가 묶이는 시간이 늘어났고, 그게 깜빡임·검은 화면으로
+나타났다 -- 페이싱 자체(버스트 시 스크롤을 부드럽게)는 의도대로 동작했지만
+구현 방식이 오히려 더 심한 새 병목을 만든 것이었다.
+
+### 수정
+`frontend/src/store/canStore.ts`: `revealedTrace`(배열을 반환하던 getter)를
+제거하고, `revealedCount`를 공개 getter로 노출해 `Math.min(_revealedCount,
+trace.length)`만 반환하는 순수 숫자로 바꿨다(O(1), 할당 없음).
+`frontend/src/widgets/displays.tsx`: `MessageDisplayCore`가 이제 `trace`
+원본 참조를 그대로(무필터 시 복사 없이) `TraceView`에 넘기고, 그 옆에
+`revealLimit`(=`canStore.revealedCount`) 숫자만 같이 전달한다. `TraceView`는
+원래 하고 있던 가상 스크롤 계산(`first`/`last`/스페이서 높이/라이브 자동
+스크롤 effect)에서 `rows.length` 대신 `total = min(rows.length,
+revealLimit)`을 기준으로 삼도록만 바꿨다 -- 결과적으로 매 렌더마다 실제로
+하는 일은 화면에 보이는 20~30줄만 슬라이스하는 것뿐이라, `trace`가 아무리
+커져도 렌더 비용이 늘지 않는다. Pass 필터가 켜진 경우는 페이싱을 적용하지
+않고(필터링된 결과는 원래 작아서 페이싱이 필요 없고, revealedCount가
+무필터 trace의 인덱스라 필터된 결과와 대응이 안 맞는 문제도 피함) 전체를
+바로 보여주도록 단순화했다.
+
+### 검증
+`tsc -b`/`vite build`/`oxlint` 클린. Playwright로 dev 서버를 띄우고, 이번엔
+Chrome의 `PerformanceObserver({entryTypes:['longtask']})`(50ms 이상
+메인스레드 블로킹 감지)를 브라우저에 직접 주입한 뒤 `/api/tx/send_once`를
+60개 워커로 동시에 3000회 호출해 이전보다 더 큰 버스트를 발생시키며 확인:
+**long task 0건**, 렌더링되는 `.trace-row` DOM 개수는 항상 ~20개로 일정
+(가상 스크롤이 실제로 20~30줄만 그리고 있음을 직접 확인), 페이싱도 여전히
+정상 작동(중간 샘플에서 "2856/2894개 표시 중" 확인), 최종 3000/3000으로
+정확히 수렴, 스크린샷상 정상 렌더링. 콘솔 에러 없음. 백엔드 전체 269개
+테스트 그대로 통과(프론트엔드 전용 변경).
+
+사용자가 첨부한 로그에서 함께 확인된 점(참고용, 이번엔 조치하지 않음):
+`/api/udswdl/status`가 짧은 시간에 4개의 다른 클라이언트 포트에서 들어옴
+(브라우저 탭을 여러 개 열어뒀을 가능성), `testrunner/status`도 슬로우
+리퀘스트로 잡혀 CAN-SWDL과 테스트 러너가 동시에 실행 중이었을 가능성 --
+둘 다 tick delay를 키우는 별도 요인일 수 있어, `ws_flush_ms` 값 자체의
+효과를 검증하려면 이런 동시 부하 없이 재현해 비교해볼 것을 사용자에게
+권장했다.
+
+## `/api/udswdl/status`가 여러 클라이언트 포트에서 겹쳐 들어오던 원인:
+UdsSwdlWidget.tsx가 setInterval 폴링을 아직 안 고친 상태였음 (2026-08-14,
+사용자 질문 — "4개 포트가 페이지 개수랑 상관있나?")
+
+### 조사
+사용자가 4개 페이지를 설정해뒀다며, 바로 위 항목에서 관찰한 "4개의 다른
+클라이언트 포트" 현상이 페이지 개수와 관련 있는지 질문. `App.tsx` 확인
+결과 **활성 페이지의 위젯만 DOM에 마운트**된다(440번째 줄
+`activePage.widgets.map(...)`) -- 비활성 페이지의 위젯은 렌더링도 폴링도
+하지 않으므로 페이지 개수 자체는 무관함을 확인.
+
+**진짜 원인**: `UdsSwdlWidget.tsx`의 상태 폴링(`api.udsStatus()`)이 아직
+`setInterval(..., 500)` 방식이었다 -- 2026-08-10에 `AudioMonitorWidget.tsx`/
+`CanAudioLatencyWidget.tsx`에서 발견해 자기재스케줄 `setTimeout` 방식으로
+고쳤던 것과 정확히 같은 버그 패턴인데, 그때 `UdsSwdlWidget.tsx`는 범위
+밖이라 남겨져 있었다. 사용자가 첨부한 로그에서 `/api/udswdl/status`
+응답이 최대 972ms 걸린 순간이 있었는데, `setInterval`은 이전 요청이 끝났는지
+확인 없이 500ms마다 무조건 새 요청을 쏘므로 -- 응답이 500ms를 넘기면
+이전 요청이 아직 진행 중인 상태에서 다음 폴링이 겹쳐서 나가고, 겹치는
+요청마다 브라우저가 별도 커넥션(= 다른 소스 포트)을 쓴다. 이게 4개의
+다른 포트로 관측된 진짜 원인이었다 -- 브라우저 탭이나 페이지 수와는
+무관.
+
+### 수정
+`frontend/src/widgets/UdsSwdlWidget.tsx`: 상태 폴링 `useEffect`를
+`AudioMonitorWidget.tsx`와 동일한 자기재스케줄 `setTimeout` 패턴으로
+교체 -- `api.udsStatus()` 요청이 `.finally()`로 완료된 뒤에만 다음
+`setTimeout(poll, 500)`을 예약하므로, 응답이 아무리 느려져도 항상 최대
+1개의 요청만 in-flight 상태를 유지한다. 더 이상 필요 없어진 `pollRef`
+(interval id 저장용 ref)도 함께 제거했다. 기존 로직(슬롯별 상태 갱신,
+새 이벤트를 TextDisplay 활동 로그로 전달, 모든 슬롯이 멈추면 폴링
+자체를 끄는 것)은 그대로 유지 -- 폴링 종료 시 재예약을 건너뛰도록
+`keepPolling` 플래그만 추가.
+
+### 검증
+`tsc -b`/`oxlint`/`vite build` 클린. Playwright로 dev 서버를 띄우고
+"CAN-SWDL" 위젯을 추가해 콘솔 에러 없이 정상 렌더링되는지 확인
+(XML/BIN 파일이 없는 이 환경에서는 실제 다운로드를 시작해 폴링이
+실제로 겹치지 않는지까지는 재현하지 못함 -- 로직 자체는 이미 검증된
+`AudioMonitorWidget.tsx` 패턴을 그대로 따른 것이라 낮은 리스크로
+판단). 백엔드 전체 269개 테스트 그대로 통과(프론트엔드 전용 변경).
+실기에서 대용량 TransferData 중 `/api/udswdl/status` 슬로우 리퀘스트가
+더 이상 겹쳐서(같은 시각에 여러 in-flight) 나가지 않는지는 사용자가
+다음 실사용 시 서버 로그로 확인해줄 것을 권장한다.

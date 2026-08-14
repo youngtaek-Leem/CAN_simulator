@@ -131,15 +131,18 @@ function MessageDisplayCore({ config }: { config: WidgetConfig }) {
   const frames = [...canStore.frames.values()]
     .filter((f) => !filterActive || filterSet.has(f.id))
     .sort((a, b) => a.id - b.id);
-  // Live view uses the paced revealedTrace (see canStore.ts) so a bursty
-  // backend delivery (e.g. TransferData at minimum STmin) reads as a smooth
-  // scroll instead of the view jumping straight to every newly-arrived row.
-  // The count shown in the toolbar still reflects the true, unpaced total
-  // (canStore.trace) so it's clear no data is actually being dropped.
-  const traceRows = filterActive
-    ? canStore.revealedTrace.filter((f) => filterSet.has(f.id))
-    : canStore.revealedTrace;
-  const traceTotal = filterActive ? canStore.trace.filter((f) => filterSet.has(f.id)).length : canStore.trace.length;
+  // Live trace: pass the raw trace reference straight through (zero-copy in
+  // the common no-filter case) plus how much of it is currently "revealed"
+  // for pacing -- TraceView clamps its own already-virtualized window
+  // against revealLimit instead of us materializing a (potentially
+  // 30,000-entry) prefix array here on every render. An earlier version did
+  // exactly that (a revealedTrace() getter returning trace.slice(0, n)),
+  // computed unconditionally even in Fixed mode or while paused -- expensive
+  // enough under heavy load (up to `fps` times/sec) to visibly stutter or
+  // blank the display, which is worse than the burst-jump it was meant to
+  // fix. See Requirement.md.
+  const traceSource = filterActive ? canStore.trace.filter((f) => filterSet.has(f.id)) : canStore.trace;
+  const revealLimit = filterActive ? traceSource.length : canStore.revealedCount;
   const snapshotRows = filterActive ? snapshot.filter((f) => filterSet.has(f.id)) : snapshot;
 
   return (
@@ -180,9 +183,9 @@ function MessageDisplayCore({ config }: { config: WidgetConfig }) {
             ? `일시중지 — 최근 1분 ${snapshotRows.length}개`
             : mode === 'fixed'
               ? `${frames.length} IDs`
-              : traceRows.length === traceTotal
-                ? `${traceTotal}개 (최근 1분)`
-                : `${traceRows.length}/${traceTotal}개 표시 중 (최근 1분)`}
+              : revealLimit >= traceSource.length
+                ? `${traceSource.length}개 (최근 1분)`
+                : `${revealLimit}/${traceSource.length}개 표시 중 (최근 1분)`}
         </span>
         <span className="spacer" />
         <button className="small-btn" onClick={() => canStore.clearFrames()}>
@@ -192,7 +195,7 @@ function MessageDisplayCore({ config }: { config: WidgetConfig }) {
       {paused ? (
         <TraceView rows={snapshotRows} live={false} />
       ) : mode === 'trace' ? (
-        <TraceView rows={traceRows} live={true} />
+        <TraceView rows={traceSource} live={true} revealLimit={revealLimit} />
       ) : (
         <FixedTable frames={frames} dbc={dbc} expanded={expanded} onToggle={toggleExpanded} />
       )}
@@ -386,10 +389,23 @@ function SignalDetail({ frame, dbc }: { frame: FrameEntry; dbc: DbcSummary }) {
 const ROW_H = 22;
 const OVERSCAN = 10;
 
-function TraceView({ rows, live }: { rows: RxFrame[]; live: boolean }) {
+function TraceView({
+  rows,
+  live,
+  revealLimit,
+}: {
+  rows: RxFrame[];
+  live: boolean;
+  // Caps how much of `rows` is treated as "there" for this render -- lets a
+  // caller hand over the full underlying array (zero-copy) while still
+  // pacing how much of it the view reacts to (see displays.tsx's
+  // revealLimit). Omitted (paused snapshot) means the whole array counts.
+  revealLimit?: number;
+}) {
   const outerRef = useRef<HTMLDivElement>(null);
   const [scrollTop, setScrollTop] = useState(0);
   const [viewH, setViewH] = useState(200);
+  const total = revealLimit !== undefined ? Math.min(rows.length, revealLimit) : rows.length;
 
   useEffect(() => {
     const el = outerRef.current;
@@ -401,15 +417,18 @@ function TraceView({ rows, live }: { rows: RxFrame[]; live: boolean }) {
     return () => ro.disconnect();
   }, []);
 
-  // live mode sticks to the newest frame at the bottom
+  // live mode sticks to the newest frame at the bottom -- tracks `total`
+  // (the revealed/paced count), not rows.length, so it advances at the
+  // same paced rate as what's actually rendered instead of jumping ahead
+  // of it.
   useEffect(() => {
     if (live && outerRef.current) {
       outerRef.current.scrollTop = outerRef.current.scrollHeight;
     }
-  }, [live, rows.length]);
+  }, [live, total]);
 
   const first = Math.max(0, Math.floor(scrollTop / ROW_H) - OVERSCAN);
-  const last = Math.min(rows.length, Math.ceil((scrollTop + viewH) / ROW_H) + OVERSCAN);
+  const last = Math.min(total, Math.ceil((scrollTop + viewH) / ROW_H) + OVERSCAN);
   const visible = rows.slice(first, last);
 
   return (
@@ -440,8 +459,8 @@ function TraceView({ rows, live }: { rows: RxFrame[]; live: boolean }) {
             <span className="t-data">{fmtData(f.data)}</span>
           </div>
         ))}
-        <div style={{ height: Math.max(0, (rows.length - last) * ROW_H) }} />
-        {rows.length === 0 && <div className="empty">수신된 메시지가 없습니다</div>}
+        <div style={{ height: Math.max(0, (total - last) * ROW_H) }} />
+        {total === 0 && <div className="empty">수신된 메시지가 없습니다</div>}
       </div>
     </div>
   );

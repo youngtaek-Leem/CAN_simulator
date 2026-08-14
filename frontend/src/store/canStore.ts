@@ -79,8 +79,15 @@ class CanStore {
   // into the CURRENT trace array; adjusted in ingestFrames() whenever trace
   // is spliced from the front (stale-window/cap pruning) so it keeps
   // pointing at the same conceptual position instead of silently
-  // over-revealing. Read through revealedTrace(), never directly.
-  private revealedCount = 0;
+  // over-revealing. Read through the revealedCount getter below -- this is
+  // deliberately just a number, not a materialized array slice (an earlier
+  // version exposed a revealedTrace() getter that did trace.slice(0, n) on
+  // every read; TraceView called that on every render regardless of mode/
+  // pause state, so once trace grew into the thousands that slice itself
+  // became expensive enough -- at up to `fps` renders/sec -- to visibly
+  // stutter or blank the display under heavy load. TraceView now clamps its
+  // own already-virtualized window against this plain number instead).
+  private _revealedCount = 0;
   // Per-signal time series, populated only for signals with an active graph
   // widget watching them (see watchSignal/unwatchSignal) so history isn't
   // recorded for every DBC signal, just the ones actually being charted.
@@ -339,25 +346,27 @@ class CanStore {
     while (stale < this.trace.length && this.trace[stale].ts < cutoff) stale++;
     if (stale > 0) {
       this.trace.splice(0, stale);
-      this.revealedCount = Math.max(0, this.revealedCount - stale);
+      this._revealedCount = Math.max(0, this._revealedCount - stale);
     }
     if (this.trace.length > TRACE_CAP) {
       const excess = this.trace.length - TRACE_CAP;
       this.trace.splice(0, excess);
-      this.revealedCount = Math.max(0, this.revealedCount - excess);
+      this._revealedCount = Math.max(0, this._revealedCount - excess);
     }
     this.markDirty();
   }
 
-  /** The prefix of `trace` currently allowed to be shown by the live
-   * "스크롤" view -- grows toward trace.length at a bounded rate (see
+  /** How many of trace's leading entries the live "스크롤" view may
+   * currently show -- grows toward trace.length at a bounded rate (see
    * tick()) instead of jumping straight to it, so a bursty backend delivery
    * (e.g. TransferData at minimum STmin) reads as a smooth scroll on
-   * screen. A paused snapshot bypasses this entirely and shows the full,
+   * screen. Just a number -- TraceView clamps its own already-virtualized
+   * window against it directly, so reading this is O(1) and never
+   * allocates. A paused snapshot bypasses this entirely and shows the full,
    * unpaced `trace` -- pacing only matters while new rows are actively
    * streaming in. */
-  get revealedTrace(): RxFrame[] {
-    return this.trace.slice(0, Math.min(this.revealedCount, this.trace.length));
+  get revealedCount(): number {
+    return Math.min(this._revealedCount, this.trace.length);
   }
 
   /** ms since the first frame received after the last (re)start. */
@@ -382,7 +391,7 @@ class CanStore {
   resetTimeBase() {
     this.timeBase = null;
     this.trace = [];
-    this.revealedCount = 0;
+    this._revealedCount = 0;
     for (const key of this.signalHistory.keys()) this.signalHistory.set(key, []);
     this.markDirty();
   }
@@ -423,8 +432,8 @@ class CanStore {
     // (~60Hz), independent of the fps-gated render below -- this is what
     // actually paces the catch-up rate; the render throttle below just
     // controls how often React sees the (already-paced) result.
-    if (this.revealedCount < this.trace.length) {
-      this.revealedCount = Math.min(this.trace.length, this.revealedCount + TRACE_REVEAL_PER_TICK);
+    if (this._revealedCount < this.trace.length) {
+      this._revealedCount = Math.min(this.trace.length, this._revealedCount + TRACE_REVEAL_PER_TICK);
       this.dirty = true;
     }
     if (this.dirty && t - this.lastEmit >= 1000 / this.fps) {
