@@ -23,6 +23,7 @@ import OtaTesterWidget from './OtaTesterWidget';
 import { AudioMonitorWidget } from './AudioMonitorWidget';
 import { PowerControlWidget } from './PowerControlWidget';
 import { CanAudioLatencyWidget } from './CanAudioLatencyWidget';
+import { SysLogAnalysisWidget } from './SysLogAnalysisWidget';
 
 interface WidgetMeta {
   label: string;
@@ -165,5 +166,10 @@ export const WIDGET_REGISTRY: Record<WidgetType, WidgetMeta> = {
     label: 'CAN-오디오 지연 확인',
     component: CanAudioLatencyWidget,
     defaultSize: { w: 8, h: 10, minW: 3, minH: 3 },
+  },
+  sysLogAnalysis: {
+    label: 'sysLog 분석',
+    component: SysLogAnalysisWidget,
+    defaultSize: { w: 12, h: 14, minW: 4, minH: 3 },
   },
 };

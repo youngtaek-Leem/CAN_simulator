@@ -17,8 +17,7 @@
       "Bash(rm -rf:*)",
       "Bash(brew install:*)",
       "Bash(brew uninstall:*)",
-      "Edit(.env*)",
-      "Write(.env*)"
+      "Edit(.env*)"
     ]
   }
 }

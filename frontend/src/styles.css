@@ -837,6 +837,202 @@ td.empty {
   cursor: grabbing;
 }
 
+/* ---- sysLog 분석 위젯: 좌측 ID 체크박스 목록(스크롤) + 우측 그래프 스택(스크롤) ---- */
+
+.syslog-widget {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  gap: 4px;
+}
+
+.syslog-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  gap: 6px;
+}
+
+.syslog-idlist {
+  width: 240px;
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  gap: 4px;
+}
+
+.syslog-section-title {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-dim);
+  padding: 2px 4px;
+}
+
+.syslog-section-title .icon-btn {
+  padding: 0 5px;
+  font-size: 9px;
+}
+
+/* 역주행(시간 단절) 기준으로 나뉜 구간 목록 -- 구간이 많을 수 있어(수백 개까지도)
+   자체 높이를 제한하고 스크롤한다. */
+.syslog-segment-box {
+  flex-shrink: 0;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px;
+}
+
+.syslog-segment-list {
+  max-height: 130px;
+  overflow-y: auto;
+}
+
+.syslog-segment-row {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 4px;
+  font-size: 10px;
+  cursor: pointer;
+  border-radius: 3px;
+}
+
+.syslog-segment-row:hover {
+  background: var(--panel-3);
+}
+
+.syslog-segment-range {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: monospace;
+}
+
+.syslog-id-list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px;
+}
+
+.syslog-id-row {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 4px;
+  font-size: 11px;
+  cursor: pointer;
+  border-radius: 3px;
+}
+
+.syslog-id-row:hover {
+  background: var(--panel-3);
+}
+
+.syslog-id-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.syslog-id-count {
+  color: var(--text-dim);
+  font-size: 10px;
+}
+
+.syslog-id-group + .syslog-id-group {
+  margin-top: 4px;
+}
+
+.syslog-id-group-header {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 4px;
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-dim);
+  background: var(--panel-3);
+  border-radius: 3px;
+}
+
+.syslog-id-group-header .icon-btn {
+  padding: 0 5px;
+  font-size: 9px;
+}
+
+/* 그래프 컬럼 + 오른쪽 커스텀 스크롤바를 한 줄에 나란히 놓는 래퍼. */
+.syslog-graphs-wrap {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  gap: 4px;
+}
+
+.syslog-graphs {
+  flex: 1;
+  min-width: 0;
+  /* 실제 스크롤은 이 요소가 계속 담당(overflow-y: auto, .graph-charts-col에서
+     상속)하지만, 눈에 보이는 스크롤바는 네이티브 것을 쓰지 않는다 -- OS/브라우저
+     마다 두께가 제각각이고(특히 macOS 오버레이 스크롤바는 평소엔 숨어 있어
+     찾기 어려움) 자동화 테스트로도 조작이 안 돼서, 항상 일정하게 두껍고 확실히
+     동작하는 커스텀 스크롤바(.syslog-scrollbar-*, VerticalScrollbar 컴포넌트)로
+     대체하고 네이티브 스크롤바는 숨긴다. */
+  scrollbar-width: none;
+}
+
+.syslog-graphs::-webkit-scrollbar {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
+.syslog-scrollbar-track {
+  width: 14px;
+  flex-shrink: 0;
+  position: relative;
+  border-radius: 7px;
+  background: var(--panel-3);
+}
+
+.syslog-scrollbar-thumb {
+  position: absolute;
+  left: 2px;
+  right: 2px;
+  background: var(--border);
+  border-radius: 5px;
+  cursor: pointer;
+  touch-action: none;
+}
+
+.syslog-scrollbar-thumb:hover,
+.syslog-scrollbar-thumb:active {
+  background: var(--text-dim);
+}
+
+.syslog-chart-header-draggable {
+  cursor: grab;
+}
+
+.syslog-chart-header-draggable:active {
+  cursor: grabbing;
+}
+
+.syslog-chart-dragover {
+  outline: 2px dashed var(--accent, #3b82f6);
+  outline-offset: -2px;
+}
+
 /* ---- Windows-style form controls (button/checkbox/dropdown/slider widgets) ---- */
 
 .control-widget .big-btn {

@@ -52,6 +52,7 @@ from log_service import LogService
 from power_supply_service import PowerSupplyService
 from replay_service import ReplayService
 from seedkey_client import SeedKeyService
+from syslog_service import SysLogService
 from test_runner_service import TestRunnerService
 from tx_scheduler import TxScheduler
 from uds_download_manager import MultiUdsDownloadManager
@@ -154,6 +155,7 @@ replay_service = ReplayService(can_manager)
 log_service = LogService(can_manager, CAN_LOG_DIR)
 power_supply_service = PowerSupplyService()
 audio_service = AudioService(TESTRUNNER_AUDIO_DIR, TESTRUNNER_GOLDEN_DIR)
+syslog_service = SysLogService()
 test_runner_service = TestRunnerService(
     can_manager,
     dbc_service,
@@ -1299,6 +1301,67 @@ async def testrunner_upload_golden(file: UploadFile):
     dest = TESTRUNNER_GOLDEN_DIR / _safe_upload_filename(file.filename, "golden.wav")
     dest.write_bytes(await file.read())
     return {"saved": dest.name}
+
+
+# ---- sysLog 분석 ----------------------------------------------------------
+
+
+@app.post("/api/syslog/upload")
+async def syslog_upload_log(file: UploadFile):
+    data = await file.read()
+    try:
+        return syslog_service.load_log(data, file.filename or "syslog.bin")
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"sysLog parse error: {exc}")
+
+
+@app.post("/api/syslog/db/upload")
+async def syslog_upload_db(file: UploadFile):
+    raw = await file.read()
+    for encoding in ("utf-8", "cp1252", "latin-1"):
+        try:
+            text = raw.decode(encoding)
+            break
+        except UnicodeDecodeError:
+            continue
+    try:
+        return syslog_service.load_db(text, file.filename or "sysLogDB.txt")
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"sysLogDB parse error: {exc}")
+
+
+@app.get("/api/syslog/status")
+def syslog_status():
+    return syslog_service.status()
+
+
+@app.get("/api/syslog/timeline")
+def syslog_timeline():
+    return syslog_service.timeline()
+
+
+@app.get("/api/syslog/ids")
+def syslog_ids(segments: str | None = None):
+    # segments 파라미터 자체가 없으면(None) 필터 없이 전체 개수. 파라미터가
+    # 있으면(빈 문자열 포함) 그 인덱스들로 필터링 -- 빈 문자열은 "체크된 구간
+    # 없음"(모든 ID count=0)을 뜻하므로, 파라미터 부재(필터 없음)와 구분해야
+    # 한다.
+    checked_segments = None
+    if segments is not None:
+        try:
+            checked_segments = [int(x) for x in segments.split(",") if x.strip()]
+        except ValueError:
+            raise HTTPException(status_code=400, detail="segments must be a comma-separated list of integers")
+    return syslog_service.list_ids(checked_segments)
+
+
+@app.get("/api/syslog/series")
+def syslog_series(ids: str = ""):
+    try:
+        id_list = [int(x) for x in ids.split(",") if x.strip()]
+    except ValueError:
+        raise HTTPException(status_code=400, detail="ids must be a comma-separated list of integers")
+    return syslog_service.get_series(id_list)
 
 
 # ---- Layout persistence --------------------------------------------------

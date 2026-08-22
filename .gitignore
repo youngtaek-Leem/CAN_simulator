@@ -57,6 +57,14 @@ reference/**/*.dll
 reference/**/*.bin
 reference/ask_client.py
 
+# reference/ 전체를 로컬 전용으로 유지 (2026-08-23) -- sysLog 분석 위젯
+# 작업 중 채워진 reference/sysLog/ 등에 실제 차량/ECU 테스트 데이터(펌웨어
+# 재프로그래밍 설정, 실차 sysLog 분석 결과물 등)가 다수 섞여 있어, 위 특정
+# 확장자 규칙만으로는 다 못 걸러낸다. 같은 유출 사고가 반복되지 않도록
+# 폴더 전체를 로컬 전용으로 못박는다. backend/tests/test_syslog_service.py는
+# 이 폴더가 로컬에 있을 때만 통과한다(CI에서는 없으면 그 테스트들만 실패).
+reference/
+
 # OS
 .DS_Store
 

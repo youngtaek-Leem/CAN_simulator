@@ -329,6 +329,49 @@ export interface OtaTesterStatus {
   error: string | null;
 }
 
+export interface SysLogStatus {
+  log_filename: string | null;
+  db_filename: string | null;
+  record_count: number;
+  filename?: string;
+  entry_count?: number;
+}
+
+export interface SysLogIdInfo {
+  id: number;
+  name: string;
+  count: number;
+}
+
+export interface SysLogPoint {
+  seq: number;
+  x_ms: number;
+  value: number;
+  day: number;
+  hour: number;
+  minute: number;
+  ms: number;
+}
+
+export interface SysLogSeries {
+  name: string;
+  count: number;
+  points: SysLogPoint[];
+}
+
+export interface SysLogTimelineSegment {
+  plot_x_start: number;
+  abs_ms_start: number;
+  plot_x_end: number;
+  abs_ms_end: number;
+}
+
+export interface SysLogTimeline {
+  segments: SysLogTimelineSegment[];
+  plot_x_min: number;
+  plot_x_max: number;
+}
+
 export const SERVICE_DISPLAY_NAMES: Record<string, string> = {
   startCommunication: 'CAN 통신 시작',
   stopCommunication: 'CAN 통신 종료',
@@ -372,7 +415,8 @@ export type WidgetType =
   | 'otaTester'
   | 'audioMonitor'
   | 'powerControl'
-  | 'canAudioLatency';
+  | 'canAudioLatency'
+  | 'sysLogAnalysis';
 
 export interface SignalBinding {
   message: string;

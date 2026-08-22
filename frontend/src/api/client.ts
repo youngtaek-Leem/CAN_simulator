@@ -260,4 +260,22 @@ export const api = {
   otaTesterStart: (request_id: number, response_id: number, global_stmin_tx?: number) =>
     post('/api/ota_tester/start', { request_id, response_id, global_stmin_tx }),
   otaTesterStop: () => post('/api/ota_tester/stop'),
+
+  // sysLog 분석
+  syslogUploadLog: (file: File) => upload<import('../types').SysLogStatus>('/api/syslog/upload', file),
+  syslogUploadDb: (file: File) => upload<import('../types').SysLogStatus>('/api/syslog/db/upload', file),
+  syslogStatus: () => request<import('../types').SysLogStatus>('/api/syslog/status'),
+  syslogTimeline: () => request<import('../types').SysLogTimeline>('/api/syslog/timeline'),
+  // segmentIndices를 주면(체크된 시간 구간 인덱스) 각 ID의 count가 그 구간
+  // 안의 레코드 수로만 계산된다. 생략하면 전체 개수(필터 없음). 빈 배열이면
+  // "체크된 구간 없음" -- 모든 ID count가 0으로 온다(백엔드 /api/syslog/ids
+  // 참고, 파라미터 부재와 빈 문자열을 구분함).
+  syslogIds: (segmentIndices?: number[]) =>
+    request<import('../types').SysLogIdInfo[]>(
+      segmentIndices !== undefined ? `/api/syslog/ids?segments=${segmentIndices.join(',')}` : '/api/syslog/ids',
+    ),
+  syslogSeries: (ids: number[]) =>
+    request<Record<string, import('../types').SysLogSeries>>(
+      `/api/syslog/series?ids=${ids.join(',')}`,
+    ),
 };
