@@ -1364,6 +1364,20 @@ def syslog_series(ids: str = ""):
     return syslog_service.get_series(id_list)
 
 
+class SysLogScriptRequest(BaseModel):
+    checked_segments: list[int]
+
+
+@app.post("/api/syslog/generate_script")
+def syslog_generate_script(req: SysLogScriptRequest):
+    if not dbc_service.loaded:
+        raise HTTPException(status_code=400, detail="DBC가 로드되지 않았습니다. 먼저 DBC를 업로드하세요.")
+    dbc_summary = dbc_service.summary()
+    return syslog_service.generate_test_script(
+        req.checked_segments, dbc_summary["messages"], dbc_service.signal_send_type
+    )
+
+
 # ---- Layout persistence --------------------------------------------------
 
 

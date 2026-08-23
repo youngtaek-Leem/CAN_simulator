@@ -372,6 +372,26 @@ export interface SysLogTimeline {
   plot_x_max: number;
 }
 
+export interface SysLogScriptWarning {
+  log_id: number;
+  log_name: string;
+  matched_message: string;
+  matched_signal: string;
+}
+
+export interface SysLogScriptError {
+  log_id: number;
+  log_name: string | null;
+  reason: string;
+}
+
+export interface SysLogScriptResult {
+  steps: Record<string, unknown>[];
+  warnings: SysLogScriptWarning[];
+  errors: SysLogScriptError[];
+  matched_count: number;
+}
+
 export const SERVICE_DISPLAY_NAMES: Record<string, string> = {
   startCommunication: 'CAN 통신 시작',
   stopCommunication: 'CAN 통신 종료',

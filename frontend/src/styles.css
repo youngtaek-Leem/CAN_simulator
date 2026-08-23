@@ -1020,6 +1020,32 @@ td.empty {
   background: var(--text-dim);
 }
 
+.syslog-script-result {
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 4px 6px;
+  font-size: 11px;
+}
+
+.syslog-script-summary {
+  color: var(--text-dim);
+}
+
+.syslog-script-details {
+  margin-top: 4px;
+}
+
+.syslog-script-details summary {
+  cursor: pointer;
+  color: var(--text-dim);
+}
+
+.syslog-script-row {
+  padding: 1px 0 1px 14px;
+  font-family: monospace;
+  font-size: 10px;
+}
+
 .syslog-chart-header-draggable {
   cursor: grab;
 }

@@ -39,6 +39,8 @@ import bisect
 import struct
 from dataclasses import dataclass
 
+from syslog_script_generator import generate_can_test_script
+
 RECORD_SIZE = 8
 DAY_SHIFT = 27
 DAY_MASK = 0b11111
@@ -282,4 +284,33 @@ class SysLogService:
             "segments": self._enriched_segments(),
             "plot_x_min": 0,
             "plot_x_max": self._plot_x_max_cache,
+        }
+
+    def generate_test_script(
+        self,
+        checked_segments: list[int],
+        dbc_messages: list[dict],
+        signal_send_type,
+    ) -> dict:
+        """체크된 시간 구간 안, log ID 0~399 범위 레코드를 DBC 신호와
+        매칭해 CANReq/CANEv 시나리오 JSON(steps)을 만든다. 매칭 규칙과
+        delay 계산은 syslog_script_generator.generate_can_test_script 참고
+        (Requirement.md "sysLog -> CAN 테스트 스크립트 생성" 절)."""
+        self._ensure_series()
+        plot_x_by_seq, _segments = build_global_timeline(self._records)
+        result = generate_can_test_script(
+            self._records,
+            plot_x_by_seq,
+            self._enriched_segments(),
+            set(checked_segments),
+            self._db,
+            dbc_messages,
+            signal_send_type,
+        )
+        steps = [{"type": "ID", "num": "1", "Cycle": 1}, *result.steps] if result.steps else []
+        return {
+            "steps": steps,
+            "warnings": result.warnings,
+            "errors": result.errors,
+            "matched_count": result.matched_count,
         }

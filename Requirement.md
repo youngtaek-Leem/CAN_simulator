@@ -3857,3 +3857,174 @@ Playwright로 재현: 구간 3개(0,1,2) 체크 해제 + ID 1개 선택 →
 1개만 남기고 나머지 전부 해제하면 42로 바뀜을 확인(구간별 필터링
 동작), ID순 정렬 시 첫 항목이 실제로 ID=1임을 확인, 그룹 "전체" 버튼
 클릭 시 그 그룹의 108개 항목이 전부 체크됨을 확인. 콘솔 에러 없음.
+
+## "sysLog → CAN 테스트 스크립트 생성" 기능 (2026-08-23, 사용자 요청 — 개발 완료, 검증 통과)
+
+### 목표/범위
+
+sysLog 분석 위젯에서, 선택한 시간 구간의 로그를 실제 CAN 신호 송신
+시나리오로 재생할 수 있는 `test_script_Rev01.json` 호환 JSON 파일을
+생성하는 기능 추가. 기준 포맷: `reference/sysLog/test_script_Rev01.json`
+(`backend/test_runner_service.py`가 이미 파싱하는 것과 동일한 스키마).
+
+### 확정 사양(사용자 지시 + 기존 코드 확인으로 검증)
+
+- **CANReq vs CANEv**: DBC 신호의 send_type이 periodic이면 `CANReq`,
+  event면 `CANEv`. `dbc_service.signal_send_type()`(메시지 코멘트의
+  `[P]`/`[PE]` 태그 기반, 기존 로직 그대로)을 재사용 — 별도 판정 로직을
+  만들지 않는다.
+- **대상 레코드**: log ID 0~399 범위, 그리고 현재 **체크된 시간 구간**
+  (기존 "시간 구간" 체크박스 기능)에 속한 것만. 그래프에 표시하려고
+  선택한 ID 목록(`selectedIds`)과는 무관하게, 범위 안의 모든 ID를
+  대상으로 한다(사양 4번 "이 신호와 CAN-DB에 있는 값을 matching하여...
+  구성한다"를 "현재 그래프에 그려둔 것만"이 아니라 "범위 안 전체"로
+  해석).
+- **신호명 매칭 알고리즘** (사양 5번을 다음과 같이 구체화):
+  1. logDB 이름과 정확히 같은 이름의 DBC 신호가 (전체 DBC를 통틀어)
+     정확히 1개면 그것을 쓴다.
+  2. 아니면 logDB 이름을 뒤에서부터 한 글자씩 줄여가며(가장 긴 것부터),
+     그 prefix로 **시작하는**(`str.startswith`) DBC 신호가 정확히 1개로
+     좁혀지는 가장 긴 prefix를 찾는다. (뒤쪽 접미사만 다른 경우 --
+     `...Sta` vs `...Set` -- 를 잡기 위함. prefix를 줄일수록 후보가
+     늘어나기만 하므로(줄어들지 않음) 가장 긴 prefix에서 멈추는 게
+     맞다.)
+  3. 그래도 유일하게 못 찾으면(0개거나 끝까지 여러 개) 매칭 실패 --
+     해당 log ID는 결과에서 제외하고 에러로 보고.
+  4. 1번이 아니라 2번으로 찾은 경우(즉 이름이 정확히 같지 않음) --
+     경고로 보고(log ID명 + 대치된 CAN 신호명).
+- **Value**: 로그의 raw 정수값을 그대로 hex 문자열로(`0xHH`) 쓴다 --
+  `test_runner_service.py`의 `_hex_to_scaled`가 Value를 raw 비트패턴으로
+  읽어 signal의 scale/offset을 적용하는 것과 동일한 해석이라, 로그
+  자체가 이미 그 raw 값을 기록하고 있으므로 그대로 대응된다(실제
+  `syslog.bin`의 id=49 값 1/2가 레퍼런스 스크립트의
+  `Warn_Sound_TikTok` `"0x01"`/`"0x02"`와 정확히 일치하는 것으로 확인).
+- **delay 계산**: 정렬(원본 파일 순서=시간순)된 매칭 스텝들 사이, 직전
+  스텝과 같은 시간 구간(세그먼트) 안이면 실제 경과ms(plot_x 차이,
+  세그먼트 안에서는 실제ms와 동일)를 delay로 쓴다. 체크 해제된 구간을
+  건너뛰어 다른(체크된) 구간으로 넘어가는 경우는 실제 경과시간이
+  의미가 없으므로 고정 `DEFAULT_GAP_MS`(200ms)를 대신 쓴다.
+- **DBC 소스**: 위젯 자체 업로드가 아니라, 앱에 이미 로드된 전역
+  `dbc_service`(다른 위젯들과 공유)를 그대로 쓴다. DBC 미로드 시
+  에러로 안내.
+- **케이스 구조**: 생성된 스텝 전체를 `{"type":"ID","num":"1","Cycle":1}`
+  단일 케이스로 감싼다(로그 1개 = 시나리오 1개).
+- **경고/에러 보고**(사양 6번): API 응답에 `warnings`(대치된 신호
+  목록)와 `errors`(매칭 실패한 log ID 목록)를 함께 담아 반환하고,
+  프론트가 이를 화면에 표시한다. 파일 다운로드는 매칭된 스텝만으로
+  진행(실패한 것은 제외).
+
+### 모듈 분해
+
+| 모듈 | 책임 | 검증 방법 | 상태 |
+|---|---|---|---|
+| `backend/syslog_script_generator.py` | 신호명 매칭(`find_matching_signal`) + 시간순 CANReq/CANEv/delay 스텝 생성(`generate_can_test_script`), 경고/에러 수집 | pytest: 정확 일치/접두사 폴백/매칭 실패 각각, delay 계산(같은 구간 vs 구간 경계) | 검증 통과 |
+| `backend/syslog_service.py`: `generate_test_script()` | 파싱된 레코드+logDB를 generator에 연결(plot_x 재계산, 체크된 구간 필터) | pytest: 실제 syslog.bin + 실제 DBC로 종단 확인 | 검증 통과 |
+| `main.py` `/api/syslog/generate_script` | dbc_service 연동, 응답(steps/warnings/errors) | curl로 실제 업로드 후 확인 | 검증 통과 |
+| `frontend/src/widgets/SysLogAnalysisWidget.tsx` | "테스트 스크립트 생성" 버튼, 생성된 JSON 브라우저 다운로드, 경고/에러 목록 표시 | 브라우저에서 실제 생성→다운로드 파일 내용 확인 | 검증 통과 |
+
+### 가정/리스크
+
+- ID 범위(0~399)와 DEFAULT_GAP_MS(200ms)는 사용자 사양에 없는 부분은
+  합리적 기본값으로 정하고 여기 기록 — 실사용 확인 후 조정 가능.
+- 같은 log_id가 여러 번 매칭 판정되지 않도록 (message,signal) 결과를
+  log_id별로 캐시한다(같은 ID가 반복 등장해도 매칭/경고는 한 번만).
+- 신호가 매우 적은 DBC(예: 5개 메시지짜리 샘플)로 시험하면, 후보가
+  거의 없어서 무관한 log ID의 극단적으로 짧은 prefix가 우연히 "유일하게"
+  매칭돼버리는(그리고 경고로 보고되는) 사례가 늘어난다 — 알고리즘
+  자체는 사양대로 정확히 동작하지만, 실제 프로젝트 DBC(신호가 많음)로
+  쓸수록 오탐이 줄어든다는 점을 사용자가 알아둘 필요가 있음.
+
+### 검증
+
+- pytest 13개 신규(`test_syslog_script_generator.py`): 정확 일치 우선,
+  접두사 폴백(`...Sta`→`...Set` 사양 예시 그대로), 접두사로도 못 좁히는
+  경우, 매칭 전혀 없는 경우, 이름이 여러 메시지에 중복된 경우, ID
+  범위(0~399) 밖 제외, 같은 구간 내 delay=실제경과ms, 체크 해제 구간을
+  건너뛸 때 DEFAULT_GAP_MS, 언체크 구간 레코드 완전 제외, 실제
+  `syslog.bin`으로 end-to-end(id=49→정확 일치 CANEv) 확인. 전체 백엔드
+  301개 회귀 없이 통과.
+- `tsc -b`/`oxlint src`/`vite build` 클린.
+- 실제 dev 서버 + curl: DBC 미로드 시 에러 메시지 확인, `samples/sample.dbc`
+  업로드 후 실제 `syslog.bin`으로 생성 → 345~53846 스텝 규모(체크된
+  구간 수에 비례) 응답, warnings/errors 구조 확인.
+- 실제 브라우저(Playwright): "테스트 스크립트 생성" 버튼 클릭 →
+  실제 파일 다운로드 이벤트 발생(`syslog_script.json`) → 다운로드된
+  파일이 유효한 JSON 배열(53846 스텝, 첫 스텝이 `{"type":"ID",...}`)임을
+  확인 → 화면에 "매칭 41개 / 경고 41개 / 오류 67개" 요약과 펼침
+  가능한 상세 목록이 렌더링됨을 확인. 콘솔 에러 없음.
+
+### 후속 보완: 생성된 JSON의 각 스텝을 한 줄로 (2026-08-23, 사용자 요청 — 개발 완료, 검증 통과)
+
+`downloadJson`이 `JSON.stringify(data, null, 2)`를 썼는데, 이건 중첩된
+객체까지 전부 줄바꿈해버려서(레퍼런스 `test_script_Rev01.json`처럼
+`{ "type": "CANReq", ... }`가 한 줄에 오는 스타일이 안 나왔다.
+`downloadTextFile`(범용 텍스트 다운로드로 이름 변경) + 전용
+`formatStepsAsJson`으로 교체 -- 배열 자체는 줄바꿈하되 각 스텝 객체는
+`JSON.stringify(step)`(들여쓰기 없이 압축)로 한 줄에 통째로 넣는다.
+
+**검증**: `tsc -b`/`oxlint src`/`vite build` 클린. 실제 브라우저에서
+다운로드한 파일을 텍스트로(파싱 없이) 직접 열어 `head`로 확인 --
+`{"type":"ID","num":"1","Cycle":1},`처럼 각 스텝이 정확히 한 줄에 나옴을
+확인(53846 스텝 + 대괄호 2줄 = 53848줄, 라인 수 일치).
+
+### 후속 보완: 같은 메시지 + 딜레이 0인 연속 신호를 Signals 배열로 병합 (2026-08-23, 사용자 요청 — 개발 완료, 검증 통과)
+
+사용자 지적: 같은 메시지에 딜레이 없이(같은 시각) 연속으로 여러 신호값이
+설정되는 경우, 실제로는 그 메시지를 한 번 보낼 때 모든 신호가 동시에
+실려야 한다 -- 지금처럼 낱개 CANReq/CANEv로 나누면 중간 신호값들이
+잠깐이라도 유실된 것처럼(이전 프레임 상태로) 보내지는 셈이라 실제
+동작과 달라진다.
+
+**수정**: `backend/syslog_script_generator.py`의 `generate_can_test_script`가
+직전에 낸 스텝을 추적하다가, 새 레코드가 (a) 같은 시간 구간 안에서
+직전 레코드와 절대ms 차이가 0이고(delay 없음), (b) 같은 Message,
+(c) 같은 step type(CANReq/CANEv)이면, 새 스텝을 따로 내지 않고 직전
+스텝을 `"Signals": [{"Signal":..,"Value":..}, ...]` 배열로(첫 병합
+시점에 원래 있던 단일 Signal/Value를 배열의 첫 원소로 변환) 확장한다
+-- `test_script_Rev01.json`에 이미 있던 다중 신호 블록 형식과 동일.
+메시지가 다르거나 delay>0이거나 type이 다르면 병합하지 않는다.
+
+프론트(`SysLogAnalysisWidget.tsx`)의 `formatStepsAsJson`도 함께 수정:
+단일 신호 스텝은 기존대로 한 줄, `Signals` 배열이 있는 스텝은 사용자가
+보여준 예시처럼 `{ "type":.., "Message":.., "Signals": [` 다음 신호마다
+한 줄씩, `] }`로 닫는 형태로 펼쳐서 쓴다.
+
+**검증**: pytest 4개 신규(같은 메시지+딜레이0 병합, 메시지가 다르면
+비병합, delay>0이면 비병합, type이 다르면 비병합) 포함 백엔드 305개
+회귀 없이 통과. `tsc -b`/`oxlint src`/`vite build` 클린. 실제 dev
+서버로 `syslog.bin`+`sample.dbc` 생성 → 실제로 6개의 `Signals` 병합
+스텝이 나옴을 curl로 확인, 브라우저에서 다운로드한 파일을 grep으로
+확인해 `{ "type": "CANReq", "Message": "FdSensorData", "Signals": [`
+다음 각 신호가 한 줄씩, `] }`로 닫히는 형태가 정확히 나옴을 확인.
+
+### 테스트 Sequence 실행기 위젯 호환성 검토 (2026-08-23, 사용자 요청 — 검토 완료, 실제 실행까지 확인)
+
+생성된 JSON이 `backend/test_runner_service.py`(테스트 Sequence 실행기가
+쓰는 파서/실행기)에서 실제로 파싱·실행되는지 end-to-end로 검토했다
+(정적 코드 검토가 아니라 실제 `/api/testrunner/upload` + `/api/connect` +
+`/api/testrunner/start`로 직접 실행).
+
+**결과: 파싱·실행 모두 정상.**
+
+- 파싱: `syslog.bin` + `sample.dbc`로 생성한 스크립트를
+  `/api/testrunner/upload`에 올리면 `case_count: 1`로 정확히 파싱됨(내가
+  만드는 단일 `{"type":"ID","num":"1","Cycle":1}` 케이스 구조와 일치).
+- 단일 신호 CANEv/CANReq 스텝: 가상(virtual) CAN 채널에 연결 후 실제
+  Start → 각 스텝이 실제로 CAN 프레임으로 나가고("status":"Sent")
+  delay 간격도 실측 타임스탬프로 의도한 값(500ms, 520ms 등)에 근접하게
+  지켜짐을 확인, 최종 result "OK".
+- 여러 신호를 묶은 `"Signals"` 배열 스텝(이번 세션 앞서 추가한 병합
+  기능)도 실제로 한 번에 정상 전송됨을 확인(`"signal":"Pressure=0x0,
+  Pressure=0x0"`처럼 로그에 합쳐서 기록되고 status "Sent").
+
+**발견한 주의사항(버그 아님, 사용자가 알아야 할 환경 조건)**: 매칭된
+CAN 메시지가 DBC상 FD 메시지(8바이트 초과, `is_fd: true`)인데 CAN
+연결 자체가 classic 모드(FD 비활성)면, 그 메시지를 대상으로 한 모든
+스텝이 `"오류: 32바이트 페이로드는 CAN-FD 연결에서만 전송할 수
+있습니다 (현재 버스는 classic CAN, 최대 8바이트)"`로 실패한다(실제
+재현 확인). 이는 `test_runner_service.py`의 기존 동작이고 sysLog
+생성기와 무관하지만, sysLog에서 뽑은 스크립트는 프로젝트 DBC에 FD
+메시지가 섞여 있으면 이 문제를 그대로 물려받는다 -- **FD 메시지가
+포함된 DBC로 생성한 스크립트를 돌릴 때는 CAN 연결을 FD 모드로 켜야
+한다**(같은 조건으로 재연결해서 재실행하니 전부 정상 전송, 최종 result
+"OK"로 확인).

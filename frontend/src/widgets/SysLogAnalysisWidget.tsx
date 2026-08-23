@@ -34,6 +34,7 @@ import {
 import type {
   SysLogIdInfo,
   SysLogPoint,
+  SysLogScriptResult,
   SysLogSeries,
   SysLogStatus,
   SysLogTimeline,
@@ -149,6 +150,42 @@ function fmtDeltaDuration(ms: number): string {
   if (day || hour || minute) parts.push(`${minute}m`);
   parts.push(`${sec.toFixed(3)}s`);
   return sign + parts.join(' ');
+}
+
+/** 생성된 JSON을 브라우저 다운로드로 전달한다(서버가 아니라 클라이언트에서
+ * blob 링크를 만들어 클릭하는 표준 패턴 -- 이 앱에 아직 이런 다운로드가
+ * 없어서 새로 추가). */
+function downloadTextFile(filename: string, content: string, mime = 'application/json'): void {
+  const blob = new Blob([content], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+/** test_script_Rev01.json과 같은 스타일로 포맷: 배열 자체는 줄바꿈하되, 각
+ * 스텝 객체는 (그 안의 "type" 등 키 줄바꿈 없이) 한 줄로 -- `JSON.stringify`의
+ * 들여쓰기 옵션은 중첩 객체까지 전부 펼쳐버려서 이 스타일을 못 만들기 때문에
+ * 배열 원소 단위로 직접 이어붙인다. */
+/** 스텝 하나를 한 줄로("Signal"/"Value" 단일 신호) 또는, 같은 메시지의 여러
+ * 신호가 딜레이 없이 묶인 경우("Signals" 배열, 백엔드
+ * syslog_script_generator.py가 만듦) 레퍼런스처럼 신호마다 한 줄씩 펼쳐서
+ * 표시한다. */
+function formatStep(step: Record<string, unknown>): string {
+  const signals = step['Signals'] as { Signal: string; Value: string }[] | undefined;
+  if (!signals) return '\t' + JSON.stringify(step);
+  const sigLines = signals.map((s) => '\t\t' + JSON.stringify(s)).join(',\n');
+  return `\t{ "type": ${JSON.stringify(step['type'])}, "Message": ${JSON.stringify(step['Message'])}, "Signals": [\n${sigLines}\n\t] }`;
+}
+
+function formatStepsAsJson(steps: Record<string, unknown>[]): string {
+  if (steps.length === 0) return '[]\n';
+  const lines = steps.map(formatStep);
+  return '[\n' + lines.join(',\n') + '\n]\n';
 }
 
 export function SysLogAnalysisWidget({ config }: { config: WidgetConfig }) {
@@ -365,6 +402,29 @@ export function SysLogAnalysisWidget({ config }: { config: WidgetConfig }) {
     return { ...series, points: series.points.filter((p) => isPlotXInCheckedSegments(p.x_ms)) };
   };
 
+  // ---- CAN 테스트 스크립트 생성 (체크된 시간 구간의 log ID 0~399를
+  // CAN-DB와 매칭해 CANReq/CANEv .json으로) ----------------------------------
+  const [scriptBusy, setScriptBusy] = useState(false);
+  const [scriptError, setScriptError] = useState<string | null>(null);
+  const [scriptResult, setScriptResult] = useState<SysLogScriptResult | null>(null);
+
+  const generateScript = async () => {
+    setScriptError(null);
+    setScriptBusy(true);
+    try {
+      const result = await api.syslogGenerateScript(Array.from(checkedSegments));
+      setScriptResult(result);
+      if (result.steps.length > 0) {
+        const base = (status?.log_filename ?? 'syslog').replace(/\.[^.]+$/, '');
+        downloadTextFile(`${base}_script.json`, formatStepsAsJson(result.steps));
+      }
+    } catch (e) {
+      setScriptError((e as Error).message);
+    } finally {
+      setScriptBusy(false);
+    }
+  };
+
   // 그래프 영역(오른쪽 컬럼)은 휠 = 확대/축소 전용, 스크롤은 오른쪽 스크롤바를
   // 직접 드래그해서만 하도록 한다. React의 합성 onWheel은 브라우저에 따라
   // passive 리스너로 등록돼 preventDefault가 조용히 무시될 수 있어서(캔버스
@@ -472,8 +532,48 @@ export function SysLogAnalysisWidget({ config }: { config: WidgetConfig }) {
             {`: Δ ${fmtDeltaDuration(cursorDeltaMs)}`}
           </span>
         )}
+        <span className="spacer" />
+        <button
+          className="small-btn"
+          disabled={scriptBusy || segments.length === 0}
+          title="체크된 시간 구간의 log ID(0~399)를 현재 로드된 CAN-DB와 매칭해 CANReq/CANEv 테스트 스크립트(.json)를 생성/다운로드합니다"
+          onClick={generateScript}
+        >
+          {scriptBusy ? '생성 중…' : '📝 테스트 스크립트 생성'}
+        </button>
       </div>
       {error && <div className="error">{error}</div>}
+      {scriptError && <div className="error">{scriptError}</div>}
+      {scriptResult && (
+        <div className="syslog-script-result">
+          <div className="syslog-script-summary">
+            스크립트 생성 완료 — 매칭 {scriptResult.matched_count}개 / 경고{' '}
+            {scriptResult.warnings.length}개 / 오류 {scriptResult.errors.length}개
+            {scriptResult.steps.length === 0 && ' (다운로드할 스텝 없음)'}
+          </div>
+          {scriptResult.warnings.length > 0 && (
+            <details className="syslog-script-details">
+              <summary>⚠ 유사 신호명으로 대치된 항목 {scriptResult.warnings.length}개</summary>
+              {scriptResult.warnings.map((w, i) => (
+                <div key={i} className="syslog-script-row">
+                  log ID {w.log_id}({w.log_name}) → {w.matched_message}.{w.matched_signal}
+                </div>
+              ))}
+            </details>
+          )}
+          {scriptResult.errors.length > 0 && (
+            <details className="syslog-script-details">
+              <summary>✕ 매칭 실패로 제외된 log ID {scriptResult.errors.length}개</summary>
+              {scriptResult.errors.map((e, i) => (
+                <div key={i} className="syslog-script-row">
+                  log ID {e.log_id}
+                  {e.log_name ? `(${e.log_name})` : ''} — {e.reason}
+                </div>
+              ))}
+            </details>
+          )}
+        </div>
+      )}
       <div className="syslog-body">
         <div className="syslog-idlist">
           {segments.length > 0 && (
