@@ -4028,3 +4028,30 @@ CAN 메시지가 DBC상 FD 메시지(8바이트 초과, `is_fd: true`)인데 CAN
 포함된 DBC로 생성한 스크립트를 돌릴 때는 CAN 연결을 FD 모드로 켜야
 한다**(같은 조건으로 재연결해서 재실행하니 전부 정상 전송, 최종 result
 "OK"로 확인).
+
+## 버그 수정: 새 컴퓨터 설치 시 "pyvisa-py를 설치하라"는 오류 (2026-08-25, 사용자 실사용 보고 — 수정 완료, 검증 통과)
+
+**원인**: `backend/requirements.txt`에 `pyvisa`(VISA API 프론트엔드)만
+있고 실제 통신을 담당하는 백엔드 드라이버가 없었다. NI-VISA(별도
+설치 프로그램, 독점)가 없는 새 컴퓨터에서는 `power_supply_service.py`의
+`pyvisa.ResourceManager()`가 백엔드를 못 찾아 "pyvisa-py를 설치하라"는
+메시지와 함께 실패한다(예외로 잡혀 앱이 죽지는 않고 "전원 연결" 실패
+에러로만 표시됨). `pyvisa-py`는 드라이버 설치 없이 pip만으로 되는
+순수 파이썬 VISA 백엔드라, 이게 표준 해결책이다.
+
+**수정**: `backend/requirements.txt`에 `pyvisa-py>=0.7` 추가.
+`backend/run_windows.bat`이 매 실행마다(최초 1회가 아니라) `pip install
+-r requirements.txt`를 돌리므로, 이 저장소를 최신으로 받은 뒤
+`run_windows.bat`을 다시 실행하면 자동으로 설치된다 -- 사용자가 직접
+`pip install pyvisa-py`를 칠 필요는 최신 버전을 받으면 없어짐(다만
+지금 당장 급하면 그 명령을 바로 실행해도 됨).
+
+**검증**: 로컬 venv에 `pyvisa-py` 설치 후 `pyvisa.ResourceManager()`가
+정상적으로 `Resource Manager of Visa Library at py`(pyvisa-py 백엔드)로
+연결됨을 확인(설치 전에는 여기서 에러가 났을 것). 실제 파워서플라이
+하드웨어가 없는 이 환경에서는 `list_resources()`가 빈 튜플을 반환하는데,
+이는 앱이 이미 별도로 처리하는 "정상적인 무-하드웨어" 케이스("VISA
+리소스를 찾을 수 없습니다")이지 이번에 고친 "백엔드 자체가 없음" 에러와는
+다르다. 전체 백엔드 테스트 305개 회귀 없이 통과(경고 2개 추가됐지만
+기능과 무관한 선택적 확장 안내 -- `psutil`/`zeroconf` 설치 시 VISA
+리소스 탐색 범위가 넓어진다는 안내일 뿐, 필수 아님).

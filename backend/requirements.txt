@@ -11,6 +11,13 @@ httpx>=0.27
 # audio_service.py degrade gracefully if these aren't installed or no
 # hardware is attached), but required to actually exercise those steps.
 pyvisa>=1.14        # programmable power supply (SCPI over VISA)
+# pyvisa itself is just the API -- it needs a VISA backend to actually talk to
+# an instrument. NI-VISA (proprietary driver, separate installer) provides
+# one, but pyvisa-py is a pure-Python backend installable via pip, no driver
+# needed. Without either, pyvisa.ResourceManager() fails on connect with
+# "No IVI/VISA implementation found... install pyvisa-py" -- reported on a
+# fresh machine with no NI-VISA installed (2026-08-25, Requirement.md 참고).
+pyvisa-py>=0.7
 sounddevice>=0.5    # audio recording
 scipy>=1.14         # WAV read/write, FFT/cross-correlation for comparison
 numpy>=1.26
