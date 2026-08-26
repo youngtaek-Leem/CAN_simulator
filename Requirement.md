@@ -4221,3 +4221,60 @@ utf-8 -*-` 선언 같은 우회 대신, 애초에 로케일에 의존하지 않�
 `backend/requirements.txt`에는 앞으로도 비-ASCII 문자(한글 포함)를 쓰지
 않는다. 설명이 필요하면 영어 주석으로 남기고, 자세한 배경/이력은
 `Requirement.md` 쪽에 한글로 기록한다.
+
+## PCAN CAN-FD 비트 타이밍 디폴트를 실제 레지스터 값으로 고정 (2026-08-26, 사용자 요청 — 개발 완료, 검증 통과)
+
+### 요청
+
+PCAN 디폴트 설정을 아래 값으로 해달라는 요청:
+
+```
+f_clock_mhz=80, nom_brp=16, nom_tseg1=7, nom_tseg2=2, nom_sjw=2,
+data_brp=2, data_tseg1=29, data_tseg2=10, data_sjw=8
+```
+
+### 배경
+
+`backend/can_manager.py`의 PCAN-FD 연결은 원래 `can.BitTimingFd.from_sample_point(...)`로
+"클럭 + 목표 비트레이트 + 샘플포인트(%)"를 넘겨 타이밍을 계산해서
+썼다(`FD_CLOCK_HZ=80MHz`, `FD_SAMPLE_POINT=FD_DATA_SAMPLE_POINT=80%`).
+이번 요청은 그 계산식이 아니라 실제 BRP/TSEG/SJW 레지스터 값을 직접
+지정해달라는 것이라, `can.BitTimingFd(f_clock=..., nom_brp=...,
+nom_tseg1=..., nom_tseg2=..., nom_sjw=..., data_brp=..., data_tseg1=...,
+data_tseg2=..., data_sjw=...)` 직접 생성자로 전환했다.
+
+### 구현
+
+- `backend/can_manager.py`: `FD_SAMPLE_POINT`/`FD_DATA_SAMPLE_POINT` 상수를
+  `FD_NOM_BRP=16`/`FD_NOM_TSEG1=7`/`FD_NOM_TSEG2=2`/`FD_NOM_SJW=2`/
+  `FD_DATA_BRP=2`/`FD_DATA_TSEG1=29`/`FD_DATA_TSEG2=10`/`FD_DATA_SJW=8`로
+  교체(`FD_CLOCK_HZ=80MHz`는 그대로).
+- `CanManager.connect()`의 PCAN-FD 분기를 `can.BitTimingFd.from_sample_point(...)`에서
+  위 상수들을 그대로 넘기는 `can.BitTimingFd(...)` 직접 생성자 호출로 변경.
+- 이 레지스터 값들은 요청받은 비트레이트와 무관하게 고정된 실제
+  타이밍을 만들어내므로(계산의 역방향), PCAN-FD 연결은 이제 호출자가
+  넘긴 `bitrate`/`data_bitrate`를 무시하고 이 고정 프로파일만 쓴다.
+  대신 실제 연결 후 `self.config`에 기록되는 `bitrate`/`data_bitrate`는
+  이 고정 레지스터 값에서 계산된 진짜 값(`fd_timing.nom_bitrate`/
+  `fd_timing.data_bitrate`)으로 채워, 상태 조회 API가 항상 정확한 값을
+  보고하게 했다(요청값을 그대로 에코하지 않음).
+- Vector 인터페이스는 원래대로 `bitrate`/`data_bitrate`를 직접 받는
+  방식이라 영향 없음(`DEFAULT_FD_DATA_BITRATE=2_000_000` 폴백은
+  Vector 경로에만 남겨둠).
+
+### 검증
+
+- 위 레지스터 값으로 `can.BitTimingFd(...)`를 직접 생성해 실제 결과값을
+  확인: `nom_bitrate=500,000`(80% 샘플포인트), `data_bitrate=1,000,000`
+  (75% 샘플포인트), `f_clock=80MHz`.
+- `backend/tests/test_can_manager.py`에
+  `test_pcan_fd_timing_constants_resolve_to_intended_bitrates` 신규 추가 --
+  모듈 상수로 `BitTimingFd`를 만들어 위 네 값(`f_clock`/`nom_bitrate`/
+  `nom_sample_point`/`data_bitrate`/`data_sample_point`)을 그대로
+  단언한다(상수를 실수로 잘못 고치면 이 테스트가 잡아준다). PCAN은
+  실제 하드웨어/드라이버가 있어야 `can.Bus(interface="pcan", ...)`가
+  성립하므로, 이 테스트는 `connect()`까지는 호출하지 않고 타이밍
+  계산만 검증한다(실기 연결 자체는 검증 범위 밖).
+- 전체 백엔드 테스트 306개(기존 305 + 신규 1) 회귀 없이 통과.
+- 실제 PCAN-FD 하드웨어로의 연결 성공 여부는 사용자 환경에서만
+  확인 가능 -- 여기서는 검증하지 못함.

@@ -9,11 +9,15 @@ drained periodically by the WebSocket broadcaster, so a burst of short-cycle
 messages never blocks the event loop.
 
 CAN-FD bit timing: PCAN has no simple "nominal/data bitrate" constructor
-argument like Vector does, so it is driven here via
-``can.BitTimingFd.from_sample_point`` using FD_CLOCK_HZ / FD_SAMPLE_POINT /
-FD_DATA_SAMPLE_POINT below. Change those constants (or expose them through
-``connect()``) if a real PCAN-FD adapter needs a different clock or sample
-point than the defaults.
+argument like Vector does, so it is driven here via explicit
+``can.BitTimingFd(...)`` register values (FD_CLOCK_HZ / FD_NOM_* /
+FD_DATA_* below) rather than a requested bitrate -- these fully determine
+the resulting nominal/data bitrate, so PCAN-FD connections ignore the
+bitrate/data_bitrate the caller passed in and always use this fixed timing
+profile (500 kbit/s nominal @ 80% sample point, 1 Mbit/s data @ 75% sample
+point, 80 MHz clock -- user-provided default, 2026-08-26). Change these
+constants (or expose them through ``connect()``) if a different adapter
+needs different timing.
 """
 
 import threading
@@ -25,13 +29,20 @@ import can
 SUPPORTED_INTERFACES = ("virtual", "pcan", "vector")
 
 # CAN-FD bit timing defaults for PCAN (Vector takes bitrate/data_bitrate
-# directly and needs none of this). 80 MHz is the highest clock in
-# python-can's VALID_PCAN_FD_CLOCKS and gives the finest timing resolution;
-# 80% sample points are a common, safe default for both segments.
+# directly and needs none of this) -- raw BitTimingFd register values,
+# not sample-point-derived, per real-adapter configuration confirmed by
+# the user (2026-08-26): 80 MHz clock, nominal 500 kbit/s @ 80% sample
+# point, data 1 Mbit/s @ 75% sample point.
 FD_CLOCK_HZ = 80_000_000
-FD_SAMPLE_POINT = 80.0
-FD_DATA_SAMPLE_POINT = 80.0
-DEFAULT_FD_DATA_BITRATE = 2_000_000
+FD_NOM_BRP = 16
+FD_NOM_TSEG1 = 7
+FD_NOM_TSEG2 = 2
+FD_NOM_SJW = 2
+FD_DATA_BRP = 2
+FD_DATA_TSEG1 = 29
+FD_DATA_TSEG2 = 10
+FD_DATA_SJW = 8
+DEFAULT_FD_DATA_BITRATE = 2_000_000  # Vector takes a plain data_bitrate int, unlike PCAN's register timing above
 MAX_CLASSIC_DATA_LEN = 8
 
 
@@ -74,7 +85,6 @@ class CanManager:
         if interface not in SUPPORTED_INTERFACES:
             raise ValueError(f"unsupported interface: {interface}")
         self.disconnect()
-        data_bitrate = data_bitrate or DEFAULT_FD_DATA_BITRATE
         kwargs: dict[str, Any] = {
             "interface": interface,
             "channel": channel,
@@ -86,16 +96,26 @@ class CanManager:
             kwargs["bitrate"] = bitrate
             if fd:
                 kwargs["fd"] = True
+                data_bitrate = data_bitrate or DEFAULT_FD_DATA_BITRATE
                 kwargs["data_bitrate"] = data_bitrate
         elif interface == "pcan":
             if fd:
-                kwargs["timing"] = can.BitTimingFd.from_sample_point(
+                fd_timing = can.BitTimingFd(
                     f_clock=FD_CLOCK_HZ,
-                    nom_bitrate=bitrate,
-                    nom_sample_point=FD_SAMPLE_POINT,
-                    data_bitrate=data_bitrate,
-                    data_sample_point=FD_DATA_SAMPLE_POINT,
+                    nom_brp=FD_NOM_BRP,
+                    nom_tseg1=FD_NOM_TSEG1,
+                    nom_tseg2=FD_NOM_TSEG2,
+                    nom_sjw=FD_NOM_SJW,
+                    data_brp=FD_DATA_BRP,
+                    data_tseg1=FD_DATA_TSEG1,
+                    data_tseg2=FD_DATA_TSEG2,
+                    data_sjw=FD_DATA_SJW,
                 )
+                kwargs["timing"] = fd_timing
+                # the fixed register values above fully determine the actual
+                # bitrate, which may not match whatever the caller requested
+                bitrate = fd_timing.nom_bitrate
+                data_bitrate = fd_timing.data_bitrate
             else:
                 kwargs["bitrate"] = bitrate
         self.bus = can.Bus(**kwargs)

@@ -2,6 +2,7 @@ import time
 
 import can
 
+import can_manager
 from can_manager import CanManager
 
 
@@ -104,3 +105,26 @@ def test_classic_bus_forces_classic_frame_even_if_fd_requested():
     finally:
         peer.shutdown()
         cm.disconnect()
+
+
+def test_pcan_fd_timing_constants_resolve_to_intended_bitrates():
+    """PCAN-FD 연결 시 사용하는 고정 레지스터 값(FD_CLOCK_HZ/FD_NOM_*/FD_DATA_*)이
+    실제로 의도한 비트레이트/샘플포인트를 만들어내는지 확인 -- 상수를 실수로
+    잘못 고치면 이 테스트가 잡아준다. can.Bus(interface="pcan", ...)는 실제
+    하드웨어/드라이버가 있어야 해서 여기서 connect()까지 호출하지는 않는다."""
+    timing = can.BitTimingFd(
+        f_clock=can_manager.FD_CLOCK_HZ,
+        nom_brp=can_manager.FD_NOM_BRP,
+        nom_tseg1=can_manager.FD_NOM_TSEG1,
+        nom_tseg2=can_manager.FD_NOM_TSEG2,
+        nom_sjw=can_manager.FD_NOM_SJW,
+        data_brp=can_manager.FD_DATA_BRP,
+        data_tseg1=can_manager.FD_DATA_TSEG1,
+        data_tseg2=can_manager.FD_DATA_TSEG2,
+        data_sjw=can_manager.FD_DATA_SJW,
+    )
+    assert timing.f_clock == 80_000_000
+    assert timing.nom_bitrate == 500_000
+    assert timing.nom_sample_point == 80.0
+    assert timing.data_bitrate == 1_000_000
+    assert timing.data_sample_point == 75.0
