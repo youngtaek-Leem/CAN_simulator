@@ -86,6 +86,12 @@ body {
   margin-right: 6px;
 }
 
+.app-version {
+  font-weight: 400;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
 /* ---- page tabs ---- */
 
 .page-tabs {

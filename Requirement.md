@@ -4055,3 +4055,83 @@ CAN 메시지가 DBC상 FD 메시지(8바이트 초과, `is_fd: true`)인데 CAN
 다르다. 전체 백엔드 테스트 305개 회귀 없이 통과(경고 2개 추가됐지만
 기능과 무관한 선택적 확장 안내 -- `psutil`/`zeroconf` 설치 시 VISA
 리소스 탐색 범위가 넓어진다는 안내일 뿐, 필수 아님).
+
+### 후속: USB 직결 파워서플라이가 "VISA 리소스를 찾을 수 없습니다" (2026-08-25, 사용자 실사용 확인 — pip 쪽 준비 완료, 드라이버는 사용자가 직접)
+
+위 수정 후 pyvisa-py 백엔드 자체는 잡히는데(더 이상 "설치하라" 오류
+없음), USB로 직접 연결한 실제 파워서플라이를 여전히 못 찾는다고 보고
+(`/api/power/connect` 200 OK, 하지만 "VISA 리소스를 찾을 수
+없습니다"). 원인: USB 계측기(USBTMC)를 pyvisa-py로 쓰려면 `pyusb` +
+실제 libusb 백엔드가 추가로 필요하고, **그것만으로도 부족하며 Windows에서
+그 장비의 드라이버를 Zadig 같은 도구로 libusb 호환(WinUSB 등) 드라이버로
+교체**해야 실제로 인식된다 -- 반대로 NI-VISA(전에 잘 됐던 컴퓨터에
+깔려 있었을 가능성이 큼)는 자체 USBTMC 드라이버가 있어서 이 교체가
+필요 없다.
+
+사용자에게 NI-VISA 설치 vs pyusb+Zadig 드라이버 교체 중 선택지를
+물었으나, 사용자가 "드라이버는 직접 설치하겠다"고 확정 -- 어느 경로를
+택하든 pip 쪽에서 필요한 패키지만 미리 준비해두기로 함.
+
+**수정**: `backend/requirements.txt`에 `pyusb>=1.2`,
+`libusb-package>=1.0`(OS별 libusb 바이너리를 같이 넣어주는 패키지)
+추가. NI-VISA를 쓰는 경우엔 이 두 패키지가 설치돼 있어도 그냥 안
+쓰이므로 무해함 -- 어느 경로를 택하든 안전.
+
+**검증**: 로컬 venv에 설치 후 `import usb.core; import
+libusb_package` 정상 확인. 전체 백엔드 테스트 305개 회귀 없이 통과.
+Windows에서의 실제 드라이버 교체(Zadig) 및 USB 인식 성공 여부는
+사용자가 직접 진행 — 여기서 검증하지 못함(하드웨어/드라이버 단계라
+로컬 검증 불가능).
+
+### 후속: VI_ERROR_LIBRARY_NFOUND — pyvisa 최소 버전을 1.16으로 (2026-08-26, 사용자 실사용 확인 — 수정 완료, 검증 통과)
+
+NI-VISA 설치 후에도 "전원 연결" 시
+`VI_ERROR_LIBRARY_NFOUND (-1073807202): A code library required by
+VISA could not be located or loaded` 오류 보고. 사용자가 직접
+`pyvisa>=1.16.0`으로 올려서 설치해보니 해결됨을 확인.
+
+**수정**: `backend/requirements.txt`의 `pyvisa` 최소 버전을 `>=1.14`에서
+`>=1.16`으로 올림. 정확한 근본 원인(pyvisa 내부의 VISA 라이브러리
+탐색/로딩 로직 차이로 추정)은 pyvisa 릴리스노트로 교차검증하지
+않았음 -- 사용자의 실측 결과(1.16 이상에서 해결)를 그대로 반영한
+것으로, 불확실하다는 점을 명시해둔다.
+
+**검증**: 로컬 venv에는 이미 pyvisa 1.16.2가 설치돼 있어(상한 없는
+`>=1.14` 제약이 최신 버전을 받았던 상태) 버전 변경 자체는 로컬
+환경에 영향 없음. 전체 백엔드 테스트 305개 회귀 없이 통과. 실제
+Windows/NI-VISA 조합에서 1.16 이상이 해결하는지는 사용자가 이미
+직접 확인함(1.16.0으로 올려서 동작 확인 보고).
+
+## 앱 이름/버전 표시 + 버전 관리 체계 (2026-08-26, 사용자 요청 — 개발 완료, 검증 통과)
+
+### 요청
+
+브라우저 탭(창 이름)이 Vite 기본값 "frontend"로 남아있던 것을 "CAN
+Simulator Rev 1.0"으로 바꾸고, 이후 사용자가 필요할 때마다 버전을
+올려달라고 요청할 수 있도록 버전 관리 체계를 만들어달라는 요청.
+
+### 구현
+
+- `frontend/src/version.ts` 신설: `export const APP_VERSION = 'Rev 1.0';`
+  -- 버전의 단일 소스. 이후 사용자가 "버전 올려줘"라고 하면 이 파일
+  하나만 고치면 된다(단, 아래 index.html의 `<title>`은 정적 HTML이라
+  같이 손대야 함 -- 두 파일 모두에 서로를 가리키는 안내 주석을 남겨둠).
+- `frontend/index.html`의 `<title>`을 `frontend` -> `CAN Simulator
+  Rev 1.0`으로 변경(브라우저 탭 제목).
+- `frontend/src/App.tsx`: 상단 로고 옆에 `{APP_VERSION}`을 작게
+  표시(`.app-version` 스타일, `styles.css`에 추가) -- 브라우저 탭을
+  안 보는 사용자도 앱 안에서 버전을 바로 확인할 수 있게.
+
+### 검증
+
+`tsc -b`/`oxlint src`/`vite build` 클린. 실제 dev 서버 + Playwright로
+`document.title`이 정확히 "CAN Simulator Rev 1.0"이고, 상단 로고
+텍스트도 "CAN Simulator Rev 1.0"으로 렌더링됨을 확인(스크린샷으로도
+육안 확인).
+
+### 버전 관리 규칙
+
+사용자가 "버전 올려줘"/"Rev 1.1로 바꿔줘" 등으로 명시적으로 요청할
+때만 버전을 바꾼다(자동 증가 없음). 바꿀 때는 `frontend/src/version.ts`의
+`APP_VERSION`과 `frontend/index.html`의 `<title>` 두 곳을 함께
+수정한다.

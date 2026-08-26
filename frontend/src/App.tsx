@@ -20,6 +20,7 @@ import { AppContext } from './store/appContext';
 import { WIDGET_REGISTRY } from './widgets/registry';
 import { WidgetFrame } from './widgets/WidgetFrame';
 import type { DbcSummary, MultiCell, WidgetConfig, WidgetType } from './types';
+import { APP_VERSION } from './version';
 
 interface Page {
   id: string;
@@ -729,7 +730,9 @@ function TopBar(props: TopBarProps) {
 
   return (
     <header className="topbar">
-      <span className="logo">CAN Simulator</span>
+      <span className="logo">
+        CAN Simulator <span className="app-version">{APP_VERSION}</span>
+      </span>
       <button
         className={`small-btn ${running ? 'danger' : 'primary'}`}
         disabled={props.editMode}
