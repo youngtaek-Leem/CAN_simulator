@@ -4,7 +4,8 @@
 // 계단형(step) 미니 차트를 세로로 쌓아 보여준다(역시 스크롤).
 //
 // x축(시간)은 모든 차트가 부모의 공유 ref(sharedXRef)를 통해 동기화된다 -- 어느
-// 차트를 휠 줌/드래그 팬해도 나머지 차트가 같이 움직인다. 이 패턴은
+// 차트를 Ctrl+휠 줌/드래그 팬해도 나머지 차트가 같이 움직인다(일반 휠은
+// 그래프 목록을 위아래로 스크롤). 이 패턴은
 // CanAudioLatencyWidget.tsx가 CAN 신호 차트 + 오디오 채널 차트들을 동기화하는 데 쓴
 // 것과 동일해서, 그 위젯이 export하는 AudioWaveformChart.tsx의 공용 타입/헬퍼와
 // DiffCursor.ts의 커서 기능을 그대로 재사용한다. y축은 차트마다 독립(값 스케일이
@@ -352,6 +353,16 @@ export function SysLogAnalysisWidget({ config }: { config: WidgetConfig }) {
   const cursor: DiffCursorState = { mode: cursorMode, a: cursorA, b: cursorB, onMove: onCursorMove };
   const cursorDeltaMs = cursorA !== null && cursorB !== null ? Math.abs(cursorB - cursorA) : null;
 
+  // ---- 마우스 호버 크로스헤어를 모든 차트에 동시에 -- plot_x 하나를 여러
+  // 차트가 공유해서, 어느 차트든 마우스를 올리면 나머지 차트에도 같은 시각의
+  // 점선이 그려진다(각 차트는 자기 값을 자기 툴팁에 표시). notifyChange로
+  // xVersion을 올려서 전 차트를 다시 그리게 한다(커서 드래그와 같은 방식).
+  const hoverXRef = useRef<number | null>(null);
+  const setHoverX = (x: number | null) => {
+    hoverXRef.current = x;
+    notifyChange();
+  };
+
   const segments = timeline?.segments ?? [];
 
   // ---- 시간 구간(역주행 경계 기준) 체크박스 -- 체크된 구간의 데이터만 그래프에
@@ -425,19 +436,21 @@ export function SysLogAnalysisWidget({ config }: { config: WidgetConfig }) {
     }
   };
 
-  // 그래프 영역(오른쪽 컬럼)은 휠 = 확대/축소 전용, 스크롤은 오른쪽 스크롤바를
-  // 직접 드래그해서만 하도록 한다. React의 합성 onWheel은 브라우저에 따라
-  // passive 리스너로 등록돼 preventDefault가 조용히 무시될 수 있어서(캔버스
-  // 바깥, 예: 차트 헤더 위에서 휠을 굴리면 이 컨테이너의 overflow-y 스크롤이
-  // 새어나가는 것을 실측으로 확인함), 네이티브 addEventListener를
-  // { passive: false }로 직접 등록해 항상 확실하게 막는다.
+  // 그래프 영역(오른쪽 컬럼): 일반 휠은 목록을 위아래로 스크롤(브라우저 기본
+  // 동작 그대로 둠), Ctrl+휠만 확대/축소로 가로챈다. Ctrl+휠일 때는 브라우저가
+  // 페이지 전체를 확대하는 기본 동작을 막아야 해서(캔버스의 onWheel도 각자
+  // preventDefault하지만, React의 합성 onWheel은 브라우저에 따라 passive로
+  // 등록돼 무시될 수 있음을 실측으로 확인했음), 네이티브 addEventListener를
+  // { passive: false }로 등록해 Ctrl+휠일 때만 확실하게 막는다.
   const graphsColRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const el = graphsColRef.current;
     if (!el) return;
-    const blockWheelScroll = (e: WheelEvent) => e.preventDefault();
-    el.addEventListener('wheel', blockWheelScroll, { passive: false });
-    return () => el.removeEventListener('wheel', blockWheelScroll);
+    const blockPageZoomOnCtrlWheel = (e: WheelEvent) => {
+      if (e.ctrlKey) e.preventDefault();
+    };
+    el.addEventListener('wheel', blockPageZoomOnCtrlWheel, { passive: false });
+    return () => el.removeEventListener('wheel', blockPageZoomOnCtrlWheel);
   }, []);
 
   // ---- 그래프 드래그 재정렬 (차트 헤더를 드래그 핸들로 사용) ----------------
@@ -668,6 +681,8 @@ export function SysLogAnalysisWidget({ config }: { config: WidgetConfig }) {
                   showXAxis={i === selectedIds.length - 1}
                   resetToken={resetToken}
                   cursor={cursor}
+                  hoverXRef={hoverXRef}
+                  setHoverX={setHoverX}
                   onRemove={() => toggleId(id)}
                   isDragOver={dragOverId === id}
                   onDragStart={handleChartDragStart(id)}
@@ -793,6 +808,8 @@ function SysLogChart({
   showXAxis,
   resetToken,
   cursor,
+  hoverXRef,
+  setHoverX,
   onRemove,
   isDragOver,
   onDragStart,
@@ -812,6 +829,8 @@ function SysLogChart({
   showXAxis: boolean;
   resetToken: number;
   cursor: DiffCursorState;
+  hoverXRef: MutableRefObject<number | null>;
+  setHoverX: (x: number | null) => void;
   onRemove: () => void;
   isDragOver: boolean;
   onDragStart: (e: React.DragEvent) => void;
@@ -824,7 +843,6 @@ function SysLogChart({
   const yViewRef = useRef<YView>({ yMin: null, yMax: null });
   const dragRef = useRef<{ x: number; y: number; xView: SharedXView; yView: YView } | null>(null);
   const cursorDragRef = useRef<'a' | 'b' | null>(null);
-  const hoverRef = useRef<{ px: number; plotX: number } | null>(null);
   const [valueMode, setValueMode] = useState<'hex' | 'dec'>('hex');
   const lastGeomRef = useRef<Geom>({
     xMin: 0,
@@ -1021,9 +1039,13 @@ function SysLogChart({
 
     // 마우스 호버 크로스헤어 + 툴팁 -- 21군데 눈금 라벨이 서로 겹쳐 읽기 어려울
     // 수 있어서(위), 커서를 올리면 정확한 시간과 그 시점의 값을 항상 읽을 수
-    // 있게 한다.
-    if (hoverRef.current) {
-      const { px, plotX } = hoverRef.current;
+    // 있게 한다. plot_x는 모든 차트가 공유(hoverXRef)하므로, 어느 차트에서
+    // 호버해도 전 차트에 같은 시각의 점선이 동시에 그려진다 -- 각 차트는 그
+    // 공유된 plotX를 자기 자신의 현재 뷰(xMin/xMax)로 픽셀 변환해서 그린다.
+    const hoverPlotX = hoverXRef.current;
+    if (hoverPlotX !== null && hoverPlotX >= xMin! && hoverPlotX <= xMax!) {
+      const px = xToPx(hoverPlotX);
+      const plotX = hoverPlotX;
       ctx.save();
       ctx.strokeStyle = '#ffffff88';
       ctx.setLineDash([2, 2]);
@@ -1052,7 +1074,10 @@ function SysLogChart({
   }, [size, xVersion, localTick, series, showXAxis, valueMode]);
 
   const onWheel = (e: React.WheelEvent<HTMLCanvasElement>) => {
-    e.preventDefault();
+    if (!e.ctrlKey) return; // 일반 휠은 막지 않고 그대로 둬서 목록이 스크롤되게 한다
+    // 페이지 확대 방지는 위쪽 graphsColRef의 네이티브 리스너가 이미 처리한다
+    // (React 합성 onWheel은 passive로 등록되어 preventDefault가 콘솔 경고와
+    // 함께 무시되므로 여기서는 호출하지 않는다).
     const rect = canvasRef.current!.getBoundingClientRect();
     const px = e.clientX - rect.left;
     const py = e.clientY - rect.top;
@@ -1134,20 +1159,17 @@ function SysLogChart({
       notifyChange(); // X가 바뀌었으니 모든 차트를 다시 그려야 함 (이 차트의 Y도 같이 반영됨)
       return;
     }
-    // 드래그 중이 아니면 호버 크로스헤어/툴팁 위치만 갱신 (draw effect에서 그림)
+    // 드래그 중이 아니면 호버 크로스헤어 위치만 갱신(모든 차트가 공유 --
+    // setHoverX가 부모의 hoverXRef를 갱신하고 전 차트를 다시 그리게 한다)
     const g = lastGeomRef.current;
     const rect = canvasRef.current!.getBoundingClientRect();
     const px = e.clientX - rect.left;
     const py = e.clientY - rect.top;
     if (px < g.plotLeft || px > g.plotLeft + g.plotW || py < g.plotTop || py > g.plotTop + g.plotH) {
-      if (hoverRef.current) {
-        hoverRef.current = null;
-        redraw();
-      }
+      if (hoverXRef.current !== null) setHoverX(null);
       return;
     }
-    hoverRef.current = { px, plotX: g.xMin + ((px - g.plotLeft) / g.plotW) * (g.xMax - g.xMin) };
-    redraw();
+    setHoverX(g.xMin + ((px - g.plotLeft) / g.plotW) * (g.xMax - g.xMin));
   };
   const onPointerUp = () => {
     dragRef.current = null;
@@ -1155,10 +1177,7 @@ function SysLogChart({
   };
   const onPointerLeave = () => {
     onPointerUp();
-    if (hoverRef.current) {
-      hoverRef.current = null;
-      redraw();
-    }
+    if (hoverXRef.current !== null) setHoverX(null);
   };
 
   return (

@@ -4135,3 +4135,45 @@ Simulator Rev 1.0"으로 바꾸고, 이후 사용자가 필요할 때마다 버�
 때만 버전을 바꾼다(자동 증가 없음). 바꿀 때는 `frontend/src/version.ts`의
 `APP_VERSION`과 `frontend/index.html`의 `<title>` 두 곳을 함께
 수정한다.
+
+## sysLog 분석 위젯 휠/호버 개선 + CAN 신호 그래프 위젯 커서·줌·Hex-Dec 포팅 + 수신 CAN 신호 표시창 정렬/Hex-Dec (2026-08-26, 사용자 요청 — 개발 완료, 검증 통과)
+
+### 요청 (6개 항목)
+
+1. sysLog 분석 위젯: 마우스 휠(플레인)로 그래프 목록을 위/아래 스크롤.
+2. sysLog 분석 위젯: Ctrl+휠로 그래프를 확대/축소(기존 "휠=줌 전용"에서 역전).
+3. sysLog 분석 위젯: 마우스 호버 시 나오는 시간 가이드 점선을 선택된 모든 그래프에 동시에 표시.
+4. CAN 신호 그래프 위젯(`GraphWidget.tsx`)에도 sysLog 위젯과 동일하게 커서 on/off, 확대/축소, Hex/Dec 기능 적용.
+5. 수신 CAN 신호 표시창(`RxSignalDisplay`)의 Value를 Dec/Hex로 전환 가능하게.
+6. 수신 CAN 신호 표시창을 Message별, Signal별로 정렬 가능하게.
+
+### 구현
+
+**1~3 (`frontend/src/widgets/SysLogAnalysisWidget.tsx`)**
+- 그래프 목록 컨테이너(`graphsColRef`)에 네이티브 `wheel` 리스너(`{ passive: false }`)를 달아 Ctrl+휠일 때만 `preventDefault()`해 페이지 확대를 막는다. 플레인 휠은 그대로 둬서 브라우저 기본 스크롤(목록 스크롤)이 동작하게 한다.
+- 차트 캔버스의 `onWheel`(React 합성 이벤트)은 `e.ctrlKey`가 아니면 즉시 return(줌 로직 미실행) -- 페이지-줌 방지 자체는 위 컨테이너 리스너가 전담하므로, 합성 이벤트 쪽에서는 더 이상 `preventDefault()`를 호출하지 않는다(React 합성 wheel 핸들러가 passive로 등록되어 여기서 호출하면 콘솔 경고만 발생하고 무시됨 -- 실제로 재현해서 확인 후 제거).
+- 부모 컴포넌트에 `hoverXRef`(공유 plot_x, `useRef`) + `setHoverX`(갱신 시 `notifyChange()`로 `xVersion`을 올려 전 차트 재렌더)를 추가하고 `SysLogChart`에 props로 전달. 각 차트의 draw effect는 이제 자기 지역 상태가 아니라 이 공유 `hoverXRef.current` 하나를 읽어, 자기 자신의 현재 X뷰(`xMin`/`xMax`)로 픽셀 변환해서 점선을 그린다 -- 그 결과 어느 차트에서 호버해도 선택된 모든 차트에 동시에 같은 시각의 점선이 나타난다(각 차트는 자기 값을 자기 툴팁에 계속 따로 표시).
+- `onPointerMove`/`onPointerLeave`는 기존 지역 `hoverRef` 직접 조작 대신 `setHoverX(...)`/`setHoverX(null)`을 호출하도록 변경.
+
+**4 (`frontend/src/widgets/GraphWidget.tsx`)**
+- 기존 `DiffCursor.ts`(sysLog/CanAudioLatencyWidget과 공용) 재사용: `GraphWidget` 부모에 `cursorMode`/`cursorA`/`cursorB`/`onCursorMove`/`toggleCursorMode`를 추가하고 툴바에 "커서 ON/OFF" 버튼 + A-B 델타(`fmtDelta`) 표시를 추가. `cursorA`/`cursorB`는 `relMs` 단위의 평범한 숫자라서, 이 위젯의 각 `SignalChart`가 독립적인 X/Y 뷰(줌/팬)를 갖고 있어도 각자 자신의 `xToPx`로 그리면 값이 자연히 맞아떨어진다(sysLog처럼 X뷰를 공유할 필요가 없음).
+- 각 `SignalChart`에 `cursor` prop을 전달하고, draw effect에 `drawDiffCursors(...)` 호출을 추가. `onPointerDown`/`onPointerMove`에 `cursorDragRef` 기반의 커서 A/B 드래그 로직을 sysLog와 동일한 패턴으로 추가(커서 모드일 때는 팬 대신 가장 가까운 커서를 드래그).
+- 차트 헤더에 X+/X−/Y+/Y− 명시적 줌 버튼 추가(`zoomXButton`/`zoomYButton`, 뷰 중심 기준 확대/축소 -- sysLog의 버튼-줌과 동일한 수식). 기존 휠-줌/드래그-팬은 그대로 유지.
+- `fmtValue(v, mode)` 헬퍼 추가(정수 반올림 후 Hex/Dec 포맷, sysLog와 동일 로직) + Y축 눈금 라벨에 적용 + 헤더에 HEX/DEC 토글 버튼 추가.
+
+**5~6 (`frontend/src/widgets/displays.tsx`의 `RxSignalDisplay`)**
+- 정렬 기준(`rxSortBy: 'message' | 'signal'`)과 값 표시 모드(`rxValueMode: 'hex' | 'dec'`)를 로컬 state가 아니라 `config.options`에 저장 -- 이 세션에서 이미 한 번 겪은 "체크박스 상태가 레이아웃 저장/불러오기 후 사라짐" 버그의 교훈을 그대로 적용해, 저장/불러오기 후에도 유지되게 했다.
+- 툴바에 "Message순"/"Signal순" 세그먼트 버튼과 HEX/DEC 토글 버튼 추가.
+- `fmtSignalValue(v, mode)`: `v`가 숫자면 Hex/Dec 변환, 문자열(초이스 디코딩된 라벨, 예: "Off"/"Forward")이면 모드와 무관하게 그대로 표시 -- 초이스 라벨을 숫자로 잘못 해석해 깨뜨리지 않도록 타입 분기.
+
+### 검증
+
+- `tsc -b`, `oxlint src`(대상 파일 한정 + 전체) 모두 클린, `vite build` 성공.
+- 실제 백엔드(virtual CAN, `samples/sample.dbc` 로드) + 프론트 dev 서버 + Playwright로 항목별 실동작 확인:
+  - 1~2: 리얼 sysLog(`reference/sysLog/syslog.bin` + DB) 업로드 후 플레인 휠로 그래프 목록 `scrollTop`이 실제로 변함, Ctrl+휠 시 `scrollTop`은 그대로인데 차트 이미지(줌 결과)는 바뀜을 스크린샷 픽셀 비교로 확인. 콘솔 에러 없음(초기엔 "Unable to preventDefault inside passive event listener" 경고가 있었는데, 원인 파악 후 위 구현에서 설명한 대로 제거해 재확인함).
+  - 3: 한 차트를 호버하면 다른(호버하지 않은) 차트들의 캔버스 이미지도 실제로 바뀌고(점선이 그려짐), 마우스가 모든 차트 밖으로 나가면 다시 원래대로 돌아옴을 스크린샷 픽셀 비교로 확인.
+  - 4: virtual CAN 연결 + DBC 업로드 + `EngineSpeed` 신호를 그래프에 추가한 뒤: HEX/DEC 버튼 클릭 시 라벨(HEX↔DEC)과 차트 이미지가 모두 바뀜, X+/Y+ 버튼 클릭 시 차트 이미지가 바뀜, 커서 ON 시 A/B 점선이 그려지고(이미지 변화), 차트 위에서 드래그하면 툴바의 "Δ" 델타 값이 실제로 바뀌고, 커서 OFF 시 다시 사라짐을 모두 확인.
+  - 5~6: `EngineData`/`VehicleSpeed`(둘 다 ECU_A 송신, RX 노드를 ECU_A로 설정) 신호를 실제로 흘려보내 5개 행을 확보 -- "Signal순" 클릭 시 실제로 Signal 이름 알파벳순 정렬, "Message순" 클릭 시 Message 이름순 정렬임을 각각 검증. HEX 버튼 클릭 시 숫자 값(`4321`→`0x10E1`, `-40`→`-0x28`, `88`→`0x58`)은 변환되고, 초이스 디코딩된 문자열 값(`"Forward"`)은 그대로 유지됨을 확인.
+- 전 과정에서 프론트 콘솔 에러(`pageerror`/`console.error`) 없음.
+- 테스트 중 이미 알려진 FD/classic-CAN 제약(이 세션 이전에 검증된 CAN 테스트 스크립트 실행기 리뷰에서와 동일) 재확인: virtual 버스가 classic CAN이라 32바이트 `FdSensorData` 메시지의 주기 송신은 실패로 보고됨(코드 버그 아님, 환경 제약).
+- 백엔드 코드는 이번 변경에서 건드리지 않았음(프론트엔드 전용 변경) -- 별도 backend pytest 재실행은 생략.

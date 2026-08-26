@@ -12,6 +12,14 @@ import { canStore, useCanVersion, type HistoryPoint } from '../store/canStore';
 import { useApp } from '../store/appContext';
 import { SignalPicker } from './MessageOptions';
 import type { SignalBinding, WidgetConfig } from '../types';
+import {
+  CURSOR_A_COLOR,
+  CURSOR_B_COLOR,
+  drawDiffCursors,
+  fmtDelta,
+  nearestCursor,
+  type DiffCursorState,
+} from './DiffCursor';
 
 interface GraphSeries {
   message: string;
@@ -50,6 +58,7 @@ const PALETTE = [
 
 const MARGIN = { left: 52, right: 10, top: 8, bottom: 22 };
 const ZOOM_STEP = 1.10;
+const BUTTON_ZOOM_FACTOR = 1.3;
 const DOT_RADIUS = 2.5;
 const DEFAULT_X_WINDOW_MS = 10_000;
 const MIN_X_WINDOW_MS = 500;
@@ -75,9 +84,12 @@ function niceTicks(min: number, max: number, count: number): number[] {
   return Array.from({ length: count + 1 }, (_, i) => min + step * i);
 }
 
-/** Y-axis tick label -- integers only (data/auto-fit math stays float). */
-function fmt(v: number): string {
-  return Math.round(v).toString();
+/** Y-axis tick label -- integers only (data/auto-fit math stays float), in either hex or decimal. */
+function fmtValue(v: number, mode: 'hex' | 'dec'): string {
+  const n = Math.round(v);
+  if (mode === 'dec') return n.toString();
+  const abs = Math.abs(n).toString(16).toUpperCase();
+  return n < 0 ? `-0x${abs}` : `0x${abs}`;
 }
 
 /** X-axis rolling window size for display next to the +/- zoom buttons. */
@@ -133,6 +145,29 @@ export function GraphWidget({ config }: { config: WidgetConfig }) {
     setXWindowMs((w) => Math.min(MAX_X_WINDOW_MS, Math.max(MIN_X_WINDOW_MS, w + deltaMs)));
   };
 
+  // Difference cursor: two draggable vertical lines (relMs), drawn on every
+  // mini-chart via its own independent X view -- each chart still resolves
+  // the same ms value to the right pixel through its own xToPx, so the lines
+  // line up across charts even though each chart's zoom/pan is independent.
+  const [cursorMode, setCursorMode] = useState(false);
+  const [cursorA, setCursorA] = useState<number | null>(null);
+  const [cursorB, setCursorB] = useState<number | null>(null);
+  const onCursorMove = (which: 'a' | 'b', ms: number) => {
+    if (which === 'a') setCursorA(ms);
+    else setCursorB(ms);
+  };
+  const toggleCursorMode = () => {
+    if (!cursorMode && cursorA === null && cursorB === null) {
+      const xMax = canStore.nowMs();
+      const xMin = xMax - xWindowMs;
+      setCursorA(xMin + (xMax - xMin) / 3);
+      setCursorB(xMin + ((xMax - xMin) * 2) / 3);
+    }
+    setCursorMode((m) => !m);
+  };
+  const cursor: DiffCursorState = { mode: cursorMode, a: cursorA, b: cursorB, onMove: onCursorMove };
+  const cursorDeltaMs = cursorA !== null && cursorB !== null ? Math.abs(cursorB - cursorA) : null;
+
   return (
     <div className="graph-widget">
       <div className="graph-toolbar">
@@ -145,6 +180,21 @@ export function GraphWidget({ config }: { config: WidgetConfig }) {
         <button className="icon-btn" title="X축 확대 (시간 범위 5초 좁게)" onClick={() => zoomXWindow(-X_WINDOW_STEP_MS)}>
           +
         </button>
+        <button
+          className={`small-btn ${cursorMode ? 'primary' : ''}`}
+          title="차트에서 드래그해 두 커서를 움직이면 그 사이의 시간 간격을 읽을 수 있습니다"
+          onClick={toggleCursorMode}
+        >
+          커서 {cursorMode ? 'ON' : 'OFF'}
+        </button>
+        {cursorMode && cursorDeltaMs !== null && (
+          <span className="graph-xwindow mono">
+            <span style={{ color: CURSOR_A_COLOR }}>A</span>
+            {' - '}
+            <span style={{ color: CURSOR_B_COLOR }}>B</span>
+            {`: Δ ${fmtDelta(cursorDeltaMs)}`}
+          </span>
+        )}
         {editMode && (
           <button className="small-btn" onClick={() => setShowAdd(true)}>
             + 신호 추가
@@ -159,6 +209,7 @@ export function GraphWidget({ config }: { config: WidgetConfig }) {
             editMode={editMode}
             showXAxis={i === series.length - 1}
             xWindowMs={xWindowMs}
+            cursor={cursor}
             onRemove={() => removeSeries(seriesKey(s))}
             onMoveUp={() => moveSeries(i, -1)}
             onMoveDown={() => moveSeries(i, 1)}
@@ -179,6 +230,7 @@ function SignalChart({
   editMode,
   showXAxis,
   xWindowMs,
+  cursor,
   onRemove,
   onMoveUp,
   onMoveDown,
@@ -189,6 +241,7 @@ function SignalChart({
   editMode: boolean;
   showXAxis: boolean;
   xWindowMs: number;
+  cursor: DiffCursorState;
   onRemove: () => void;
   onMoveUp: () => void;
   onMoveDown: () => void;
@@ -201,6 +254,8 @@ function SignalChart({
   const wrapRef = useRef<HTMLDivElement>(null);
   const viewRef = useRef<ViewRange>({ xMin: null, xMax: null, yMin: null, yMax: null });
   const dragRef = useRef<{ x: number; y: number; view: ViewRange } | null>(null);
+  const cursorDragRef = useRef<'a' | 'b' | null>(null);
+  const [valueMode, setValueMode] = useState<'hex' | 'dec'>('hex');
   const lastGeomRef = useRef<Geom>({
     xMin: 0,
     xMax: 1,
@@ -241,6 +296,29 @@ function SignalChart({
 
   const resetView = () => {
     viewRef.current = { xMin: null, xMax: null, yMin: null, yMax: null };
+    redraw();
+  };
+
+  const zoomXButton = (factor: number) => {
+    const g = lastGeomRef.current;
+    const v = viewRef.current;
+    const xMin = v.xMin ?? g.xMin;
+    const xMax = v.xMax ?? g.xMax;
+    const center = (xMin + xMax) / 2;
+    const halfWidth = ((xMax - xMin) / 2) * factor;
+    v.xMin = center - halfWidth;
+    v.xMax = center + halfWidth;
+    redraw();
+  };
+  const zoomYButton = (factor: number) => {
+    const g = lastGeomRef.current;
+    const v = viewRef.current;
+    const yMin = v.yMin ?? g.yMin;
+    const yMax = v.yMax ?? g.yMax;
+    const center = (yMin + yMax) / 2;
+    const halfHeight = ((yMax - yMin) / 2) * factor;
+    v.yMin = center - halfHeight;
+    v.yMax = center + halfHeight;
     redraw();
   };
 
@@ -322,7 +400,7 @@ function SignalChart({
       ctx.moveTo(plotLeft, py);
       ctx.lineTo(plotLeft + plotW, py);
       ctx.stroke();
-      ctx.fillText(fmt(t), 2, py + 3);
+      ctx.fillText(fmtValue(t, valueMode), 2, py + 3);
     }
     ctx.strokeStyle = '#4b5160';
     ctx.strokeRect(plotLeft, plotTop, plotW, plotH);
@@ -364,6 +442,8 @@ function SignalChart({
       }
       ctx.restore();
     }
+
+    drawDiffCursors(ctx, cursor, xMin, xMax, plotTop, plotH, xToPx);
 
     // stash the resolved (possibly auto-fit) range + plot geometry for the
     // wheel/drag handlers below, without triggering another render
@@ -418,6 +498,13 @@ function SignalChart({
       return; // only pan when starting inside the plot area
     }
     (e.target as HTMLCanvasElement).setPointerCapture(e.pointerId);
+    if (cursor.mode) {
+      const msToPx = (x: number) => g.plotLeft + ((x - g.xMin) / (g.xMax - g.xMin)) * g.plotW;
+      const which = nearestCursor(cursor, px, msToPx);
+      cursorDragRef.current = which;
+      cursor.onMove(which, g.xMin + ((px - g.plotLeft) / g.plotW) * (g.xMax - g.xMin));
+      return;
+    }
     dragRef.current = {
       x: e.clientX,
       y: e.clientY,
@@ -430,6 +517,13 @@ function SignalChart({
     };
   };
   const onPointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    if (cursorDragRef.current) {
+      const g = lastGeomRef.current;
+      const rect = canvasRef.current!.getBoundingClientRect();
+      const px = e.clientX - rect.left;
+      cursor.onMove(cursorDragRef.current, g.xMin + ((px - g.plotLeft) / g.plotW) * (g.xMax - g.xMin));
+      return;
+    }
     const drag = dragRef.current;
     if (!drag) return;
     const g = lastGeomRef.current;
@@ -447,6 +541,7 @@ function SignalChart({
   };
   const onPointerUp = () => {
     dragRef.current = null;
+    cursorDragRef.current = null;
   };
 
   return (
@@ -457,6 +552,25 @@ function SignalChart({
           {series.signal}
         </span>
         <span className="spacer" />
+        <button
+          className="icon-btn"
+          title="Y값 표시 형식(16진수/10진수) 전환"
+          onClick={() => setValueMode((m) => (m === 'hex' ? 'dec' : 'hex'))}
+        >
+          {valueMode === 'hex' ? 'HEX' : 'DEC'}
+        </button>
+        <button className="icon-btn" title="X축 확대" onClick={() => zoomXButton(1 / BUTTON_ZOOM_FACTOR)}>
+          X+
+        </button>
+        <button className="icon-btn" title="X축 축소" onClick={() => zoomXButton(BUTTON_ZOOM_FACTOR)}>
+          X−
+        </button>
+        <button className="icon-btn" title="Y축 확대" onClick={() => zoomYButton(1 / BUTTON_ZOOM_FACTOR)}>
+          Y+
+        </button>
+        <button className="icon-btn" title="Y축 축소" onClick={() => zoomYButton(BUTTON_ZOOM_FACTOR)}>
+          Y−
+        </button>
         <button className="icon-btn" title="X/Y 축 자동 맞춤으로 리셋" onClick={resetView}>
           ⟲
         </button>

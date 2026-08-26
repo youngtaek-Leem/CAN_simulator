@@ -11,6 +11,16 @@ const fmtId = (id: number) => `0x${id.toString(16).toUpperCase().padStart(3, '0'
 const fmtData = (hex: string) => hex.toUpperCase().replace(/(..)/g, '$1 ').trim();
 const fmtTime = (ts: number) => canStore.relMs(ts).toFixed(0);
 
+/** Numeric signal values honor the hex/dec toggle; choice-decoded values
+ * (e.g. "Off"/"On") are already a string label and display unchanged. */
+function fmtSignalValue(v: number | string, mode: 'hex' | 'dec'): string {
+  if (typeof v !== 'number') return v;
+  if (mode === 'dec') return v.toString();
+  const n = Math.round(v);
+  const abs = Math.abs(n).toString(16).toUpperCase();
+  return n < 0 ? `-0x${abs}` : `0x${abs}`;
+}
+
 export function CanMessageDisplay({ config }: { config: WidgetConfig }) {
   return <MessageDisplayCore config={config} />;
 }
@@ -32,10 +42,18 @@ interface SignalRow {
  * just leaves the row showing its last-known-good value instead of making
  * it disappear (see canStore.lastValidSignal). Unlike CanMessageDisplay,
  * there's no message-row-with-expandable-detail: each row IS a signal. */
-export function RxSignalDisplay({ config: _config }: { config: WidgetConfig }) {
+export function RxSignalDisplay({ config }: { config: WidgetConfig }) {
   useCanVersion();
-  const { dbc } = useApp();
+  const { dbc, updateWidget } = useApp();
   const ampTxNames = new Set(groupedMessages(dbc, canStore.getRxNode()).rx.map((m) => m.name));
+
+  // 정렬 기준과 Hex/Dec 표시 모드는 config.options에 저장해 레이아웃 저장/불러오기 후에도 유지한다.
+  const sortBy = (config.options.rxSortBy as 'message' | 'signal' | undefined) ?? 'message';
+  const setSortBy = (m: 'message' | 'signal') =>
+    updateWidget({ ...config, options: { ...config.options, rxSortBy: m } });
+  const valueMode = (config.options.rxValueMode as 'hex' | 'dec' | undefined) ?? 'dec';
+  const setValueMode = (m: 'hex' | 'dec') =>
+    updateWidget({ ...config, options: { ...config.options, rxValueMode: m } });
 
   const rows: SignalRow[] = [];
   for (const entry of canStore.lastValidSignal.values()) {
@@ -49,13 +67,40 @@ export function RxSignalDisplay({ config: _config }: { config: WidgetConfig }) {
       unit: message?.signals.find((s) => s.name === entry.signal)?.unit ?? null,
     });
   }
-  rows.sort((a, b) => a.message.localeCompare(b.message) || a.signal.localeCompare(b.signal));
+  rows.sort((a, b) =>
+    sortBy === 'message'
+      ? a.message.localeCompare(b.message) || a.signal.localeCompare(b.signal)
+      : a.signal.localeCompare(b.signal) || a.message.localeCompare(b.message),
+  );
 
   return (
     <div className="msg-display">
       <div className="msg-toolbar">
         <span className="hint">{rows.length}개 신호</span>
         <span className="spacer" />
+        <span className="seg">
+          <button
+            className={`small-btn ${sortBy === 'message' ? 'seg-active' : ''}`}
+            onClick={() => setSortBy('message')}
+            title="Message 이름 기준으로 정렬"
+          >
+            Message순
+          </button>
+          <button
+            className={`small-btn ${sortBy === 'signal' ? 'seg-active' : ''}`}
+            onClick={() => setSortBy('signal')}
+            title="Signal 이름 기준으로 정렬"
+          >
+            Signal순
+          </button>
+        </span>
+        <button
+          className="icon-btn"
+          title="Value 표시 형식(16진수/10진수) 전환"
+          onClick={() => setValueMode(valueMode === 'hex' ? 'dec' : 'hex')}
+        >
+          {valueMode === 'hex' ? 'HEX' : 'DEC'}
+        </button>
         <button className="small-btn" onClick={() => canStore.clearFrames()}>
           Clear
         </button>
@@ -76,7 +121,7 @@ export function RxSignalDisplay({ config: _config }: { config: WidgetConfig }) {
               <td>{fmtTime(r.ts)}</td>
               <td>{r.message}</td>
               <td>{r.signal}</td>
-              <td className="mono">{String(r.value)}</td>
+              <td className="mono">{fmtSignalValue(r.value, valueMode)}</td>
               <td>{r.unit || ''}</td>
             </tr>
           ))}
