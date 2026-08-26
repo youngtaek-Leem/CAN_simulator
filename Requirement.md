@@ -4177,3 +4177,47 @@ Simulator Rev 1.0"으로 바꾸고, 이후 사용자가 필요할 때마다 버�
 - 전 과정에서 프론트 콘솔 에러(`pageerror`/`console.error`) 없음.
 - 테스트 중 이미 알려진 FD/classic-CAN 제약(이 세션 이전에 검증된 CAN 테스트 스크립트 실행기 리뷰에서와 동일) 재확인: virtual 버스가 classic CAN이라 32바이트 `FdSensorData` 메시지의 주기 송신은 실패로 보고됨(코드 버그 아님, 환경 제약).
 - 백엔드 코드는 이번 변경에서 건드리지 않았음(프론트엔드 전용 변경) -- 별도 backend pytest 재실행은 생략.
+
+## `run_windows.bat`의 pip install이 requirements.txt 한글 주석 때문에 Windows에서 UnicodeDecodeError로 실패 (2026-08-26, 사용자 실사용 확인 — 수정 완료, 검증 통과)
+
+### 증상
+
+사용자가 `run_windows.bat` 실행 시 "[2/3] 의존성 설치 확인 중..." 단계에서
+`UnicodeDecodeError: 'charmap' codec can't decode byte 0x9d ... decoding
+with 'cp1252' codec failed`로 실패.
+
+### 원인
+
+`backend/requirements.txt`에 이전 세션들에서 추가한 한글 주석(예: pyvisa
+버전/USB 드라이버 관련 설명)이 BOM 없는 UTF-8로 저장돼 있었다. pip의
+`auto_decode()`(`pip/_internal/utils/encoding.py`)는 (1) BOM 확인 → (2) 첫
+두 줄에서 PEP263 스타일 `# coding: xxx` 선언 확인 → (3) 그마저도 없으면
+`locale.getpreferredencoding(False)`로 디코딩한다. 이 파일은 BOM도 coding
+선언도 없어서 3번 경로를 타는데, 사용자의 Windows 환경 로케일이 cp1252라서
+UTF-8 한글 바이트열(`0xEC 0x9D...` 등)이 cp1252로는 디코딩되지 않아 크래시.
+즉 한글(비-ASCII) 주석이 들어간 시점부터 **UTF-8이 아닌 시스템 로케일을 쓰는
+모든 Windows 사용자**에게서 재현 가능한 잠재 버그였고, 이번에 실제로
+터진 것.
+
+### 수정
+
+`backend/requirements.txt`의 한글 주석을 전부 같은 내용의 영어로
+번역해 파일 전체를 순수 ASCII로 만들었다(BOM 추가나 `# -*- coding:
+utf-8 -*-` 선언 같은 우회 대신, 애초에 로케일에 의존하지 않도록 만드는
+쪽을 택함 -- `requirements.txt`는 pip가 파싱하는 메타 파일이라 굳이
+비-ASCII를 쓸 이유가 없다).
+
+### 검증
+
+- `data.decode('ascii')`로 파일 전체가 순수 ASCII임을 확인.
+- pip의 `auto_decode()`와 동일한 로직(BOM 확인 → coding 선언 확인 →
+  `cp1252`로 폴백)을 그대로 재현하는 스크립트로, 이 폴백 경로에서도
+  정상적으로 디코딩됨을 직접 확인(사용자가 겪은 실패 조건을 로컬에서
+  재현한 뒤 통과하는지 검증).
+- 저장소 내 다른 `requirements*.txt` 파일이 없는지 확인(이 파일 하나뿐).
+
+### 재발 방지 원칙
+
+`backend/requirements.txt`에는 앞으로도 비-ASCII 문자(한글 포함)를 쓰지
+않는다. 설명이 필요하면 영어 주석으로 남기고, 자세한 배경/이력은
+`Requirement.md` 쪽에 한글로 기록한다.
