@@ -66,6 +66,13 @@ interface YView {
   yMax: number | null;
 }
 
+const PAIRED_FLOAT_MIN = 1300;
+const PAIRED_FLOAT_MAX = 1399;
+
+function isPairedFloatId(id: number): boolean {
+  return id >= PAIRED_FLOAT_MIN && id <= PAIRED_FLOAT_MAX;
+}
+
 function getSelectedIds(config: WidgetConfig): number[] {
   return (config.options.selectedIds as number[] | undefined) ?? [];
 }
@@ -126,7 +133,8 @@ function findHeldPoint(points: SysLogPoint[], plotX: number): SysLogPoint | null
   return held;
 }
 
-function fmtValue(v: number, mode: 'hex' | 'dec'): string {
+function fmtValue(v: number, mode: 'hex' | 'dec' | 'float', decimals: number = 2): string {
+  if (mode === 'float') return v.toFixed(decimals);
   const n = Math.round(v);
   if (mode === 'dec') return n.toString();
   const abs = Math.abs(n).toString(16).toUpperCase();
@@ -362,6 +370,7 @@ export function SysLogAnalysisWidget({ config }: { config: WidgetConfig }) {
     hoverXRef.current = x;
     notifyChange();
   };
+  const hoveredGraphIdxRef = useRef<number | null>(null);
 
   const segments = timeline?.segments ?? [];
 
@@ -683,6 +692,8 @@ export function SysLogAnalysisWidget({ config }: { config: WidgetConfig }) {
                   cursor={cursor}
                   hoverXRef={hoverXRef}
                   setHoverX={setHoverX}
+                  graphIndex={i}
+                  hoveredGraphIdxRef={hoveredGraphIdxRef}
                   onRemove={() => toggleId(id)}
                   isDragOver={dragOverId === id}
                   onDragStart={handleChartDragStart(id)}
@@ -810,6 +821,8 @@ function SysLogChart({
   cursor,
   hoverXRef,
   setHoverX,
+  graphIndex,
+  hoveredGraphIdxRef,
   onRemove,
   isDragOver,
   onDragStart,
@@ -831,6 +844,8 @@ function SysLogChart({
   cursor: DiffCursorState;
   hoverXRef: MutableRefObject<number | null>;
   setHoverX: (x: number | null) => void;
+  graphIndex: number;
+  hoveredGraphIdxRef: MutableRefObject<number | null>;
   onRemove: () => void;
   isDragOver: boolean;
   onDragStart: (e: React.DragEvent) => void;
@@ -843,7 +858,8 @@ function SysLogChart({
   const yViewRef = useRef<YView>({ yMin: null, yMax: null });
   const dragRef = useRef<{ x: number; y: number; xView: SharedXView; yView: YView } | null>(null);
   const cursorDragRef = useRef<'a' | 'b' | null>(null);
-  const [valueMode, setValueMode] = useState<'hex' | 'dec'>('hex');
+  const [valueMode, setValueMode] = useState<'hex' | 'dec' | 'float'>('hex');
+  const mode = isPairedFloatId(id) ? 'float' : valueMode;
   const lastGeomRef = useRef<Geom>({
     xMin: 0,
     xMax: 1,
@@ -928,13 +944,18 @@ function SysLogChart({
     let yMax = yViewRef.current.yMax;
     if (yMin === null || yMax === null) {
       if (visible.length > 0) {
-        const hi = Math.max(...visible.map((p) => p.value));
-        const pad = hi * 0.1 || 1;
-        yMin = 0; // 값에 음수가 없으므로 auto-fit 최소값은 항상 0
-        yMax = hi + pad;
+        if (isPairedFloatId(id)) {
+          yMin = -120;
+          yMax = 0;
+        } else {
+          const hi = Math.max(...visible.map((p) => p.value));
+          const pad = hi * 0.1 || 1;
+          yMin = 0; // 값에 음수가 없으므로 auto-fit 최소값은 항상 0
+          yMax = hi + pad;
+        }
       } else {
-        yMin = 0;
-        yMax = 1;
+        yMin = isPairedFloatId(id) ? -120 : 0;
+        yMax = isPairedFloatId(id) ? 0 : 1;
       }
     }
 
@@ -983,7 +1004,7 @@ function SysLogChart({
       ctx.moveTo(plotLeft, py);
       ctx.lineTo(plotLeft + plotW, py);
       ctx.stroke();
-      ctx.fillText(fmtValue(t, valueMode), 2, py + 3);
+      ctx.fillText(fmtValue(t, mode), 2, py + 3);
     }
     ctx.strokeStyle = '#4b5160';
     ctx.strokeRect(plotLeft, plotTop, plotW, plotH);
@@ -1043,9 +1064,9 @@ function SysLogChart({
     // 호버해도 전 차트에 같은 시각의 점선이 동시에 그려진다 -- 각 차트는 그
     // 공유된 plotX를 자기 자신의 현재 뷰(xMin/xMax)로 픽셀 변환해서 그린다.
     const hoverPlotX = hoverXRef.current;
-    if (hoverPlotX !== null && hoverPlotX >= xMin! && hoverPlotX <= xMax!) {
+    // 세로점선줄은 모든 차트에 표시 (hoverX가 유효하면 plotX를 픽셀로 변환해 그린다)
+    if (hoverPlotX !== null) {
       const px = xToPx(hoverPlotX);
-      const plotX = hoverPlotX;
       ctx.save();
       ctx.strokeStyle = '#ffffff88';
       ctx.setLineDash([2, 2]);
@@ -1055,9 +1076,14 @@ function SysLogChart({
       ctx.lineTo(px, plotTop + plotH);
       ctx.stroke();
       ctx.restore();
+    }
 
+    // 시간정보 툴팁은 마우스커서가 있는 그래프에만 표시
+    if (hoverPlotX !== null && hoveredGraphIdxRef.current === graphIndex) {
+      const px = xToPx(hoverPlotX);
+      const plotX = hoverPlotX;
       const heldPoint = findHeldPoint(points, plotX);
-      const tooltipText = `${fmtAbsTime(plotXToAbsMs(segments, plotX))}  ${heldPoint ? fmtValue(heldPoint.value, valueMode) : '-'}`;
+      const tooltipText = `${fmtAbsTime(plotXToAbsMs(segments, plotX))}  ${heldPoint ? fmtValue(heldPoint.value, mode) : '-'}`;
       ctx.font = '10px monospace';
       const textW = ctx.measureText(tooltipText).width;
       let tx = px + 6;
@@ -1071,7 +1097,7 @@ function SysLogChart({
 
     lastGeomRef.current = { xMin, xMax, yMin, yMax, plotLeft, plotTop, plotW, plotH };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [size, xVersion, localTick, series, showXAxis, valueMode]);
+  }, [size, xVersion, localTick, series, showXAxis, mode]);
 
   const onWheel = (e: React.WheelEvent<HTMLCanvasElement>) => {
     if (!e.ctrlKey) return; // 일반 휠은 막지 않고 그대로 둬서 목록이 스크롤되게 한다
@@ -1167,9 +1193,12 @@ function SysLogChart({
     const py = e.clientY - rect.top;
     if (px < g.plotLeft || px > g.plotLeft + g.plotW || py < g.plotTop || py > g.plotTop + g.plotH) {
       if (hoverXRef.current !== null) setHoverX(null);
+      hoveredGraphIdxRef.current = null;
       return;
     }
     setHoverX(g.xMin + ((px - g.plotLeft) / g.plotW) * (g.xMax - g.xMin));
+    const targetIdx = parseInt((e.target as HTMLCanvasElement).dataset.index ?? '', 10);
+    if (!isNaN(targetIdx)) hoveredGraphIdxRef.current = targetIdx;
   };
   const onPointerUp = () => {
     dragRef.current = null;
@@ -1178,6 +1207,7 @@ function SysLogChart({
   const onPointerLeave = () => {
     onPointerUp();
     if (hoverXRef.current !== null) setHoverX(null);
+    hoveredGraphIdxRef.current = null;
   };
 
   return (
@@ -1196,10 +1226,12 @@ function SysLogChart({
         <span className="spacer" />
         <button
           className="icon-btn"
-          title="Y값 표시 형식(16진수/10진수) 전환"
-          onClick={() => setValueMode((m) => (m === 'hex' ? 'dec' : 'hex'))}
+          title="Y값 표시 형식(16진수/10진수/실수) 전환"
+          onClick={() => {
+            if (!isPairedFloatId(id)) setValueMode((m) => (m === 'hex' ? 'dec' : 'hex'));
+          }}
         >
-          {valueMode === 'hex' ? 'HEX' : 'DEC'}
+          {mode === 'float' ? 'FLOAT' : valueMode === 'hex' ? 'HEX' : 'DEC'}
         </button>
         <button className="icon-btn" title="Y축 확대" onClick={() => zoomY(1 / BUTTON_ZOOM_FACTOR)}>
           Y+
@@ -1215,14 +1247,15 @@ function SysLogChart({
         </button>
       </div>
       <div className="graph-canvas-wrap" ref={wrapRef}>
-        <canvas
+<canvas
           ref={canvasRef}
+          data-index={graphIndex}
           onWheel={onWheel}
           onPointerDown={onPointerDown}
           onPointerMove={onPointerMove}
           onPointerUp={onPointerUp}
           onPointerLeave={onPointerLeave}
-        />
+/>
       </div>
     </div>
   );

@@ -36,6 +36,7 @@ x좌표를 실제 day/hour/min/ms로 역산해 축 눈금에 표시할 수 있�
 """
 
 import bisect
+import math
 import struct
 from dataclasses import dataclass
 
@@ -53,6 +54,31 @@ MS_MASK = 0xFFFF
 MS_PER_DAY = 86_400_000
 MS_PER_HOUR = 3_600_000
 MS_PER_MIN = 60_000
+
+# ID 1300~1399: 각 ID별로 2개가 1ms 이내에 연속으로 나와야 정상.
+# 1개만 나오면 무시, 2개가 정상 페어이면 IEEE 754 BE float로 변환.
+# 0x0000 0x0000 → 0, NaN/Inf/양수/<-120 → -120, 정상 범위 → 그대로.
+PAIRED_FLOAT_MIN = 1300
+PAIRED_FLOAT_MAX = 1399
+
+
+def _is_valid_float(v: float) -> bool:
+    return not math.isnan(v) and not math.isinf(v) and -120 <= v <= 0
+
+
+def _pair_to_float(high: int, low: int) -> float:
+    """두 uint16 값을 big-endian IEEE 754 float32로 변환한다.
+    0x0000 0x0000 → 0.0, 범위 밖(NaN, Inf, 양수, -120 미만) → -120.0."""
+    if high == 0 and low == 0:
+        return 0.0
+    v = struct.unpack('>f', struct.pack('>HH', high, low))[0]
+    if not _is_valid_float(v):
+        return -120.0
+    return v
+
+
+def _raw_float(high: int, low: int) -> float:
+    return struct.unpack('>f', struct.pack('>HH', high, low))[0]
 
 
 @dataclass
@@ -167,18 +193,43 @@ def build_series(
     series: dict[int, dict] = {}
     for log_id, recs in by_id.items():
         name = db.get(log_id) or f"Unknown({log_id})"
-        points = [
-            {
-                "seq": rec.seq,
-                "x_ms": plot_x_by_seq[rec.seq],
-                "value": rec.value,
-                "day": rec.day,
-                "hour": rec.hour,
-                "minute": rec.minute,
-                "ms": rec.ms,
-            }
-            for rec in recs
-        ]
+        if PAIRED_FLOAT_MIN <= log_id <= PAIRED_FLOAT_MAX:
+            # 규칙 (1300~1399 전용):
+            # 1) 동일 ID 2개가 1ms 이내에 연속으로 와야 정상 → 1개만이면 무시(스킵)
+            # 2) 정상 페어: 0x0000 0x0000 → 0, 그 외 범위 밖(NaN/Inf/양수/<-120) → -120
+            points: list[dict] = []
+            i = 0
+            while i < len(recs) - 1:
+                dt = recs[i + 1].abs_ms - recs[i].abs_ms
+                if dt < 0 or dt > 1:
+                    # 1ms 이내 2개가 아님 → 단일 무시
+                    i += 1
+                    continue
+                v = _pair_to_float(recs[i].value, recs[i + 1].value)
+                points.append({
+                    "seq": recs[i].seq,
+                    "x_ms": plot_x_by_seq[recs[i].seq],
+                    "value": v,
+                    "day": recs[i].day,
+                    "hour": recs[i].hour,
+                    "minute": recs[i].minute,
+                    "ms": recs[i].ms,
+                })
+                i += 2
+            # 홀수 1개 잔류는 무시 (스펙)
+        else:
+            points = [
+                {
+                    "seq": rec.seq,
+                    "x_ms": plot_x_by_seq[rec.seq],
+                    "value": rec.value,
+                    "day": rec.day,
+                    "hour": rec.hour,
+                    "minute": rec.minute,
+                    "ms": rec.ms,
+                }
+                for rec in recs
+            ]
         series[log_id] = {"name": name, "count": len(points), "points": points}
     return series, segments, plot_x_max
 
