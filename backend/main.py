@@ -53,6 +53,7 @@ from power_supply_service import PowerSupplyService
 from replay_service import ReplayService
 from seedkey_client import SeedKeyService
 from syslog_service import SysLogService
+from can_log_service import CanLogService
 from test_runner_service import TestRunnerService
 from tx_scheduler import TxScheduler
 from uds_download_manager import MultiUdsDownloadManager
@@ -156,6 +157,7 @@ log_service = LogService(can_manager, CAN_LOG_DIR)
 power_supply_service = PowerSupplyService()
 audio_service = AudioService(TESTRUNNER_AUDIO_DIR, TESTRUNNER_GOLDEN_DIR)
 syslog_service = SysLogService()
+can_log_service = CanLogService(dbc_service)
 test_runner_service = TestRunnerService(
     can_manager,
     dbc_service,
@@ -1376,6 +1378,50 @@ def syslog_generate_script(req: SysLogScriptRequest):
     return syslog_service.generate_test_script(
         req.checked_segments, dbc_summary["messages"], dbc_service.signal_send_type
     )
+
+
+# ---- CAN log 분석 ---------------------------------------------------------
+
+@app.post("/api/canlog/upload")
+async def canlog_upload(file: UploadFile):
+    data = await file.read()
+    try:
+        return can_log_service.load_log(data, file.filename or "canlog.blf")
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"CAN log parse error: {exc}")
+
+
+@app.get("/api/canlog/status")
+def canlog_status():
+    return can_log_service.status()
+
+
+@app.get("/api/canlog/timeline")
+def canlog_timeline():
+    return can_log_service.timeline()
+
+
+@app.get("/api/canlog/signals")
+def canlog_signals():
+    if not dbc_service.loaded:
+        raise HTTPException(status_code=400, detail="DBC가 로드되지 않았습니다. 먼저 DBC를 업로드하세요.")
+    return can_log_service.list_signals()
+
+
+@app.get("/api/canlog/messages")
+def canlog_messages():
+    if not dbc_service.loaded:
+        raise HTTPException(status_code=400, detail="DBC가 로드되지 않았습니다. 먼저 DBC를 업로드하세요.")
+    return can_log_service.list_messages()
+
+
+@app.get("/api/canlog/series")
+def canlog_series(keys: str = ""):
+    try:
+        key_list = [k.strip() for k in keys.split(",") if k.strip()]
+    except ValueError:
+        raise HTTPException(status_code=400, detail="keys must be comma-separated Message.Signal")
+    return can_log_service.get_series(key_list)
 
 
 # ---- Layout persistence --------------------------------------------------

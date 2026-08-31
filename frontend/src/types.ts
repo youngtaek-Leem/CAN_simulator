@@ -436,7 +436,8 @@ export type WidgetType =
   | 'audioMonitor'
   | 'powerControl'
   | 'canAudioLatency'
-  | 'sysLogAnalysis';
+  | 'sysLogAnalysis'
+  | 'canLogAnalysis';
 
 export interface SignalBinding {
   message: string;
@@ -475,6 +476,52 @@ export interface WidgetConfig {
   title: string;
   binding?: SignalBinding;
   options: Record<string, unknown>;
+}
+
+export interface CanLogStatus {
+  log_filename: string | null;
+  record_count: number;
+  duration_s: number;
+  t0: number;
+}
+
+export interface CanLogSignalInfo {
+  key: string;
+  message: string;
+  signal: string;
+  frame_id: number;
+  count: number;
+  choices: Record<string, string> | null;
+}
+
+export interface CanLogMessageInfo {
+  message: string;
+  frame_id: number;
+  count: number;
+  signals: CanLogSignalInfo[];
+}
+
+export interface CanLogPoint {
+  seq: number;
+  x_ms: number;
+  value: number;
+  ts: number;
+}
+
+export interface CanLogSeries {
+  key: string;
+  message: string;
+  signal: string;
+  frame_id: number;
+  count: number;
+  choices: Record<string, string> | null;
+  points: CanLogPoint[];
+}
+
+export interface CanLogTimeline {
+  plot_x_min: number;
+  plot_x_max: number;
+  segments: SysLogTimelineSegment[];
 }
 
 export interface TxRow {

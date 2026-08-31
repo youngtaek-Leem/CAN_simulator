@@ -24,6 +24,7 @@ import { AudioMonitorWidget } from './AudioMonitorWidget';
 import { PowerControlWidget } from './PowerControlWidget';
 import { CanAudioLatencyWidget } from './CanAudioLatencyWidget';
 import { SysLogAnalysisWidget } from './SysLogAnalysisWidget';
+import { CanLogAnalysisWidget } from './CanLogAnalysisWidget';
 
 interface WidgetMeta {
   label: string;
@@ -170,6 +171,11 @@ export const WIDGET_REGISTRY: Record<WidgetType, WidgetMeta> = {
   sysLogAnalysis: {
     label: 'sysLog 분석',
     component: SysLogAnalysisWidget,
+    defaultSize: { w: 12, h: 14, minW: 4, minH: 3 },
+  },
+  canLogAnalysis: {
+    label: 'CAN log 분석',
+    component: CanLogAnalysisWidget,
     defaultSize: { w: 12, h: 14, minW: 4, minH: 3 },
   },
 };

@@ -282,4 +282,15 @@ export const api = {
     request<Record<string, import('../types').SysLogSeries>>(
       `/api/syslog/series?ids=${ids.join(',')}`,
     ),
+
+  // CAN log 분석
+  canlogUpload: (file: File) => upload<import('../types').CanLogStatus>('/api/canlog/upload', file),
+  canlogStatus: () => request<import('../types').CanLogStatus>('/api/canlog/status'),
+  canlogTimeline: () => request<import('../types').CanLogTimeline>('/api/canlog/timeline'),
+  canlogSignals: () => request<import('../types').CanLogSignalInfo[]>('/api/canlog/signals'),
+  canlogMessages: () => request<import('../types').CanLogMessageInfo[]>('/api/canlog/messages'),
+  canlogSeries: (keys: string[]) =>
+    request<Record<string, import('../types').CanLogSeries>>(
+      `/api/canlog/series?keys=${keys.map(encodeURIComponent).join(',')}`,
+    ),
 };

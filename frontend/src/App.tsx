@@ -154,6 +154,27 @@ export default function App() {
     [activePageId],
   );
 
+  // 선택한 위젯만 맨 앞으로 — 나머지는 기존 순서 유지
+  // 구현은 DOM 페인트 순서(= widgets/layout 배열 순서)에 의존: 클릭된 위젯/레이아웃을
+  // 배열 맨 끝으로 옮기면 겹친 상태에서 항상 최상위에 그려진다.
+  const bringToFront = useCallback(
+    (id: string) => {
+      setActiveId(id);
+      updateActivePage((p) => {
+        const wIdx = p.widgets.findIndex((w) => w.id === id);
+        if (wIdx === -1 || wIdx === p.widgets.length - 1) return p;
+        const w = p.widgets[wIdx];
+        const l = p.layout.find((it) => it.i === id);
+        return {
+          ...p,
+          widgets: [...p.widgets.filter((x) => x.id !== id), w],
+          layout: l ? [...p.layout.filter((x) => x.i !== id), l] : p.layout,
+        };
+      });
+    },
+    [updateActivePage],
+  );
+
   const addWidget = (type: WidgetType) => {
     const meta = WIDGET_REGISTRY[type];
     const id = `w${Date.now()}`;
@@ -349,7 +370,7 @@ export default function App() {
   // bring an existing widget to the front (same mechanism as clicking it)
   // and scroll it into view -- used by the top bar's "위젯 리스트" picker.
   const focusWidget = (id: string) => {
-    setActiveId(id);
+    bringToFront(id);
     widgetRefs.current[id]?.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'center' });
   };
 
@@ -445,7 +466,7 @@ export default function App() {
                   key={w.id}
                   ref={(el) => { widgetRefs.current[w.id] = el; }}
                   style={activeId === w.id ? { zIndex: 10 } : undefined}
-                  onMouseDownCapture={() => setActiveId(w.id)}
+                  onMouseDownCapture={() => bringToFront(w.id)}
                 >
                   <WidgetFrame config={w}>
                     <Comp config={w} />
