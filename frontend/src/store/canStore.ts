@@ -211,7 +211,7 @@ class CanStore {
   pushActivity(text: string, ts = Date.now()) {
     this.activityLog.push({ ts, text });
     if (this.activityLog.length > ACTIVITY_CAP) {
-      this.activityLog.splice(0, this.activityLog.length - ACTIVITY_CAP);
+      this.activityLog = this.activityLog.slice(-ACTIVITY_CAP);
     }
     this.markDirty();
   }
@@ -329,7 +329,10 @@ class CanStore {
             if (numeric !== undefined) {
               const points = this.signalHistory.get(key)!;
               points.push({ ts: f.ts, value: numeric });
-              if (points.length > HISTORY_CAP) points.splice(0, points.length - HISTORY_CAP);
+              if (points.length > HISTORY_CAP) {
+                // slice is cheaper than splice(0,n) which memmoves 10k entries
+                this.signalHistory.set(key, points.slice(-HISTORY_CAP));
+              }
             }
           }
         }
@@ -345,12 +348,12 @@ class CanStore {
     let stale = 0;
     while (stale < this.trace.length && this.trace[stale].ts < cutoff) stale++;
     if (stale > 0) {
-      this.trace.splice(0, stale);
+      this.trace = this.trace.slice(stale);
       this._revealedCount = Math.max(0, this._revealedCount - stale);
     }
     if (this.trace.length > TRACE_CAP) {
       const excess = this.trace.length - TRACE_CAP;
-      this.trace.splice(0, excess);
+      this.trace = this.trace.slice(excess);
       this._revealedCount = Math.max(0, this._revealedCount - excess);
     }
     this.markDirty();

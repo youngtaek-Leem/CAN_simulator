@@ -449,11 +449,12 @@ class OtaTesterDownloadManager:
                 self._state = _STATE_IDLE
         return self.status()
 
-    def status(self) -> dict:
-        return self.get_status_dict()
+    def status(self, tail: int | None = None) -> dict:
+        return self.get_status_dict(tail=tail)
 
-    def get_status_dict(self) -> dict:
+    def get_status_dict(self, tail: int | None = None) -> dict:
         with self._lock:
+            events = self._events[-tail:] if tail is not None else self._events[-MAX_EVENTS:]
             cases_info = [
                 {
                     "id": c["id"],
@@ -479,7 +480,7 @@ class OtaTesterDownloadManager:
                 "current_step_index": self._current_step_index,
                 "total_steps_in_case": len(self._current_case["steps"]) if self._current_case else 0,
                 "progress": dict(self._progress),
-                "events": self.events,
+                "events": list(events),
                 "error": self._error_message,
             }
 
@@ -549,6 +550,10 @@ class OtaTesterDownloadManager:
         finally:
             with self._lock:
                 self._running = False
+            try:
+                self._can_manager.clear_rx()
+            except Exception:
+                pass
 
     def _run_case_steps(self, case: dict) -> bool:
         if self._auto_logger is not None:
@@ -945,7 +950,7 @@ class OtaTesterDownloadManager:
             bytes_sent = offset + len(chunk) - seek_addr
             pct = min(100.0, (bytes_sent / total_size) * 100.0)
             self._update_progress(current_block=seq_num, percent=round(pct, 1))
-            if seq_num % 10 == 0:
+            if seq_num % 50 == 0:
                 self._log(level="INFO", msg=f"전송 진도: 0x{offset + len(chunk):X}/0x{end_offset:X} bytes ({pct:.1f}%)")
 
         self._log(level="INFO", msg=f"TransferData 완료: {last_seq} blocks, {total_size} bytes (0x{seek_addr:X} -> 0x{end_offset:X})")

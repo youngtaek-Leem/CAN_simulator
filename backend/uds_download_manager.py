@@ -318,9 +318,10 @@ class UdsDownloadManager:
                 self._state = STATE_IDLE
         return self.status()
 
-    def status(self) -> dict:
-        """Full status snapshot."""
+    def status(self, tail: int | None = None) -> dict:
+        """Full status snapshot. If tail is set, only last `tail` events are returned."""
         with self._lock:
+            events = self._events[-tail:] if tail is not None else list(self._events)
             return {
                 "state": self._state,
                 "running": self._running,
@@ -330,7 +331,7 @@ class UdsDownloadManager:
                 "binary_filename": os.path.basename(self._binary_path) if self._binary_path else None,
                 "binary_size": len(self._binary_data) if self._binary_data else 0,
                 "progress": dict(self._progress),
-                "events": list(self._events),
+                "events": list(events),
                 "error": self._error_message,
                 "comm_info": {
                     "request_id": self._procedure.request_id if self._procedure else 0,
@@ -696,6 +697,10 @@ class UdsDownloadManager:
                 self._running = False
             if self._auto_logger is not None:
                 self._auto_logger.stop(success=(self._state == STATE_COMPLETED))
+            try:
+                self._can_manager.clear_rx()
+            except Exception:
+                pass
 
     def _run_procedure(self, selected_steps: Optional[list[int]], modified_params: Optional[dict[str, dict]]) -> None:
         proc = self._procedure
@@ -1092,7 +1097,7 @@ class UdsDownloadManager:
                 percent=round(pct, 1),
             )
 
-            if seq_num % 10 == 0:
+            if seq_num % 50 == 0:
                 self._log(level="INFO", msg=f"전송 진도: 0x{offset:X}/0x{end_offset:X} bytes ({pct:.1f}%)")
 
         self._log(level="INFO", msg=f"TransferData 완료: {total_blocks} blocks, {total_size} bytes (0x{seek_addr:X} → 0x{end_offset:X})")
@@ -1157,9 +1162,9 @@ class MultiUdsDownloadManager:
             raise ValueError(f"잘못된 슬롯 index: {slot_index}")
         return self._managers[slot_index]
 
-    def all_status(self) -> list[dict]:
+    def all_status(self, tail: int | None = None) -> list[dict]:
         """Return status for all 3 slots."""
-        return [m.status() for m in self._managers]
+        return [m.status(tail=tail) for m in self._managers]
 
     def all_steps(self) -> list[Optional[list[dict]]]:
         """Return procedure steps for all 3 slots."""

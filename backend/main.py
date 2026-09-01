@@ -284,7 +284,7 @@ async def _diag_timing_middleware(request, call_next):
 # ---- WebSocket: RX stream + status ------------------------------------
 
 
-def _frame_to_dict(msg) -> dict:
+def _frame_to_dict(msg, do_decode: bool = True) -> dict:
     d = {
         "ts": msg.timestamp,
         "id": msg.arbitration_id,
@@ -294,9 +294,10 @@ def _frame_to_dict(msg) -> dict:
         "fd": msg.is_fd,
         "brs": msg.bitrate_switch,
     }
-    decoded = dbc_service.decode(msg.arbitration_id, bytes(msg.data))
-    if decoded:
-        d["decoded"] = decoded
+    if do_decode and dbc_service.loaded:
+        decoded = dbc_service.decode(msg.arbitration_id, bytes(msg.data))
+        if decoded:
+            d["decoded"] = decoded
     return d
 
 
@@ -304,12 +305,11 @@ async def _broadcast(payload: dict) -> None:
     if not ws_clients:
         return
     text = json.dumps(payload)
-    dead = []
-    for ws in ws_clients:
-        try:
-            await ws.send_text(text)
-        except Exception:
-            dead.append(ws)
+    # parallel send to avoid head-of-line blocking on slow clients
+    results = await asyncio.gather(
+        *[ws.send_text(text) for ws in list(ws_clients)], return_exceptions=True
+    )
+    dead = [ws for ws, r in zip(list(ws_clients), results) if isinstance(r, Exception)]
     for ws in dead:
         ws_clients.discard(ws)
 
@@ -337,8 +337,11 @@ async def _broadcast_loop() -> None:
         if not run_state["running"]:
             frames = []  # discard RX while globally stopped
         if frames and ws_clients:
+            # decode throttling: at 600µs burst, decoding 2000 frames stalls loop
+            # only decode first 500 when overloaded, rest as raw
+            do_decode_limit = 500
             await _broadcast(
-                {"type": "rx", "frames": [_frame_to_dict(m) for m in frames]}
+                {"type": "rx", "frames": [_frame_to_dict(m, i < do_decode_limit) for i, m in enumerate(frames)]}
             )
         now = time.monotonic()
         if now - last_status >= 0.5:
@@ -369,6 +372,7 @@ async def websocket_endpoint(ws: WebSocket):
 
 
 def _status() -> dict:
+    # WS broadcast: keep payload small — only tail events for SWDL/OTA
     return {
         "can": can_manager.status(),
         "tx": tx_scheduler.status(),
@@ -380,8 +384,8 @@ def _status() -> dict:
         # fetched on demand via GET /api/testrunner/status, not broadcast
         # to every client every 0.5s.
         "test_runner": test_runner_service.summary(),
-        "uds": uds_download_manager.all_status(),
-        "ota_tester": ota_tester_manager.status(),
+        "uds": uds_download_manager.all_status(tail=50),
+        "ota_tester": ota_tester_manager.status(tail=100),
         "power": power_supply_service.info(),
         "audio": audio_service.info(),
         "log": log_service.status(),
@@ -1105,9 +1109,9 @@ def udswdl_set_params(req: UdsSwdlParamRequest):
 
 
 @app.get("/api/udswdl/status")
-def udswdl_status():
+def udswdl_status(tail: int | None = None):
     """Get UDS download status for all slots."""
-    return uds_download_manager.all_status()
+    return uds_download_manager.all_status(tail=tail)
 
 
 @app.get("/api/udswdl/steps")
@@ -1470,9 +1474,9 @@ OTA_TESTER_UPLOAD_DIR = BASE_DIR / "uploads" / "ota_tester"
 
 
 @app.get("/api/ota_tester/status")
-def ota_tester_status():
+def ota_tester_status(tail: int | None = None):
     """Get OTA Tester status."""
-    return ota_tester_manager.status()
+    return ota_tester_manager.status(tail=tail)
 
 
 @app.post("/api/ota_tester/case/xml_upload")

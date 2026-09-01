@@ -207,6 +207,9 @@ class CanManager:
         if self.notifier is not None:
             self.notifier.remove_listener(listener)
 
+    def clear_rx(self) -> None:
+        self._rx_buffer.clear()
+
     def drain_rx(self, max_messages: int = 2000) -> list[can.Message]:
         out = []
         for _ in range(max_messages):

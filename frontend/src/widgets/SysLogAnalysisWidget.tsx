@@ -1020,6 +1020,10 @@ function SysLogChart({
       if (end < points.length - 1) end += 1;
       if (start <= end) drawPoints = points.slice(start, end + 1);
     }
+    if (drawPoints.length > plotW * 2) {
+      const step = Math.ceil(drawPoints.length / (plotW * 2));
+      drawPoints = drawPoints.filter((_, i) => i % step === 0);
+    }
 
     if (drawPoints.length > 0) {
       ctx.save();

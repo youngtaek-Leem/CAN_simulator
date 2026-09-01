@@ -405,7 +405,12 @@ function SignalChart({
     ctx.strokeStyle = '#4b5160';
     ctx.strokeRect(plotLeft, plotTop, plotW, plotH);
 
-    const drawPoints = visibleWithPadding(points, xMin, xMax);
+    let drawPoints = visibleWithPadding(points, xMin, xMax);
+    // decimation: at 600µs burst, 10k points would otherwise draw 10k dots/lines
+    if (drawPoints.length > plotW * 2) {
+      const step = Math.ceil(drawPoints.length / (plotW * 2));
+      drawPoints = drawPoints.filter((_, i) => i % step === 0);
+    }
     if (drawPoints.length > 0) {
       ctx.save();
       ctx.beginPath();

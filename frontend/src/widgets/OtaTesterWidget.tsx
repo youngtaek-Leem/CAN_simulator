@@ -98,44 +98,42 @@ export default function OtaTesterWidget({ config }: Props) {
   const [stepsByCase, setStepsByCase] = useState<Record<string, OtaTesterStepInfo[]>>({});
   const [stepsLoading, setStepsLoading] = useState<Set<string>>(new Set());
 
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const eventsContainerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     api.otaTesterStatus().then(setStatus).catch(() => {});
   }, []);
 
-  // Poll status while running
+  // Poll status while running — self-rescheduling setTimeout to avoid overlap
   useEffect(() => {
-    if (status?.running) {
-      pollRef.current = setInterval(async () => {
-        try {
-          const s = await api.otaTesterStatus();
-          if (s) setStatus(s);
-        } catch {
-          // ignore polling errors
+    if (!status?.running) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const poll = async () => {
+      try {
+        const s = await api.otaTesterStatus();
+        if (!cancelled && s) setStatus(s);
+      } catch {
+        // ignore
+      } finally {
+        if (!cancelled && status?.running) {
+          // re-check running from latest status would be stale closure;
+          // schedule next regardless, next iteration will see if still running
+          timer = setTimeout(poll, 500);
         }
-      }, 500);
-    } else if (pollRef.current) {
-      clearInterval(pollRef.current);
-      pollRef.current = null;
-    }
-    return () => {
-      if (pollRef.current) {
-        clearInterval(pollRef.current);
-        pollRef.current = null;
       }
     };
+    timer = setTimeout(poll, 500);
+    return () => { cancelled = true; if (timer) clearTimeout(timer); };
   }, [status?.running]);
 
+  // cap DOM to last 200 events — after 15MB@600us, full list would be ~10k divs
+  const visibleEvents = (status?.events ?? []).slice(-200);
+
   useEffect(() => {
-    // scrollTop (not scrollIntoView) so only this widget's own log area
-    // scrolls -- scrollIntoView also drags the whole page's scroll
-    // position to keep the target in the viewport, which hijacked focus
-    // away from whatever other widget the user was looking at.
     const el = eventsContainerRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [status?.events]);
+  }, [visibleEvents.length]);
 
   const handleFolderSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files ?? []);
@@ -518,12 +516,15 @@ export default function OtaTesterWidget({ config }: Props) {
         </div>
       )}
 
-      {/* Event log */}
+      {/* Event log — capped to 200 for perf (full log is truncated server-side too) */}
       <div ref={eventsContainerRef} style={{
         flex: 1, overflow: 'auto', background: '#1e293b', borderRadius: 6, padding: 8,
         fontSize: 12, fontFamily: 'monospace', minHeight: 100,
       }}>
-        {st?.events?.map((ev, i) => (
+        {st && st.events && st.events.length > 200 && (
+          <div style={{ color: '#6b7280', fontSize: 10, marginBottom: 4 }}>… {st.events.length - 200} earlier events hidden (showing last 200)</div>
+        )}
+        {visibleEvents.map((ev, i) => (
           <div key={i} style={{ color: ev.level === 'ERROR' ? '#ef4444' : ev.level === 'WARN' || ev.level === 'WARNING' ? '#f59e0b' : '#94a3b8', padding: '2px 0' }}>
             <span style={{ color: '#64748b', marginRight: 8 }}>{new Date(ev.ts * 1000).toLocaleTimeString()}</span>
             {ev.service && <span style={{ color: '#3b82f6', marginRight: 6 }}>[{ev.service}]</span>}

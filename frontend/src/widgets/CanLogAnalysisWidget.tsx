@@ -122,9 +122,10 @@ export function CanLogAnalysisWidget({ config }: { config: WidgetConfig }) {
     setSelectedKeys(next);
   };
 
-  // filtered by search (signal name only)
+  // filtered by search (signal name only) — Signal별은 시그널명 순 정렬
   const searchLower = search.trim().toLowerCase();
-  const filteredSignals = searchLower ? signals.filter((s) => s.signal.toLowerCase().includes(searchLower)) : signals;
+  const filteredSignalsBase = searchLower ? signals.filter((s) => s.signal.toLowerCase().includes(searchLower)) : signals;
+  const filteredSignals = [...filteredSignalsBase].sort((a, b) => a.signal.toLowerCase().localeCompare(b.signal.toLowerCase()));
   const filteredMessages = searchLower
     ? messages.map((m) => ({ ...m, signals: m.signals.filter((s) => s.signal.toLowerCase().includes(searchLower)) })).filter((m) => m.signals.length > 0)
     : messages;
@@ -190,7 +191,7 @@ export function CanLogAnalysisWidget({ config }: { config: WidgetConfig }) {
           <input type="file" style={{ display: 'none' }} accept=".blf,.asc" disabled={busy}
             onChange={(e) => { const f = e.target.files?.[0]; e.target.value=''; if(f) uploadLog(f); }} />
         </label>
-        <span className="hint">{status?.log_filename ? `${status.log_filename} (${status.record_count}건, ${status.duration_s}s)` : 'CAN log 없음'} {status?.log_filename && !signals.length ? ' — DBC 로드 필요' : ''}</span>
+        <span className="hint">{status?.log_filename ? `${status.log_filename} (${status.record_count}건, ${status.duration_s}s)` : 'CAN log 없음'} {status?.log_filename && !signals.length ? ' — DBC 로드 필요' : ''}{busy && <span className="spinner" title="불러오는 중" />}</span>
         <span className="spacer" />
         <button className="icon-btn" title="X축 확대" onClick={() => zoomSharedX(1 / BUTTON_ZOOM_FACTOR)}>X+</button>
         <button className="icon-btn" title="X축 축소" onClick={() => zoomSharedX(BUTTON_ZOOM_FACTOR)}>X−</button>
@@ -223,9 +224,28 @@ export function CanLogAnalysisWidget({ config }: { config: WidgetConfig }) {
           <div className="syslog-id-list">
             {viewMode === 'byMessage' ? (
               filteredMessages.length === 0 ? <div className="hint">DBC 로드 또는 CAN log 업로드 필요</div> :
-              filteredMessages.map((m) => (
+              filteredMessages.map((m) => {
+                const allChecked = m.signals.length > 0 && m.signals.every((s) => selectedKeys.includes(s.key));
+                const someChecked = m.signals.some((s) => selectedKeys.includes(s.key));
+                return (
                 <div key={m.message} className="syslog-id-group">
-                  <div className="syslog-id-group-header"><span>{m.message} (0x{m.frame_id.toString(16).toUpperCase()})</span><span className="spacer" /><span className="hint">{m.count} pts</span></div>
+                  <div className="syslog-id-group-header">
+                    <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
+                      <input type="checkbox" checked={allChecked}
+                        ref={(el) => { if (el) el.indeterminate = !allChecked && someChecked; }}
+                        onChange={(e) => {
+                          const keys = m.signals.map((s) => s.key);
+                          if (e.target.checked) {
+                            const next = Array.from(new Set([...selectedKeys, ...keys]));
+                            setSelectedKeys(next);
+                          } else {
+                            const set = new Set(keys);
+                            setSelectedKeys(selectedKeys.filter((k) => !set.has(k)));
+                          }
+                        }} />
+                      <span>{m.message} (0x{m.frame_id.toString(16).toUpperCase()})</span>
+                    </label>
+                    <span className="spacer" /><span className="hint">{m.count} pts</span></div>
                   {m.signals.map((s) => (
                     <label key={s.key} className="syslog-id-row">
                       <input type="checkbox" checked={selectedKeys.includes(s.key)} onChange={() => toggleKey(s.key)} />
@@ -234,7 +254,8 @@ export function CanLogAnalysisWidget({ config }: { config: WidgetConfig }) {
                     </label>
                   ))}
                 </div>
-              ))
+                );
+              })
             ) : (
               filteredSignals.length === 0 ? <div className="hint">신호 없음</div> :
               filteredSignals.map((s) => (
@@ -327,6 +348,7 @@ function CanLogChart({ series, color, xViewRef, xVersion, notifyChange, defaultX
     for(const t of yTickValues){ const py=yToPx(t); if(py<plotTop-0.5||py>plotTop+plotH+0.5) continue; ctx.beginPath(); ctx.moveTo(plotLeft,py); ctx.lineTo(plotLeft+plotW,py); ctx.stroke(); ctx.fillText(fmtValueRaw(t,valueMode,series.choices),2,py+3); }
     ctx.strokeStyle='#4b5160'; ctx.strokeRect(plotLeft,plotTop,plotW,plotH);
     let start=points.findIndex(p=>p.x_ms>=xMin!); let drawPoints:CanLogPoint[]=[]; if(start!==-1){ if(start>0) start-=1; let end=points.length-1; while(end>=0 && points[end].x_ms>xMax!) end-=1; if(end<points.length-1) end+=1; if(start<=end) drawPoints=points.slice(start,end+1); }
+    if (drawPoints.length > plotW * 2) { const step=Math.ceil(drawPoints.length/(plotW*2)); drawPoints=drawPoints.filter((_,i)=>i%step===0); }
     if(drawPoints.length>0){
       ctx.save(); ctx.beginPath(); ctx.rect(plotLeft,plotTop,plotW,plotH); ctx.clip();
       ctx.strokeStyle=color; ctx.fillStyle=color; ctx.lineWidth=1.5; ctx.beginPath();
