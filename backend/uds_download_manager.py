@@ -698,7 +698,7 @@ class UdsDownloadManager:
             if self._auto_logger is not None:
                 self._auto_logger.stop(success=(self._state == STATE_COMPLETED))
             try:
-                self._can_manager.clear_rx()
+                self._can.clear_rx()
             except Exception:
                 pass
 

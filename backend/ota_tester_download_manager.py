@@ -551,7 +551,7 @@ class OtaTesterDownloadManager:
             with self._lock:
                 self._running = False
             try:
-                self._can_manager.clear_rx()
+                self._can.clear_rx()
             except Exception:
                 pass
 
