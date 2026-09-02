@@ -37,7 +37,7 @@ const TESTRUNNER_POLL_MS = 400; // matches TestRunnerBox's own poll cadence
 // dropped, this only paces how fast the live view catches up (see
 // revealedTrace()/tick()). A paused snapshot or the fixed-by-ID table are
 // unaffected -- both already show the true, unpaced data.
-const TRACE_REVEAL_PER_TICK = 40;
+const TRACE_REVEAL_PER_TICK = 80;
 
 export interface HistoryPoint {
   ts: number; // raw backend timestamp (seconds)

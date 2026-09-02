@@ -190,3 +190,167 @@ class CanLogService:
         self._ensure_series()
         assert self._timeline_cache is not None
         return self._timeline_cache
+
+    def generate_test_script(
+        self,
+        range_ms: dict | None,
+        dbc_messages: list[dict],
+        signal_send_type,
+        rx_node: str | None = None,
+        dbc_nodes: list[str] | None = None,
+    ) -> dict:
+        """CAN log를 시뮬레이터 TX 신호 기준 테스트 스크립트로 생성한다.
+
+        range_ms: {"a_ms": int, "b_ms": int} | None — None이면 전체, 아니면 [a,b] 구간만.
+        dbc_messages/signal_send_type은 syslog와 동일하게 DBC에서 Periodic/Event를 판정한다.
+        rx_node: 필수 설정에서 선택한 RX 노드 (예: AMP_FD / AMP_HS). None/빈문자열이면
+            호출부에서 차단해야 하나, 방어적으로 빈 결과+에러를 반환한다.
+        규칙:
+        - 시뮬레이터 TX 신호만 대상 (senders에 rx_node가 포함되지 않은 메시지)
+        - raw == invalid_raw → Invalid → 스킵
+        - Periodic: 최초 수신 또는 값이 변경되어 Valid인 경우만 생성
+        - 동일 x_ms + 동일 Message + 동일 type이면 Signals 배열로 합치기 (1개면 단일 Signal 형식)
+        - 그룹 간 delay가 1ms 이하이면 생략
+        """
+        self._ensure_series()
+        assert self._series_cache is not None
+
+        warnings: list[dict] = []
+        errors: list[dict] = []
+
+        # RX 노드 미선택 — 프론트에서 1차 차단하지만 백엔드도 방어적으로 에러 반환
+        if not rx_node:
+            errors.append({"log_id": -1, "log_name": "", "reason": "RX 노드가 선택되지 않았습니다. 필수 설정에서 RX 노드(예: AMP_FD / AMP_HS)를 선택하세요."})
+            return {"steps": [], "warnings": warnings, "errors": errors, "matched_count": 0}
+
+        # rx_node 유효성 검사 — DBC에 정의된 노드/메시지 senders에 존재하지 않으면 경고
+        available_senders: set[str] = set()
+        for m in dbc_messages:
+            for s in m.get("senders", []):
+                available_senders.add(s)
+        # dbc_nodes가 주어지면 거기도 합친 전체 노드 풀
+        all_nodes: set[str] = set(available_senders)
+        if dbc_nodes:
+            all_nodes.update(dbc_nodes)
+        if rx_node not in all_nodes:
+            # 경고: 필터 결과는 전체가 TX가 되어(아무 메시지도 rx_node를 포함하지 않음)
+            # 의도치 않은 전체 추출이 될 수 있으므로 사용자에게 알린다
+            warnings.append({
+                "log_id": -1,
+                "log_name": rx_node,
+                "matched_message": "",
+                "matched_signal": "",
+                "reason": f"선택한 RX 노드 '{rx_node}'가 현재 로드된 DBC에 존재하지 않습니다.",
+            })
+
+        # TX 메시지 필터: rx_node를 sender로 포함하지 않고 NM_로 시작하지 않는 메시지만 시뮬레이터가 송신
+        tx_msg_names = {
+            m["name"] for m in dbc_messages
+            if rx_node not in m.get("senders", []) and not m["name"].startswith("NM_")
+        }
+
+        # invalid_raw 맵
+        invalid_map: dict[str, int] = {}
+        for m in dbc_messages:
+            for s in m["signals"]:
+                invalid_map[f"{m['name']}.{s['name']}"] = s["invalid_raw"]
+
+        # range 필터
+        a_ms = b_ms = None
+        if range_ms is not None:
+            a_ms = min(range_ms["a_ms"], range_ms["b_ms"])
+            b_ms = max(range_ms["a_ms"], range_ms["b_ms"])
+
+        # 후보 점 수집: Valid만 (Periodic 변경 필터는 정렬 후 적용) — NM_ 2중 방어
+        candidates: list[dict] = []  # {x_ms, message, signal, key, value, type, seq}
+        for key, series in self._series_cache.items():
+            if series["message"].startswith("NM_"):
+                continue
+            if series["message"] not in tx_msg_names:
+                continue
+            for p in series["points"]:
+                x = p["x_ms"]
+                if a_ms is not None and not (a_ms <= x <= b_ms):
+                    continue
+                raw = p["value"]
+                invalid = invalid_map.get(key)
+                if invalid is not None and raw == invalid:
+                    continue
+                try:
+                    st = signal_send_type(series["message"], series["signal"])
+                except Exception:
+                    st = "event"
+                candidates.append({
+                    "x_ms": x,
+                    "seq": p["seq"],
+                    "message": series["message"],
+                    "signal": series["signal"],
+                    "key": key,
+                    "value": raw,
+                    "type": st,
+                })
+        candidates.sort(key=lambda c: (c["x_ms"], c["seq"]))
+        # Periodic: 최초 수신 또는 값이 변경된 경우만
+        filtered: list[dict] = []
+        last2: dict[str, int] = {}
+        for c in candidates:
+            if c["type"] == "periodic":
+                prev = last2.get(c["key"])
+                if prev is not None and prev == c["value"]:
+                    continue
+                last2[c["key"]] = c["value"]
+            else:
+                last2[c["key"]] = c["value"]
+            filtered.append(c)
+
+        # type별 grouping: 동일 x_ms + 동일 Message + 동일 type → Signals 배열
+        steps: list[dict] = []
+        matched_keys = set()
+        last_step = None
+        last_message = None
+        last_type = None
+        prev_x = None
+
+        for c in filtered:
+            x = c["x_ms"]
+            msg = c["message"]
+            sig = c["signal"]
+            typ = "CANReq" if c["type"] == "periodic" else "CANEv"
+            value_hex = f"0x{c['value']:X}"
+            matched_keys.add(c["key"])
+
+            orig_delay = None
+            if prev_x is not None:
+                orig_delay = x - prev_x
+
+            same_moment_same_message = (
+                orig_delay == 0 and last_step is not None and last_message == msg and last_type == typ
+            )
+            if same_moment_same_message:
+                assert last_step is not None
+                if "Signals" not in last_step:
+                    last_step["Signals"] = [{"Signal": last_step.pop("Signal"), "Value": last_step.pop("Value")}]
+                last_step["Signals"].append({"Signal": sig, "Value": value_hex})
+            else:
+                # 그룹 간 delay가 1ms 이하이면 생략
+                if orig_delay is not None and orig_delay > 1:
+                    steps.append({"type": "delay", "ms": orig_delay})
+                new_step = {"type": typ, "Message": msg, "Signal": sig, "Value": value_hex}
+                steps.append(new_step)
+                last_step = new_step
+                last_message = msg
+                last_type = typ
+            prev_x = x
+
+        # delay가 0으로 정규화된 경우 그룹 간 delay를 생략했으므로, 실제 delay가 1ms 이하였던 그룹 간격은 기록되지 않음
+        # 위 로직에서 delay==0인 그룹 간은 same_moment가 아니면 delay append를 건너뛰므로 생략됨
+
+        if steps:
+            steps = [{"type": "ID", "num": "1", "Cycle": 1}, *steps]
+
+        return {
+            "steps": steps,
+            "warnings": warnings,
+            "errors": errors,
+            "matched_count": len(matched_keys),
+        }

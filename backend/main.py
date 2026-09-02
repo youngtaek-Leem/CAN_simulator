@@ -1428,6 +1428,32 @@ def canlog_series(keys: str = ""):
     return can_log_service.get_series(key_list)
 
 
+class CanLogScriptRequest(BaseModel):
+    range: Optional[dict] = None  # {"a_ms": int, "b_ms": int} | None
+    rx_node: Optional[str] = None  # 필수 설정에서 선택한 RX 노드 (예: AMP_FD / AMP_HS)
+
+
+@app.post("/api/canlog/generate_script")
+def canlog_generate_script(req: CanLogScriptRequest):
+    if not dbc_service.loaded:
+        raise HTTPException(status_code=400, detail="DBC가 로드되지 않았습니다. 먼저 DBC를 업로드하세요.")
+    if not req.rx_node:
+        raise HTTPException(status_code=400, detail="RX 노드가 선택되지 않았습니다. 필수 설정에서 RX 노드(예: AMP_FD / AMP_HS)를 선택하세요.")
+    if req.range is not None:
+        try:
+            a = int(req.range.get("a_ms", 0))
+            b = int(req.range.get("b_ms", 0))
+        except Exception:
+            raise HTTPException(status_code=400, detail="range must contain a_ms and b_ms integers")
+        if a == b:
+            raise HTTPException(status_code=400, detail="커서 구간을 설정하세요 (A와 B가 같은 위치입니다)")
+    dbc_summary = dbc_service.summary()
+    return can_log_service.generate_test_script(
+        req.range, dbc_summary["messages"], dbc_service.signal_send_type,
+        rx_node=req.rx_node, dbc_nodes=dbc_summary.get("nodes"),
+    )
+
+
 # ---- Layout persistence --------------------------------------------------
 
 

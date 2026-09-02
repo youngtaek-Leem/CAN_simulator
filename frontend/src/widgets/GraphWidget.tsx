@@ -1,17 +1,12 @@
-// CAN signal graph widget: canvas-based time-series chart. Each watched
-// signal gets its own mini-chart, stacked vertically so signals with very
-// different value ranges don't fight over one shared Y axis. Since every
-// chart shares the same time axis, only the bottom-most chart draws the X
-// (time) tick labels. Each sample is drawn as a dot and consecutive samples
-// are connected by a line. Every mini-chart zooms/pans its X (time) and Y
-// (value) axes independently.
+// CAN signal graph widget: left signal picker (DBC-based) + right chart stack.
+// Left layout mirrors CanLogAnalysisWidget: "signal 이름 직접입력" + 메시지별/Signal별
+// Right shows selected signals as stacked canvas charts sharing xWindowMs.
 
-import { useEffect, useRef, useState } from 'react';
-import { createPortal } from 'react-dom';
+import { useEffect, useRef, useState, type MutableRefObject } from 'react';
 import { canStore, useCanVersion, type HistoryPoint } from '../store/canStore';
-import { useApp } from '../store/appContext';
-import { SignalPicker } from './MessageOptions';
-import type { SignalBinding, WidgetConfig } from '../types';
+import { groupedMessages, sortedMessages, useApp } from '../store/appContext';
+import { MessageFilter, type MessageFilterMode } from './MessageOptions';
+import type { WidgetConfig } from '../types';
 import {
   CURSOR_A_COLOR,
   CURSOR_B_COLOR,
@@ -63,8 +58,8 @@ const DOT_RADIUS = 2.5;
 const DEFAULT_X_WINDOW_MS = 10_000;
 const MIN_X_WINDOW_MS = 500;
 const MAX_X_WINDOW_MS = 300_000;
-const X_WINDOW_STEP_MS = 5_000; // +/- toolbar buttons change the window by this much per click
-const LIVE_TICK_MS = 200; // redraw cadence so the rolling window keeps scrolling with no new data
+const X_WINDOW_STEP_MS = 5_000;
+const LIVE_TICK_MS = 200;
 
 function getSeries(config: WidgetConfig): GraphSeries[] {
   return (config.options.series as GraphSeries[] | undefined) ?? [];
@@ -84,7 +79,6 @@ function niceTicks(min: number, max: number, count: number): number[] {
   return Array.from({ length: count + 1 }, (_, i) => min + step * i);
 }
 
-/** Y-axis tick label -- integers only (data/auto-fit math stays float), in either hex or decimal. */
 function fmtValue(v: number, mode: 'hex' | 'dec'): string {
   const n = Math.round(v);
   if (mode === 'dec') return n.toString();
@@ -92,7 +86,6 @@ function fmtValue(v: number, mode: 'hex' | 'dec'): string {
   return n < 0 ? `-0x${abs}` : `0x${abs}`;
 }
 
-/** X-axis rolling window size for display next to the +/- zoom buttons. */
 function fmtWindow(ms: number): string {
   return ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(1)}s`;
 }
@@ -101,9 +94,6 @@ function orFallback(x: number | null, fallback: number): number {
   return x === null ? fallback : x;
 }
 
-/** Points inside [xMin, xMax], plus one point just outside each edge (if any)
- * so the connecting line draws smoothly up to the clip boundary instead of
- * visibly starting/ending flat at the first/last in-range sample. */
 function visibleWithPadding(points: HistoryPoint[], xMin: number, xMax: number): HistoryPoint[] {
   let start = points.findIndex((p) => canStore.relMs(p.ts) >= xMin);
   if (start === -1) return [];
@@ -117,22 +107,50 @@ function visibleWithPadding(points: HistoryPoint[], xMin: number, xMax: number):
 
 export function GraphWidget({ config }: { config: WidgetConfig }) {
   useCanVersion();
-  const { editMode, updateWidget } = useApp();
+  const { dbc, updateWidget } = useApp();
   const series = getSeries(config);
-  const [showAdd, setShowAdd] = useState(false);
-  // X-axis rolling window size, shared by every mini-chart in this widget so
-  // the top +/- buttons zoom all of them identically.
   const [xWindowMs, setXWindowMs] = useState(DEFAULT_X_WINDOW_MS);
+  const [search, setSearch] = useState('');
+  const [msgFilter, setMsgFilter] = useState<MessageFilterMode>('all');
+  const viewMode = (config.options.viewMode as 'byMessage' | 'bySignal' | undefined) ?? 'byMessage';
+  const setViewMode = (m: 'byMessage' | 'bySignal') =>
+    updateWidget({ ...config, options: { ...config.options, viewMode: m } });
 
-  const addSeries = (s: GraphSeries) => {
-    updateWidget({ ...config, options: { ...config.options, series: [...series, s] } });
+  const existingKeys = new Set(series.map(seriesKey));
+
+  const toggleKey = (key: string) => {
+    if (existingKeys.has(key)) {
+      canStore.unwatchSignal(key);
+      updateWidget({ ...config, options: { ...config.options, series: series.filter((s) => seriesKey(s) !== key) } });
+    } else {
+      const [msg, sig] = key.split('.');
+      const next = [...series, { message: msg, signal: sig, color: nextColor(series) }];
+      updateWidget({ ...config, options: { ...config.options, series: next } });
+    }
   };
+
+  const toggleMessage = (m: { name: string; signals: { name: string }[] }, checked: boolean) => {
+    const keys = m.signals.map((s) => `${m.name}.${s.name}`);
+    if (checked) {
+      const toAdd = keys.filter((k) => !existingKeys.has(k));
+      if (toAdd.length === 0) return;
+      const next = [...series];
+      for (const k of toAdd) {
+        const [msg, sig] = k.split('.');
+        next.push({ message: msg, signal: sig, color: nextColor(next) });
+      }
+      updateWidget({ ...config, options: { ...config.options, series: next } });
+    } else {
+      const removeSet = new Set(keys);
+      const next = series.filter((s) => !removeSet.has(seriesKey(s)));
+      for (const k of keys) if (existingKeys.has(k)) canStore.unwatchSignal(k);
+      updateWidget({ ...config, options: { ...config.options, series: next } });
+    }
+  };
+
   const removeSeries = (key: string) => {
-    canStore.unwatchSignal(key); // drop history immediately, not just on unmount
-    updateWidget({
-      ...config,
-      options: { ...config.options, series: series.filter((s) => seriesKey(s) !== key) },
-    });
+    canStore.unwatchSignal(key);
+    updateWidget({ ...config, options: { ...config.options, series: series.filter((s) => seriesKey(s) !== key) } });
   };
   const moveSeries = (index: number, dir: -1 | 1) => {
     const target = index + dir;
@@ -145,10 +163,6 @@ export function GraphWidget({ config }: { config: WidgetConfig }) {
     setXWindowMs((w) => Math.min(MAX_X_WINDOW_MS, Math.max(MIN_X_WINDOW_MS, w + deltaMs)));
   };
 
-  // Difference cursor: two draggable vertical lines (relMs), drawn on every
-  // mini-chart via its own independent X view -- each chart still resolves
-  // the same ms value to the right pixel through its own xToPx, so the lines
-  // line up across charts even though each chart's zoom/pan is independent.
   const [cursorMode, setCursorMode] = useState(false);
   const [cursorA, setCursorA] = useState<number | null>(null);
   const [cursorB, setCursorB] = useState<number | null>(null);
@@ -168,10 +182,76 @@ export function GraphWidget({ config }: { config: WidgetConfig }) {
   const cursor: DiffCursorState = { mode: cursorMode, a: cursorA, b: cursorB, onMove: onCursorMove };
   const cursorDeltaMs = cursorA !== null && cursorB !== null ? Math.abs(cursorB - cursorA) : null;
 
+  const rxNode = canStore.getRxNode();
+  const searchLower = search.trim().toLowerCase();
+  const allMessages = (() => {
+    if (!dbc.messages) return [];
+    const { tx, rx, grouped } = groupedMessages(dbc, rxNode);
+    if (msgFilter === 'tx') return tx;
+    if (msgFilter === 'rx') return rx;
+    if (!grouped) return sortedMessages(dbc);
+    return sortedMessages(dbc);
+  })();
+  const filteredMessages = searchLower
+    ? allMessages
+        .map((m) => ({ ...m, signals: m.signals.filter((s) => s.name.toLowerCase().includes(searchLower)) }))
+        .filter((m) => m.signals.length > 0)
+    : allMessages.map((m) => ({ ...m }));
+  const allSignalsFlat = (() => {
+    const list: { key: string; message: string; signal: string; length: number; send_type: string; frame_id: number }[] = [];
+    for (const m of allMessages) for (const s of m.signals) list.push({ key: `${m.name}.${s.name}`, message: m.name, signal: s.name, length: s.length, send_type: s.send_type, frame_id: m.frame_id });
+    return list;
+  })();
+  const filteredSignalsBase = searchLower ? allSignalsFlat.filter((s) => s.signal.toLowerCase().includes(searchLower)) : allSignalsFlat;
+  const filteredSignals = [...filteredSignalsBase].sort((a, b) => a.signal.toLowerCase().localeCompare(b.signal.toLowerCase()));
+
+  const graphsColRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = graphsColRef.current;
+    if (!el) return;
+    const blockPageZoomOnCtrlWheel = (e: WheelEvent) => {
+      if (e.ctrlKey) e.preventDefault();
+    };
+    el.addEventListener('wheel', blockPageZoomOnCtrlWheel, { passive: false });
+    return () => el.removeEventListener('wheel', blockPageZoomOnCtrlWheel);
+  }, []);
+
+  const dragIdRef = useRef<string | null>(null);
+  const [dragOverId, setDragOverId] = useState<string | null>(null);
+  const handleChartDragStart = (key: string) => (e: React.DragEvent) => {
+    dragIdRef.current = key;
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/plain', key);
+  };
+  const handleChartDragOver = (key: string) => (e: React.DragEvent) => {
+    if (dragIdRef.current === null || dragIdRef.current === key) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    setDragOverId(key);
+  };
+  const handleChartDrop = (key: string) => (e: React.DragEvent) => {
+    e.preventDefault();
+    const dragged = dragIdRef.current;
+    dragIdRef.current = null;
+    setDragOverId(null);
+    if (dragged === null || dragged === key) return;
+    const from = series.findIndex((s) => seriesKey(s) === dragged);
+    const to = series.findIndex((s) => seriesKey(s) === key);
+    if (from === -1 || to === -1) return;
+    const next = [...series];
+    const [moved] = next.splice(from, 1);
+    next.splice(to, 0, moved);
+    updateWidget({ ...config, options: { ...config.options, series: next } });
+  };
+  const handleChartDragEnd = () => {
+    dragIdRef.current = null;
+    setDragOverId(null);
+  };
+
   return (
-    <div className="graph-widget">
+    <div className="syslog-widget">
       <div className="graph-toolbar">
-        <span className="hint">{series.length > 0 ? `${series.length}개 신호` : '신호를 추가하세요'}</span>
+        <span className="hint">{series.length > 0 ? `${series.length}개 신호` : '신호를 선택하세요'}</span>
         <span className="spacer" />
         <span className="graph-xwindow mono">{fmtWindow(xWindowMs)}</span>
         <button className="icon-btn" title="X축 축소 (시간 범위 5초 넓게)" onClick={() => zoomXWindow(X_WINDOW_STEP_MS)}>
@@ -180,11 +260,7 @@ export function GraphWidget({ config }: { config: WidgetConfig }) {
         <button className="icon-btn" title="X축 확대 (시간 범위 5초 좁게)" onClick={() => zoomXWindow(-X_WINDOW_STEP_MS)}>
           +
         </button>
-        <button
-          className={`small-btn ${cursorMode ? 'primary' : ''}`}
-          title="차트에서 드래그해 두 커서를 움직이면 그 사이의 시간 간격을 읽을 수 있습니다"
-          onClick={toggleCursorMode}
-        >
+        <button className={`small-btn ${cursorMode ? 'primary' : ''}`} title="차트에서 드래그해 두 커서를 움직이면 그 사이의 시간 간격을 읽을 수 있습니다" onClick={toggleCursorMode}>
           커서 {cursorMode ? 'ON' : 'OFF'}
         </button>
         {cursorMode && cursorDeltaMs !== null && (
@@ -195,39 +271,213 @@ export function GraphWidget({ config }: { config: WidgetConfig }) {
             {`: Δ ${fmtDelta(cursorDeltaMs)}`}
           </span>
         )}
-        {editMode && (
-          <button className="small-btn" onClick={() => setShowAdd(true)}>
-            + 신호 추가
-          </button>
-        )}
       </div>
-      <div className="graph-charts-col">
-        {series.map((s, i) => (
-          <SignalChart
-            key={seriesKey(s)}
-            series={s}
-            editMode={editMode}
-            showXAxis={i === series.length - 1}
-            xWindowMs={xWindowMs}
-            cursor={cursor}
-            onRemove={() => removeSeries(seriesKey(s))}
-            onMoveUp={() => moveSeries(i, -1)}
-            onMoveDown={() => moveSeries(i, 1)}
-            canMoveUp={i > 0}
-            canMoveDown={i < series.length - 1}
-          />
-        ))}
+      <div className="syslog-body">
+        <div className="syslog-idlist">
+          <div className="syslog-section-title">CAN Signal 검색</div>
+          <input className="layout-input" style={{ width: '100%', marginBottom: 6 }} placeholder="signal 이름 직접 입력 (부분 일치)" value={search} onChange={(e) => setSearch(e.target.value)} />
+          {searchLower && (
+            <div className="syslog-id-list" style={{ maxHeight: 140, marginBottom: 8 }}>
+              {filteredSignals.length === 0 && <div className="hint">일치하는 signal 없음</div>}
+              {filteredSignals.map((s) => {
+                const checked = existingKeys.has(s.key);
+                return (
+                  <label key={s.key} className="syslog-id-row">
+                    <input type="checkbox" checked={checked} onChange={() => toggleKey(s.key)} />
+                    <span className="syslog-id-name" title={s.key}>
+                      {s.signal}
+                    </span>
+                    <span className="hint" style={{ fontSize: 10 }}>
+                      {s.message}
+                    </span>
+                  </label>
+                );
+              })}
+            </div>
+          )}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 6 }}>
+            <MessageFilter value={msgFilter} onChange={setMsgFilter} />
+          </div>
+          <div className="syslog-section-title">
+            <label>
+              <input type="radio" checked={viewMode === 'byMessage'} onChange={() => setViewMode('byMessage')} /> 메시지별
+            </label>
+            <label style={{ marginLeft: 8 }}>
+              <input type="radio" checked={viewMode === 'bySignal'} onChange={() => setViewMode('bySignal')} /> Signal별
+            </label>
+          </div>
+          <div className="syslog-id-list">
+            {!dbc.loaded ? (
+              <div className="hint">DBC를 업로드하세요.</div>
+            ) : viewMode === 'byMessage' ? (
+              filteredMessages.length === 0 ? (
+                <div className="hint">일치하는 신호 없음</div>
+              ) : (
+                filteredMessages.map((m) => {
+                  const selectableKeys = m.signals.map((s) => `${m.name}.${s.name}`);
+                  const allChecked = selectableKeys.length > 0 && selectableKeys.every((k) => existingKeys.has(k));
+                  const someChecked = selectableKeys.some((k) => existingKeys.has(k)) && !allChecked;
+                  const countHint = `${m.signals.length} signals`;
+                  return (
+                    <div key={m.name} className="syslog-id-group">
+                      <div className="syslog-id-group-header">
+                        <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
+                          <input
+                            type="checkbox"
+                            checked={allChecked}
+                            ref={(el) => {
+                              if (el) el.indeterminate = someChecked;
+                            }}
+                            onChange={(e) => toggleMessage(m as unknown as { name: string; signals: { name: string }[] }, e.target.checked)}
+                          />
+                          <span>
+                            {m.name} (0x{m.frame_id.toString(16).toUpperCase()})
+                          </span>
+                        </label>
+                        <span className="spacer" />
+                        <span className="hint">{countHint}</span>
+                      </div>
+                      {m.signals.map((s) => {
+                        const key = `${m.name}.${s.name}`;
+                        const checked = existingKeys.has(key);
+                        return (
+                          <label key={key} className="syslog-id-row">
+                            <input type="checkbox" checked={checked} onChange={() => toggleKey(key)} />
+                            <span className="syslog-id-name" title={key}>
+                              {s.name}
+                            </span>
+                            <span className="hint" style={{ fontSize: 10 }}>
+                              {s.length}bit {s.send_type}
+                            </span>
+                          </label>
+                        );
+                      })}
+                    </div>
+                  );
+                })
+              )
+            ) : filteredSignals.length === 0 ? (
+              <div className="hint">신호 없음</div>
+            ) : (
+              filteredSignals.map((s) => {
+                const checked = existingKeys.has(s.key);
+                return (
+                  <label key={s.key} className="syslog-id-row">
+                    <input type="checkbox" checked={checked} onChange={() => toggleKey(s.key)} />
+                    <span className="syslog-id-name" title={s.key}>
+                      {s.signal}
+                    </span>
+                    <span className="hint" style={{ fontSize: 10 }}>
+                      {s.message} · {s.length}bit {s.send_type}
+                    </span>
+                  </label>
+                );
+              })
+            )}
+          </div>
+        </div>
+        <div className="syslog-graphs-wrap">
+          <div className="graph-charts-col syslog-graphs" ref={graphsColRef}>
+            {series.length === 0 && <div className="hint">왼쪽에서 signal을 선택하세요.</div>}
+            {series.map((s, i) => (
+              <SignalChart
+                key={seriesKey(s)}
+                series={s}
+                showXAxis={i === series.length - 1}
+                xWindowMs={xWindowMs}
+                cursor={cursor}
+                onRemove={() => removeSeries(seriesKey(s))}
+                onMoveUp={() => moveSeries(i, -1)}
+                onMoveDown={() => moveSeries(i, 1)}
+                canMoveUp={i > 0}
+                canMoveDown={i < series.length - 1}
+                isDragOver={dragOverId === seriesKey(s)}
+                onDragStart={handleChartDragStart(seriesKey(s))}
+                onDragOver={handleChartDragOver(seriesKey(s))}
+                onDrop={handleChartDrop(seriesKey(s))}
+                onDragEnd={handleChartDragEnd}
+              />
+            ))}
+          </div>
+          <VerticalScrollbar targetRef={graphsColRef} />
+        </div>
       </div>
-      {showAdd && <AddSeriesModal existing={series} onAdd={addSeries} onClose={() => setShowAdd(false)} />}
+    </div>
+  );
+}
+
+function VerticalScrollbar({ targetRef }: { targetRef: MutableRefObject<HTMLDivElement | null> }) {
+  const trackRef = useRef<HTMLDivElement>(null);
+  const [trackH, setTrackH] = useState(1);
+  const [metrics, setMetrics] = useState({ scrollTop: 0, scrollHeight: 1, clientHeight: 1 });
+  const draggingRef = useRef<{ startY: number; startScrollTop: number } | null>(null);
+  useEffect(() => {
+    const el = trackRef.current;
+    if (!el) return;
+    const m = () => setTrackH(el.clientHeight);
+    m();
+    const ro = new ResizeObserver(m);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+  useEffect(() => {
+    const el = targetRef.current;
+    if (!el) return;
+    const read = () => setMetrics({ scrollTop: el.scrollTop, scrollHeight: el.scrollHeight, clientHeight: el.clientHeight });
+    read();
+    el.addEventListener('scroll', read);
+    const ro = new ResizeObserver(read);
+    ro.observe(el);
+    const mo = new MutationObserver(read);
+    mo.observe(el, { childList: true, subtree: true });
+    return () => {
+      el.removeEventListener('scroll', read);
+      ro.disconnect();
+      mo.disconnect();
+    };
+  }, [targetRef]);
+  const { scrollTop, scrollHeight, clientHeight } = metrics;
+  const scrollableH = scrollHeight - clientHeight;
+  const canScroll = scrollableH > 1;
+  const thumbH = canScroll ? Math.max(24, (clientHeight / scrollHeight) * trackH) : trackH;
+  const maxThumbTop = Math.max(0, trackH - thumbH);
+  const thumbTop = canScroll && maxThumbTop > 0 ? (scrollTop / scrollableH) * maxThumbTop : 0;
+  const onThumbDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    e.currentTarget.setPointerCapture(e.pointerId);
+    draggingRef.current = { startY: e.clientY, startScrollTop: scrollTop };
+  };
+  const onThumbMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    const d = draggingRef.current;
+    const el = targetRef.current;
+    if (!d || !el || maxThumbTop <= 0) return;
+    const dy = e.clientY - d.startY;
+    const delta = (dy / maxThumbTop) * scrollableH;
+    el.scrollTop = Math.min(scrollableH, Math.max(0, d.startScrollTop + delta));
+  };
+  const onThumbUp = () => {
+    draggingRef.current = null;
+  };
+  const onTrackDown = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (e.target !== e.currentTarget || !canScroll) return;
+    const el = targetRef.current;
+    if (!el) return;
+    const rect = e.currentTarget.getBoundingClientRect();
+    const clickY = e.clientY - rect.top;
+    const targetTop = Math.min(maxThumbTop, Math.max(0, clickY - thumbH / 2));
+    el.scrollTop = maxThumbTop > 0 ? (targetTop / maxThumbTop) * scrollableH : 0;
+  };
+  return (
+    <div className="syslog-scrollbar-track" ref={trackRef} onPointerDown={onTrackDown}>
+      {canScroll && <div className="syslog-scrollbar-thumb" style={{ top: thumbTop, height: thumbH }} onPointerDown={onThumbDown} onPointerMove={onThumbMove} onPointerUp={onThumbUp} onPointerLeave={onThumbUp} />}
     </div>
   );
 }
 
 // One independent mini-chart for a single signal: own canvas, own X/Y view
-// (zoom + pan), own history subscription.
 function SignalChart({
   series,
-  editMode,
   showXAxis,
   xWindowMs,
   cursor,
@@ -236,9 +486,13 @@ function SignalChart({
   onMoveDown,
   canMoveUp,
   canMoveDown,
+  isDragOver,
+  onDragStart,
+  onDragOver,
+  onDrop,
+  onDragEnd,
 }: {
   series: GraphSeries;
-  editMode: boolean;
   showXAxis: boolean;
   xWindowMs: number;
   cursor: DiffCursorState;
@@ -247,6 +501,11 @@ function SignalChart({
   onMoveDown: () => void;
   canMoveUp: boolean;
   canMoveDown: boolean;
+  isDragOver?: boolean;
+  onDragStart?: (e: React.DragEvent) => void;
+  onDragOver?: (e: React.DragEvent) => void;
+  onDrop?: (e: React.DragEvent) => void;
+  onDragEnd?: () => void;
 }) {
   useCanVersion();
   const key = seriesKey(series);
@@ -285,8 +544,6 @@ function SignalChart({
     return () => ro.disconnect();
   }, []);
 
-  // keep the rolling window scrolling forward even when this signal (or the
-  // whole bus) goes quiet for a while, instead of freezing on the last sample
   useEffect(() => {
     const id = setInterval(() => {
       if (viewRef.current.xMin === null) redraw();
@@ -322,8 +579,6 @@ function SignalChart({
     redraw();
   };
 
-  // ---- drawing -----------------------------------------------------------
-
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) return;
@@ -347,8 +602,6 @@ function SignalChart({
 
     const points = canStore.signalHistory.get(key) ?? [];
 
-    // X: live mode rolls a fixed-size window forward with "now"; once the
-    // user wheel-zooms/drags, xMin/xMax are frozen to a specific range.
     let xMin = viewRef.current.xMin;
     let xMax = viewRef.current.xMax;
     if (xMin === null || xMax === null) {
@@ -356,8 +609,6 @@ function SignalChart({
       xMin = xMax - xWindowMs;
     }
 
-    // Y auto-fit only looks at samples inside the visible X window, not the
-    // whole history, so old outliers don't flatten what's on screen now.
     const visible = points.filter((p) => {
       const x = canStore.relMs(p.ts);
       return x >= xMin! && x <= xMax!;
@@ -371,7 +622,7 @@ function SignalChart({
         const lo = Math.min(...ys);
         const hi = Math.max(...ys);
         const pad = (hi - lo) * 0.1 || Math.abs(hi) * 0.1 || 1;
-        yMin = Math.max(0, lo - pad); // auto-fit never dips below 0
+        yMin = Math.max(0, lo - pad);
         yMax = hi + pad;
       } else {
         yMin = 0;
@@ -406,7 +657,6 @@ function SignalChart({
     ctx.strokeRect(plotLeft, plotTop, plotW, plotH);
 
     let drawPoints = visibleWithPadding(points, xMin, xMax);
-    // decimation: at 600µs burst, 10k points would otherwise draw 10k dots/lines
     if (drawPoints.length > plotW * 2) {
       const step = Math.ceil(drawPoints.length / (plotW * 2));
       drawPoints = drawPoints.filter((_, i) => i % step === 0);
@@ -421,9 +671,6 @@ function SignalChart({
       ctx.fillStyle = series.color;
       ctx.lineWidth = 1.5;
       ctx.beginPath();
-      // Step-after (horizontal-then-vertical) line: a CAN signal holds its
-      // value until the next sample, so a straight diagonal between samples
-      // would misleadingly show it "in transit" -- draw a staircase instead.
       let prevPy = 0;
       drawPoints.forEach((p: HistoryPoint, i: number) => {
         const px = xToPx(canStore.relMs(p.ts));
@@ -450,12 +697,8 @@ function SignalChart({
 
     drawDiffCursors(ctx, cursor, xMin, xMax, plotTop, plotH, xToPx);
 
-    // stash the resolved (possibly auto-fit) range + plot geometry for the
-    // wheel/drag handlers below, without triggering another render
     lastGeomRef.current = { xMin, xMax, yMin, yMax, plotLeft, plotTop, plotW, plotH };
   });
-
-  // ---- interaction: wheel-zoom (per-axis) + drag-to-pan -------------------
 
   const onWheel = (e: React.WheelEvent<HTMLCanvasElement>) => {
     e.preventDefault();
@@ -469,15 +712,11 @@ function SignalChart({
     const overXAxisStrip = px >= g.plotLeft && px <= g.plotLeft + g.plotW && py > g.plotTop + g.plotH;
     const overYAxisStrip = py >= g.plotTop && py <= g.plotTop + g.plotH && px < g.plotLeft;
 
-    // Plot-area wheel zoom is X-only -- Y still zooms when the wheel is over
-    // the left Y-axis strip, but no longer also inside the plot itself.
     const zoomX = overXAxisStrip || (inX && inY);
     const zoomY = overYAxisStrip;
     const v = viewRef.current;
 
     if (zoomX) {
-      // freeze this chart's own view at the cursor-anchored zoom level; the
-      // shared rolling window (top +/- buttons) is unaffected
       const cursorX = g.xMin + ((px - g.plotLeft) / g.plotW) * (g.xMax - g.xMin);
       const xMin = v.xMin ?? g.xMin;
       const xMax = v.xMax ?? g.xMax;
@@ -500,7 +739,7 @@ function SignalChart({
     const px = e.clientX - rect.left;
     const py = e.clientY - rect.top;
     if (px < g.plotLeft || px > g.plotLeft + g.plotW || py < g.plotTop || py > g.plotTop + g.plotH) {
-      return; // only pan when starting inside the plot area
+      return;
     }
     (e.target as HTMLCanvasElement).setPointerCapture(e.pointerId);
     if (cursor.mode) {
@@ -550,18 +789,14 @@ function SignalChart({
   };
 
   return (
-    <div className="graph-chart">
-      <div className="graph-chart-header">
+    <div className={`graph-chart${isDragOver ? ' syslog-chart-dragover' : ''}`} onDragOver={onDragOver} onDrop={onDrop}>
+      <div className="graph-chart-header syslog-chart-header-draggable" draggable onDragStart={onDragStart} onDragEnd={onDragEnd} title="드래그해서 그래프 순서 바꾸기">
         <span className="graph-swatch" style={{ background: series.color }} />
         <span className="graph-chart-title" title={`${series.message}.${series.signal}`}>
           {series.signal}
         </span>
         <span className="spacer" />
-        <button
-          className="icon-btn"
-          title="Y값 표시 형식(16진수/10진수) 전환"
-          onClick={() => setValueMode((m) => (m === 'hex' ? 'dec' : 'hex'))}
-        >
+        <button className="icon-btn" title="Y값 표시 형식(16진수/10진수) 전환" onClick={() => setValueMode((m) => (m === 'hex' ? 'dec' : 'hex'))}>
           {valueMode === 'hex' ? 'HEX' : 'DEC'}
         </button>
         <button className="icon-btn" title="X축 확대" onClick={() => zoomXButton(1 / BUTTON_ZOOM_FACTOR)}>
@@ -579,19 +814,15 @@ function SignalChart({
         <button className="icon-btn" title="X/Y 축 자동 맞춤으로 리셋" onClick={resetView}>
           ⟲
         </button>
-        {editMode && (
-          <>
-            <button className="icon-btn" title="위로 이동" disabled={!canMoveUp} onClick={onMoveUp}>
-              ▲
-            </button>
-            <button className="icon-btn" title="아래로 이동" disabled={!canMoveDown} onClick={onMoveDown}>
-              ▼
-            </button>
-            <button className="icon-btn" title="제거" onClick={onRemove}>
-              ✕
-            </button>
-          </>
-        )}
+        <button className="icon-btn" title="위로 이동" disabled={!canMoveUp} onClick={onMoveUp}>
+          ▲
+        </button>
+        <button className="icon-btn" title="아래로 이동" disabled={!canMoveDown} onClick={onMoveDown}>
+          ▼
+        </button>
+        <button className="icon-btn" title="제거" onClick={onRemove}>
+          ✕
+        </button>
       </div>
       <div className="graph-canvas-wrap" ref={wrapRef}>
         <canvas
@@ -604,49 +835,5 @@ function SignalChart({
         />
       </div>
     </div>
-  );
-}
-
-function AddSeriesModal({
-  existing,
-  onAdd,
-  onClose,
-}: {
-  existing: GraphSeries[];
-  onAdd: (s: GraphSeries) => void;
-  onClose: () => void;
-}) {
-  const { dbc } = useApp();
-  const [binding, setBinding] = useState<SignalBinding | undefined>(undefined);
-
-  const add = () => {
-    if (!binding?.message || !binding.signal) return;
-    onAdd({ message: binding.message, signal: binding.signal, color: nextColor(existing) });
-    onClose();
-  };
-
-  return createPortal(
-    <div className="modal-backdrop" onClick={onClose}>
-      <div className="modal" onClick={(e) => e.stopPropagation()}>
-        <h3>그래프에 신호 추가</h3>
-        {!dbc.loaded && <p className="hint">신호 할당을 하려면 먼저 DBC를 업로드하세요.</p>}
-        {dbc.loaded && (
-          <SignalPicker
-            dbc={dbc}
-            rxNode={canStore.getRxNode()}
-            binding={binding}
-            onChange={setBinding}
-            messageLabelFor={(m) => m.name}
-          />
-        )}
-        <div className="modal-buttons">
-          <button onClick={add} disabled={!binding?.message || !binding.signal}>
-            추가
-          </button>
-          <button onClick={onClose}>취소</button>
-        </div>
-      </div>
-    </div>,
-    document.body,
   );
 }

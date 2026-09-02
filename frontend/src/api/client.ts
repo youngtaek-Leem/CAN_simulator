@@ -293,4 +293,6 @@ export const api = {
     request<Record<string, import('../types').CanLogSeries>>(
       `/api/canlog/series?keys=${keys.map(encodeURIComponent).join(',')}`,
     ),
+  canlogGenerateScript: (range: { a_ms: number; b_ms: number } | null, rxNode?: string) =>
+    post<import('../types').CanLogScriptResult>('/api/canlog/generate_script', { range, rx_node: rxNode ?? null }),
 };

@@ -4,6 +4,7 @@
 
 import { useEffect, useRef, useState, type MutableRefObject } from 'react';
 import { api } from '../api/client';
+import { canStore } from '../store/canStore';
 import { useApp } from '../store/appContext';
 import { niceTicks, orFallback, type AudioChartXView, type Geom } from './AudioWaveformChart';
 import {
@@ -14,6 +15,7 @@ import {
 import type {
   CanLogMessageInfo,
   CanLogPoint,
+  CanLogScriptResult,
   CanLogSeries,
   CanLogSignalInfo,
   CanLogStatus,
@@ -58,6 +60,29 @@ function findHeldPoint(points: CanLogPoint[], plotX: number): CanLogPoint | null
   return held;
 }
 
+function downloadTextFile(filename: string, content: string, mime = 'application/json'): void {
+  const blob = new Blob([content], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+function formatStep(step: Record<string, unknown>): string {
+  const signals = step['Signals'] as { Signal: string; Value: string }[] | undefined;
+  if (!signals) return '\t' + JSON.stringify(step);
+  const sigLines = signals.map((s) => '\t\t' + JSON.stringify(s)).join(',\n');
+  return `\t{ "type": ${JSON.stringify(step['type'])}, "Message": ${JSON.stringify(step['Message'])}, "Signals": [\n${sigLines}\n\t] }`;
+}
+function formatStepsAsJson(steps: Record<string, unknown>[]): string {
+  if (steps.length === 0) return '[]\n';
+  const lines = steps.map(formatStep);
+  return '[\n' + lines.join(',\n') + '\n]\n';
+}
+
 export function CanLogAnalysisWidget({ config }: { config: WidgetConfig }) {
   const { updateWidget } = useApp();
   const selectedKeys = getSelectedKeys(config);
@@ -68,6 +93,9 @@ export function CanLogAnalysisWidget({ config }: { config: WidgetConfig }) {
   const [seriesMap, setSeriesMap] = useState<Record<string, CanLogSeries>>({});
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [scriptBusy, setScriptBusy] = useState(false);
+  const [scriptError, setScriptError] = useState<string | null>(null);
+  const [scriptResult, setScriptResult] = useState<CanLogScriptResult | null>(null);
   const [search, setSearch] = useState('');
   const viewMode = (config.options.viewMode as 'byMessage' | 'bySignal' | undefined) ?? 'byMessage';
   const setViewMode = (m: 'byMessage' | 'bySignal') => updateWidget({ ...config, options: { ...config.options, viewMode: m } });
@@ -115,6 +143,25 @@ export function CanLogAnalysisWidget({ config }: { config: WidgetConfig }) {
       await fetchSeries(selectedKeys);
       resetEverything();
     } catch (e) { setError((e as Error).message); } finally { setBusy(false); }
+  };
+
+  const generateScript = async () => {
+    setScriptError(null); setScriptBusy(true);
+    try {
+      const rxNode = canStore.getRxNode();
+      if (!rxNode) throw new Error('RX 노드가 선택되지 않았습니다. 필수 설정(더보기 → DBC 업로드 옆)에서 RX 노드(예: AMP_FD / AMP_HS)를 선택하세요.');
+      let range: { a_ms: number; b_ms: number } | null = null;
+      if (cursorMode) {
+        if (cursorA === null || cursorB === null || cursorA === cursorB) throw new Error('커서 구간을 설정하세요 (A와 B가 같은 위치입니다)');
+        range = { a_ms: Math.min(cursorA, cursorB), b_ms: Math.max(cursorA!, cursorB!) };
+      }
+      const result = await api.canlogGenerateScript(range, rxNode);
+      setScriptResult(result);
+      if (result.steps.length > 0) {
+        const base = (status?.log_filename ?? 'canlog').replace(/\.[^.]+$/, '');
+        downloadTextFile(`${base}_script.json`, formatStepsAsJson(result.steps));
+      }
+    } catch (e) { setScriptError((e as Error).message); } finally { setScriptBusy(false); }
   };
 
   const toggleKey = (key: string) => {
@@ -198,8 +245,18 @@ export function CanLogAnalysisWidget({ config }: { config: WidgetConfig }) {
         <button className="icon-btn" title="모든 그래프 X/Y 리셋" onClick={resetEverything}>⟲</button>
         <button className={`small-btn ${cursorMode ? 'primary' : ''}`} onClick={toggleCursorMode}>커서 {cursorMode ? 'ON' : 'OFF'}</button>
         {cursorMode && cursorDeltaMs !== null && <span className="graph-xwindow mono">Δ {fmtTimeMs(cursorDeltaMs)}</span>}
+        <span className="spacer" />
+        <button className="small-btn" disabled={scriptBusy || !timeline} title="시뮬레이터 TX 신호만 테스트 스크립트로 생성 (RX 노드 제외, 커서 On 시 구간만)" onClick={generateScript}>{scriptBusy ? '생성 중…' : '📝 테스트 스크립트 생성'}</button>
       </div>
       {error && <div className="error">{error}</div>}
+      {scriptError && <div className="error">{scriptError}</div>}
+      {scriptResult && (
+        <div className="syslog-script-result">
+          <div className="syslog-script-summary">스크립트 생성 완료 — 매칭 {scriptResult.matched_count}개 / 경고 {scriptResult.warnings.length}개 / 오류 {scriptResult.errors.length}개 {scriptResult.steps.length===0 && ' (다운로드할 스텝 없음)'}</div>
+          {scriptResult.warnings.length>0 && <details className="syslog-script-details"><summary>⚠ 경고 {scriptResult.warnings.length}개</summary>{scriptResult.warnings.map((w,i)=>{ const anyW = w as unknown as Record<string, unknown>; const reason = anyW['reason'] as string | undefined; return (<div key={i} className="syslog-script-row">{reason ? String(reason) : `log ${w.log_id}(${w.log_name}) → ${w.matched_message}.${w.matched_signal}`}</div>); })}</details>}
+          {scriptResult.errors.length>0 && <details className="syslog-script-details"><summary>✕ 오류 {scriptResult.errors.length}개</summary>{scriptResult.errors.map((e,i)=>(<div key={i} className="syslog-script-row">log {e.log_id}{e.log_name?`(${e.log_name})`:''} — {e.reason}</div>))}</details>}
+        </div>
+      )}
       <div className="syslog-body">
         <div className="syslog-idlist">
           <div className="syslog-section-title">CAN Signal 검색</div>

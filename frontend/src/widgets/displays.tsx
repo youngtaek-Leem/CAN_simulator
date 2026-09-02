@@ -153,8 +153,19 @@ function MessageDisplayCore({ config }: { config: WidgetConfig }) {
     updateWidget({ ...config, options: { ...config.options, viewMode: m } });
 
   const togglePause = () => {
-    if (!paused) setSnapshot([...canStore.trace]);
+    if (!paused) {
+      const src = filterActive ? canStore.trace.filter((f) => filterSet.has(f.id)) : canStore.trace;
+      setSnapshot(src.slice(-30000));
+    }
     setPaused(!paused);
+  };
+
+  const handleUserScrollPause = () => {
+    if (!paused && mode === 'trace') {
+      const src = filterActive ? canStore.trace.filter((f) => filterSet.has(f.id)) : canStore.trace;
+      setSnapshot(src.slice(-30000));
+      setPaused(true);
+    }
   };
 
   const toggleExpanded = (id: number) =>
@@ -176,19 +187,23 @@ function MessageDisplayCore({ config }: { config: WidgetConfig }) {
   const frames = [...canStore.frames.values()]
     .filter((f) => !filterActive || filterSet.has(f.id))
     .sort((a, b) => a.id - b.id);
-  // Live trace: pass the raw trace reference straight through (zero-copy in
-  // the common no-filter case) plus how much of it is currently "revealed"
-  // for pacing -- TraceView clamps its own already-virtualized window
-  // against revealLimit instead of us materializing a (potentially
-  // 30,000-entry) prefix array here on every render. An earlier version did
-  // exactly that (a revealedTrace() getter returning trace.slice(0, n)),
-  // computed unconditionally even in Fixed mode or while paused -- expensive
-  // enough under heavy load (up to `fps` times/sec) to visibly stutter or
-  // blank the display, which is worse than the burst-jump it was meant to
-  // fix. See Requirement.md.
-  const traceSource = filterActive ? canStore.trace.filter((f) => filterSet.has(f.id)) : canStore.trace;
-  const revealLimit = filterActive ? traceSource.length : canStore.revealedCount;
+  // Live trace: oldest at top, newest at bottom, auto-scroll down.
+  // While live we decimate (full skip) to reduce render load — show only sampled
+  // rows so the UI stays responsive even with burst CAN traffic. Paused snapshot
+  // shows all rows without skipping (up to TRACE_CAP 30000).
+  const rawTraceSource = filterActive ? canStore.trace.filter((f) => filterSet.has(f.id)) : canStore.trace;
   const snapshotRows = filterActive ? snapshot.filter((f) => filterSet.has(f.id)) : snapshot;
+  // Decimate for live display: keep at most ~1000 rows, always keep the last row
+  const decimate = (rows: RxFrame[]): RxFrame[] => {
+    if (rows.length <= 1000) return rows;
+    const step = Math.ceil(rows.length / 1000);
+    const out: RxFrame[] = [];
+    for (let i = 0; i < rows.length; i += step) out.push(rows[i]);
+    if (out[out.length - 1] !== rows[rows.length - 1]) out.push(rows[rows.length - 1]);
+    return out;
+  };
+  const traceSource = rawTraceSource; // keep original for counts
+  const displayRows = decimate(rawTraceSource);
 
   return (
     <div className="msg-display">
@@ -228,9 +243,9 @@ function MessageDisplayCore({ config }: { config: WidgetConfig }) {
             ? `일시중지 — 최근 1분 ${snapshotRows.length}개`
             : mode === 'fixed'
               ? `${frames.length} IDs`
-              : revealLimit >= traceSource.length
-                ? `${traceSource.length}개 (최근 1분)`
-                : `${revealLimit}/${traceSource.length}개 표시 중 (최근 1분)`}
+              : displayRows.length < traceSource.length
+                ? `${displayRows.length}/${traceSource.length}개 표시 중 (최근 1분, 간략)`
+                : `${traceSource.length}개 (최근 1분)`}
         </span>
         <span className="spacer" />
         <button className="small-btn" onClick={() => canStore.clearFrames()}>
@@ -240,7 +255,7 @@ function MessageDisplayCore({ config }: { config: WidgetConfig }) {
       {paused ? (
         <TraceView rows={snapshotRows} live={false} />
       ) : mode === 'trace' ? (
-        <TraceView rows={traceSource} live={true} revealLimit={revealLimit} />
+        <TraceView rows={displayRows} rawTotal={traceSource.length} live={true} onUserScroll={handleUserScrollPause} />
       ) : (
         <FixedTable frames={frames} dbc={dbc} expanded={expanded} onToggle={toggleExpanded} />
       )}
@@ -431,26 +446,29 @@ function SignalDetail({ frame, dbc }: { frame: FrameEntry; dbc: DbcSummary }) {
 
 // Lightweight virtual list: the last-minute buffer can hold tens of
 // thousands of frames, so only the visible rows are rendered.
+// Live mode: oldest at top, newest at bottom, auto-scroll down only when
+// user is already at bottom. While live we decimate rows in the parent
+// (full skip) so render load stays low; paused shows all rows.
 const ROW_H = 22;
 const OVERSCAN = 10;
 
 function TraceView({
   rows,
   live,
-  revealLimit,
+  rawTotal: _rawTotal,
+  onUserScroll,
 }: {
   rows: RxFrame[];
   live: boolean;
-  // Caps how much of `rows` is treated as "there" for this render -- lets a
-  // caller hand over the full underlying array (zero-copy) while still
-  // pacing how much of it the view reacts to (see displays.tsx's
-  // revealLimit). Omitted (paused snapshot) means the whole array counts.
-  revealLimit?: number;
+  rawTotal?: number;
+  onUserScroll?: () => void;
 }) {
   const outerRef = useRef<HTMLDivElement>(null);
   const [scrollTop, setScrollTop] = useState(0);
   const [viewH, setViewH] = useState(200);
-  const total = revealLimit !== undefined ? Math.min(rows.length, revealLimit) : rows.length;
+  const total = rows.length;
+  const rafScrollRef = useRef<number | null>(null);
+  const tickingRef = useRef(false);
 
   useEffect(() => {
     const el = outerRef.current;
@@ -462,14 +480,20 @@ function TraceView({
     return () => ro.disconnect();
   }, []);
 
-  // live mode sticks to the newest frame at the bottom -- tracks `total`
-  // (the revealed/paced count), not rows.length, so it advances at the
-  // same paced rate as what's actually rendered instead of jumping ahead
-  // of it.
+  // auto-scroll down only when already at bottom (natural scroll)
   useEffect(() => {
-    if (live && outerRef.current) {
-      outerRef.current.scrollTop = outerRef.current.scrollHeight;
-    }
+    if (!live || !outerRef.current) return;
+    const el = outerRef.current;
+    const wasAtBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+    if (!wasAtBottom) return;
+    if (rafScrollRef.current !== null) cancelAnimationFrame(rafScrollRef.current);
+    rafScrollRef.current = requestAnimationFrame(() => {
+      if (outerRef.current) outerRef.current.scrollTop = outerRef.current.scrollHeight;
+      rafScrollRef.current = null;
+    });
+    return () => {
+      if (rafScrollRef.current !== null) cancelAnimationFrame(rafScrollRef.current);
+    };
   }, [live, total]);
 
   const first = Math.max(0, Math.floor(scrollTop / ROW_H) - OVERSCAN);
@@ -489,7 +513,19 @@ function TraceView({
       <div
         ref={outerRef}
         className="trace-body"
-        onScroll={(e) => setScrollTop((e.target as HTMLDivElement).scrollTop)}
+        onScroll={(e) => {
+          const el = e.target as HTMLDivElement;
+          if (tickingRef.current) return;
+          tickingRef.current = true;
+          requestAnimationFrame(() => {
+            tickingRef.current = false;
+            setScrollTop(el.scrollTop);
+            if (live && onUserScroll) {
+              const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
+              if (!atBottom) onUserScroll();
+            }
+          });
+        }}
       >
         <div style={{ height: first * ROW_H }} />
         {visible.map((f, i) => (

@@ -524,6 +524,13 @@ export interface CanLogTimeline {
   segments: SysLogTimelineSegment[];
 }
 
+export interface CanLogScriptResult {
+  steps: Record<string, unknown>[];
+  warnings: SysLogScriptWarning[];
+  errors: SysLogScriptError[];
+  matched_count: number;
+}
+
 export interface TxRow {
   key: string;
   idHex: string;
