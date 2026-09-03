@@ -1,12 +1,9 @@
-// ISO-TP (ISO 15765-2) message send box.
-//
-// ID and data are entered in separate fields (hex). Payloads up to 7 bytes
-// go out as a single Single Frame; longer payloads are automatically split
-// into a First Frame + Consecutive Frame(s) by the backend, which waits for
-// a Flow Control frame from the receiver (on the configured FC ID) and
-// honors its Block Size / STmin, per ISO 15765-2.
+// ISO-TP (ISO 15765-2) message send box — multi-line data input.
+// 한 줄 = 한 번의 ISO-TP 전송. 커서가 위치한 라인의 메시지만 전송하고,
+// 해당 라인은 연한 파란색으로 강조. 빈 줄은 무시+전송 비활성화, # 또는 // 로
+// 시작하는 줄은 주석으로 무시 (인라인 주석도 지원: 데이터 뒤 #// 이후는 주석).
 
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { api } from '../api/client';
 import { useApp } from '../store/appContext';
 import type { WidgetConfig } from '../types';
@@ -31,6 +28,27 @@ function framePreview(byteLen: number): string {
   if (byteLen <= SF_MAX_LEN) return `${byteLen}바이트 → Single Frame`;
   const cfCount = Math.ceil((byteLen - FF_DATA_LEN) / CF_DATA_LEN);
   return `${byteLen}바이트 → First Frame + Consecutive Frame ${cfCount}개 (총 ${1 + cfCount}프레임)`;
+}
+
+function splitLines(raw: string): string[] {
+  return raw.split(/\r?\n/);
+}
+
+function getDataPart(line: string): string {
+  // 인라인 주석 지원: # 또는 // 이후는 주석
+  const hashIdx = line.indexOf('#');
+  const slashIdx = line.indexOf('//');
+  let cut = -1;
+  if (hashIdx !== -1 && slashIdx !== -1) cut = Math.min(hashIdx, slashIdx);
+  else if (hashIdx !== -1) cut = hashIdx;
+  else if (slashIdx !== -1) cut = slashIdx;
+  if (cut !== -1) return line.slice(0, cut);
+  return line;
+}
+
+function isCommentLine(line: string): boolean {
+  const t = line.trim();
+  return t.startsWith('#') || t.startsWith('//');
 }
 
 interface IsoTpOptions {
@@ -58,10 +76,6 @@ export function IsoTpBox({ config }: { config: WidgetConfig }) {
   const dataHex = opts.dataHex ?? '';
   const isExtended = opts.isExtended ?? false;
   const fcTimeoutMs = opts.fcTimeoutMs ?? 1000;
-  // "응답 대기": after sending, also wait for and reassemble a reply on
-  // respId, sending our own Flow Control if it's multi-frame -- previously
-  // this widget only ever sent, never listened for or flow-controlled a
-  // response at all (see Requirement.md).
   const waitForResponse = opts.waitForResponse ?? true;
   const respId = opts.respId ?? '78B';
   const respTimeoutMs = opts.respTimeoutMs ?? 2000;
@@ -70,15 +84,51 @@ export function IsoTpBox({ config }: { config: WidgetConfig }) {
   const setOpt = (patch: Partial<IsoTpOptions>) =>
     updateWidget({ ...config, options: { ...config.options, ...patch } });
 
-  const dataBytes = parseHexBytes(dataHex);
+  // 커서 라인 추적
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const highlightRef = useRef<HTMLDivElement>(null);
+  const [cursorLine, setCursorLine] = useState(0);
+
+  const lines = splitLines(dataHex);
+  const safeCursorLine = Math.min(cursorLine, Math.max(0, lines.length - 1));
+  const activeRawLine = lines[safeCursorLine] ?? '';
+  const activeDataPart = getDataPart(activeRawLine);
+  const activeTrimmed = activeDataPart.trim();
+  const activeIsEmpty = activeTrimmed === '';
+  const activeIsComment = !activeIsEmpty && isCommentLine(activeRawLine);
+  // 주석/빈 줄은 전송 대상 아님 — 데이터 부분만 파싱
+  const activeDataBytes = activeIsEmpty || activeIsComment ? new Uint8Array() : parseHexBytes(activeDataPart);
+  const activeByteLen = activeDataBytes?.length ?? 0;
+  const activeIsValidHex = activeDataBytes !== null;
+  const isActiveLineSendable = activeIsValidHex && activeByteLen > 0;
+
+  const updateCursorLine = () => {
+    const el = textareaRef.current;
+    if (!el) return;
+    const pos = el.selectionStart ?? 0;
+    const before = el.value.slice(0, pos);
+    const lineIdx = before.split('\n').length - 1;
+    setCursorLine(Math.max(0, Math.min(lineIdx, splitLines(el.value).length - 1)));
+  };
+
+  const syncScroll = () => {
+    const ta = textareaRef.current;
+    const hl = highlightRef.current;
+    if (ta && hl) hl.scrollTop = ta.scrollTop;
+  };
+
+  useEffect(() => {
+    // dataHex가 외부에서 바뀌면(레이아웃 로드 등) 커서 범위를 보정
+    setCursorLine((prev) => Math.min(prev, Math.max(0, splitLines(dataHex).length - 1)));
+  }, [dataHex]);
+
   const txIdNum = txId.trim() ? parseInt(txId, 16) : NaN;
   const fcIdNum = fcId.trim() ? parseInt(fcId, 16) : NaN;
   const respIdNum = respId.trim() ? parseInt(respId, 16) : NaN;
-  const needsFc = (dataBytes?.length ?? 0) > SF_MAX_LEN;
+  const needsFc = activeByteLen > SF_MAX_LEN;
   const canSend =
     !sending &&
-    dataBytes !== null &&
-    dataBytes.length > 0 &&
+    isActiveLineSendable &&
     Number.isInteger(txIdNum) &&
     txIdNum >= 0 &&
     (!needsFc || (Number.isInteger(fcIdNum) && fcIdNum >= 0)) &&
@@ -86,12 +136,23 @@ export function IsoTpBox({ config }: { config: WidgetConfig }) {
 
   const send = async () => {
     if (!canSend) return;
+    // 빈 줄/주석은 전송 불가 — canSend에서 이미 차단되지만 방어
+    if (activeIsEmpty || activeIsComment) {
+      setError('현재 라인이 비어 있거나 주석입니다');
+      return;
+    }
+    if (!activeIsValidHex) {
+      setError('잘못된 hex 문자열입니다 (현재 라인)');
+      return;
+    }
     setSending(true);
     setError(null);
     setResult(null);
     setResponse(null);
     try {
-      const r = await api.isotpSend(txIdNum, needsFc ? fcIdNum : 0, dataHex, {
+      // 라인 단위 전송: 데이터 부분만 전송 (인라인 주석 제거)
+      const payloadHex = activeDataPart.trim();
+      const r = await api.isotpSend(txIdNum, needsFc ? fcIdNum : 0, payloadHex, {
         is_extended_id: isExtended,
         fc_timeout_ms: fcTimeoutMs,
         ...(waitForResponse
@@ -103,7 +164,7 @@ export function IsoTpBox({ config }: { config: WidgetConfig }) {
           : {}),
       });
       setResult(
-        `${r.frame_type === 'single' ? 'Single Frame' : 'Multi Frame'} 전송 완료 — ` +
+        `${safeCursorLine + 1}번째 줄 — ${r.frame_type === 'single' ? 'Single Frame' : 'Multi Frame'} 전송 완료 — ` +
           `${r.frames_sent}프레임, ${r.bytes_sent}바이트, ${r.duration_ms}ms`,
       );
       if (r.response !== undefined) setResponse(r.response);
@@ -114,6 +175,13 @@ export function IsoTpBox({ config }: { config: WidgetConfig }) {
       setSending(false);
     }
   };
+
+  // 힌트: 현재 라인 기준 미리보기
+  let hintText: string;
+  if (activeIsEmpty) hintText = '현재 라인: 비어 있음 — 전송 비활성화';
+  else if (activeIsComment) hintText = '현재 라인: 주석 — 전송 비활성화';
+  else if (!activeIsValidHex) hintText = '잘못된 hex 문자열입니다 (현재 라인)';
+  else hintText = `${safeCursorLine + 1}번째 줄: ${framePreview(activeByteLen)}`;
 
   return (
     <div className="isotp-box">
@@ -157,13 +225,32 @@ export function IsoTpBox({ config }: { config: WidgetConfig }) {
         </label>
       </div>
       <label className="isotp-field isotp-data-field">
-        데이터 (hex, 공백 허용)
-        <textarea
-          className="mono isotp-data-input"
-          value={dataHex}
-          placeholder="01 02 03 04 05 06 07 08 09 10 11 12 13 14 15"
-          onChange={(e) => setOpt({ dataHex: e.target.value })}
-        />
+        데이터 (hex, 공백 허용) — 한 줄 = 한 번 전송, # 또는 // 이후는 주석
+        <div className="isotp-data-wrap">
+          <div ref={highlightRef} className="isotp-data-highlight" aria-hidden>
+            {lines.map((ln, i) => (
+              <div key={i} className={i === safeCursorLine ? 'isotp-line-active' : 'isotp-line'}>
+                {ln || '\u00A0'}
+              </div>
+            ))}
+          </div>
+          <textarea
+            ref={textareaRef}
+            className="mono isotp-data-input isotp-data-input--overlay"
+            value={dataHex}
+            placeholder={'01 02 03\n# 주석은 전송 안 함\n02 10 01 // 인라인 주석도 가능'}
+            onChange={(e) => {
+              setOpt({ dataHex: e.target.value });
+              requestAnimationFrame(updateCursorLine);
+            }}
+            onSelect={updateCursorLine}
+            onClick={updateCursorLine}
+            onKeyUp={updateCursorLine}
+            onKeyDown={updateCursorLine}
+            onScroll={syncScroll}
+            onFocus={updateCursorLine}
+          />
+        </div>
       </label>
       <div className="isotp-row">
         <label className="toggle">
@@ -212,12 +299,10 @@ export function IsoTpBox({ config }: { config: WidgetConfig }) {
         )}
       </div>
       <div className="isotp-row">
-        <span className="hint">
-          {dataBytes === null ? '잘못된 hex 문자열입니다' : framePreview(dataBytes.length)}
-        </span>
+        <span className="hint">{hintText}</span>
         <span className="spacer" />
         <button className="small-btn primary" disabled={!canSend} onClick={send}>
-          {sending ? '전송 중…' : '▶ 전송'}
+          {sending ? '전송 중…' : `▶ 전송 (${safeCursorLine + 1}번째 줄)`}
         </button>
       </div>
       {result && <div className="isotp-result ok">{result}</div>}

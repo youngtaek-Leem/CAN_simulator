@@ -201,11 +201,15 @@ export function AudioWaveformChart({
     return () => ro.disconnect();
   }, []);
 
-  // external "reset everything" trigger -- clear this chart's Y view too,
-  // not just whatever cleared X (shared parent reset, or this chart's own
-  // resetView() below for a standalone chart).
+  // external "reset everything" trigger -- clear Y view and, for
+  // standalone charts, also X view + buffered points (Start 시 초기화).
   useEffect(() => {
     yViewRef.current = { yMin: null, yMax: null };
+    if (!shared) {
+      localXViewRef.current = { xMin: null, xMax: null };
+      pointsRef.current = [];
+      setLocalVersion((n) => n + 1);
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [resetToken]);
 
@@ -396,6 +400,7 @@ export function AudioWaveformChart({
   // ---- interaction: wheel-zoom (per-axis) + drag-to-pan ---------------------
 
   const onWheel = (e: React.WheelEvent<HTMLCanvasElement>) => {
+    if (!e.ctrlKey && !e.metaKey) return;
     e.preventDefault();
     const rect = canvasRef.current!.getBoundingClientRect();
     const px = e.clientX - rect.left;

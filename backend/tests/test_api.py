@@ -384,6 +384,7 @@ def test_testrunner_upload_and_run():
             "loaded": True,
             "filename": "t.json",
             "running": False,
+            "paused": False,
             "running_case": None,
             "case_count": 1,
             "result_count": 0,

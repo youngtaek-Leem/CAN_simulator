@@ -133,6 +133,8 @@ export const api = {
   uploadReplay: (file: File) => upload('/api/replay/upload', file),
   replayStart: (mode: 'pass' | 'stop', frame_ids: number[]) =>
     post('/api/replay/start', { mode, frame_ids }),
+  replayPause: () => post('/api/replay/pause'),
+  replayResume: () => post('/api/replay/resume'),
   replayStop: () => post('/api/replay/stop'),
 
   uploadTestScript: (file: File) => upload('/api/testrunner/upload', file),
@@ -141,6 +143,8 @@ export const api = {
   uploadTestLogfile: (file: File) => upload('/api/testrunner/logfile/upload', file),
   uploadTestGolden: (file: File) => upload('/api/testrunner/golden/upload', file),
   testRunnerStart: () => post('/api/testrunner/start'),
+  testRunnerPause: () => post('/api/testrunner/pause'),
+  testRunnerResume: () => post('/api/testrunner/resume'),
   testRunnerStop: () => post('/api/testrunner/stop'),
   testRunnerStatus: () => request<import('../types').TestRunnerStatus>('/api/testrunner/status'),
 
@@ -215,6 +219,7 @@ export const api = {
   audioMonitorStop: () => post<{ ok: boolean; reason?: string }>('/api/audio/monitor/stop'),
   audioRecordStart: () => post<{ ok: boolean; reason?: string; filename?: string }>('/api/audio/record/start'),
   audioRecordStop: () => post<{ ok: boolean; reason?: string; filename?: string; frames?: number }>('/api/audio/record/stop'),
+  audioRecordingStop: () => post<{ ok: boolean; reason?: string; filename?: string; frames?: number }>('/api/audio/recording/stop'),
   audioLevel: () => request<import('../types').AudioLevel>('/api/audio/level'),
   audioWaveform: (fromMs: number, toMs: number, maxPoints: number) =>
     request<import('../types').AudioWaveform>(

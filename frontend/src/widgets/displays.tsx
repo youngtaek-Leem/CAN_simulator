@@ -1,7 +1,7 @@
 // Display widgets: CAN message grid and the widget/test-runner activity log.
 // Both read from canStore and re-render only on the throttled version tick.
 
-import { Fragment, useEffect, useRef, useState } from 'react';
+import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { canStore, useCanVersion } from '../store/canStore';
 import { groupedMessages, useApp } from '../store/appContext';
@@ -138,33 +138,109 @@ export function RxSignalDisplay({ config }: { config: WidgetConfig }) {
   );
 }
 
+// 위젯 로컬 10,000 링버퍼 — 저장 시 필터가 적용되며, 일시정지 중 유입분은 버림.
+const RING_CAP = 10000;
+
+function useRingBuffer() {
+  const bufRef = useRef<(RxFrame | undefined)[]>(new Array(RING_CAP) as (RxFrame | undefined)[]);
+  const headRef = useRef(0);
+  const sizeRef = useRef(0);
+  const push = (f: RxFrame) => {
+    bufRef.current[headRef.current] = f;
+    headRef.current = (headRef.current + 1) % RING_CAP;
+    if (sizeRef.current < RING_CAP) sizeRef.current++;
+  };
+  const toArray = (): RxFrame[] => {
+    const sz = sizeRef.current;
+    if (sz === 0) return [];
+    const out: RxFrame[] = new Array(sz);
+    const head = headRef.current;
+    const buf = bufRef.current;
+    for (let i = 0; i < sz; i++) {
+      const idx = (head - sz + i + RING_CAP) % RING_CAP;
+      out[i] = buf[idx]!;
+    }
+    return out;
+  };
+  const clear = () => {
+    headRef.current = 0;
+    sizeRef.current = 0;
+  };
+  const getSize = () => sizeRef.current;
+  return { push, toArray, clear, getSize, headRef, sizeRef, bufRef };
+}
+
 function MessageDisplayCore({ config }: { config: WidgetConfig }) {
-  useCanVersion();
+  const version = useCanVersion();
   const { dbc, updateWidget } = useApp();
   const mode = (config.options.viewMode as 'fixed' | 'trace') ?? 'fixed';
   const [paused, setPaused] = useState(false);
-  // frozen copy of the last-minute trace, captured when pause is pressed
-  const [snapshot, setSnapshot] = useState<RxFrame[]>([]);
-  // IDs currently expanded to show their signal breakdown (fixed mode only)
   const [expanded, setExpanded] = useState<Set<number>>(new Set());
   const [showFilterPicker, setShowFilterPicker] = useState(false);
+  // 위젯 로컬 링 + 제어 상태
+  const ring = useRingBuffer();
+  const frozenRef = useRef<RxFrame[] | null>(null);
+  const lastTsRef = useRef<number>(-Infinity);
+  const droppedRef = useRef(0);
+  // 강제 리렌더용 (ring은 ref이므로 version tick 외에 pause/clear 시 갱신 필요)
+  const [gen, setGen] = useState(0);
+  const forceUpdate = () => setGen((v) => v + 1);
 
   const setMode = (m: 'fixed' | 'trace') =>
     updateWidget({ ...config, options: { ...config.options, viewMode: m } });
 
+  // Pass 필터: 선택한 ID만 표시 — 저장 시점에 판정한다 (링에 필터 통과분만 저장).
+  const passFilterIds = (config.options.passFilterIds as number[] | undefined) ?? [];
+  const filterActive = passFilterIds.length > 0;
+  const filterSet = new Set(passFilterIds);
+  const setPassFilterIds = (ids: number[]) =>
+    updateWidget({ ...config, options: { ...config.options, passFilterIds: ids } });
+
+  // 고정 모드용 ID별 최신 테이블 소스 (전역 canStore.frames — 링과 독립)
+  const frames = [...canStore.frames.values()]
+    .filter((f) => !filterActive || filterSet.has(f.id))
+    .sort((a, b) => a.id - b.id);
+
+  // 전역 trace delta를 위젯 로컬 링으로 유입 — 저장 시 필터 적용, 일시정지 중 버림.
+  useEffect(() => {
+    const trace = canStore.trace;
+    if (trace.length === 0) return;
+    // lastTs 이후 새로 들어온 구간만 처리 (prune 등으로 길이가 줄어도 ts 기준으로 안전)
+    let startIdx = 0;
+    if (lastTsRef.current !== -Infinity) {
+      // 뒤에서부터 lastTs 이하인 지점을 찾음 — 신규 burst는 보통 꼬리에 몰림
+      let idx = trace.length - 1;
+      while (idx >= 0 && trace[idx].ts > lastTsRef.current) idx--;
+      startIdx = idx + 1;
+    }
+    for (let i = startIdx; i < trace.length; i++) {
+      const f = trace[i];
+      if (f.ts > lastTsRef.current) lastTsRef.current = f.ts;
+      const passes = !filterActive || filterSet.has(f.id);
+      if (paused) {
+        if (passes) droppedRef.current++;
+        continue;
+      }
+      if (!passes) continue;
+      ring.push(f);
+    }
+    // paused가 아니고 trace 모드일 때만 링 증가가 화면에 반영되면 되지만,
+    // version tick으로 이미 리렌더되므로 별도 bump 불필요.
+    // filter/pause 변경으로 인한 dropped/동결 상태 갱신은 아래 toggle에서 처리.
+  }, [version]); // filterActive/filterSet/paused는 ref로 읽지 않고 최신 클로저를 쓰기 위해 의도적으로 version만 의존 — 아래 별도 effect에서 보정
+
+  // filterSet/paused가 바뀌어도 lastTs 기준 delta 로직에 반영되도록,
+  // version이 그대로인 채 필터만 바뀌는 경우를 위해 별도 보정 불필요:
+  // 다음 WS batch에서 새 ts가 들어와야만 신규 필터가 적용되며, 기존 링은 유지(요구: 저장 시 필터).
+
   const togglePause = () => {
     if (!paused) {
-      const src = filterActive ? canStore.trace.filter((f) => filterSet.has(f.id)) : canStore.trace;
-      setSnapshot(src.slice(-30000));
-    }
-    setPaused(!paused);
-  };
-
-  const handleUserScrollPause = () => {
-    if (!paused && mode === 'trace') {
-      const src = filterActive ? canStore.trace.filter((f) => filterSet.has(f.id)) : canStore.trace;
-      setSnapshot(src.slice(-30000));
+      frozenRef.current = ring.toArray();
       setPaused(true);
+    } else {
+      frozenRef.current = null;
+      droppedRef.current = 0;
+      setPaused(false);
     }
   };
 
@@ -176,34 +252,28 @@ function MessageDisplayCore({ config }: { config: WidgetConfig }) {
       return next;
     });
 
-  // Pass 필터: 선택한 ID만 표시 (아무것도 선택 안 하면 전체 표시). 선택 목록은
-  // 위젯 config에 저장되어 레이아웃과 함께 저장/복원된다.
-  const passFilterIds = (config.options.passFilterIds as number[] | undefined) ?? [];
-  const filterActive = passFilterIds.length > 0;
-  const filterSet = new Set(passFilterIds);
-  const setPassFilterIds = (ids: number[]) =>
-    updateWidget({ ...config, options: { ...config.options, passFilterIds: ids } });
-
-  const frames = [...canStore.frames.values()]
-    .filter((f) => !filterActive || filterSet.has(f.id))
-    .sort((a, b) => a.id - b.id);
-  // Live trace: oldest at top, newest at bottom, auto-scroll down.
-  // While live we decimate (full skip) to reduce render load — show only sampled
-  // rows so the UI stays responsive even with burst CAN traffic. Paused snapshot
-  // shows all rows without skipping (up to TRACE_CAP 30000).
-  const rawTraceSource = filterActive ? canStore.trace.filter((f) => filterSet.has(f.id)) : canStore.trace;
-  const snapshotRows = filterActive ? snapshot.filter((f) => filterSet.has(f.id)) : snapshot;
-  // Decimate for live display: keep at most ~1000 rows, always keep the last row
-  const decimate = (rows: RxFrame[]): RxFrame[] => {
-    if (rows.length <= 1000) return rows;
-    const step = Math.ceil(rows.length / 1000);
-    const out: RxFrame[] = [];
-    for (let i = 0; i < rows.length; i += step) out.push(rows[i]);
-    if (out[out.length - 1] !== rows[rows.length - 1]) out.push(rows[rows.length - 1]);
-    return out;
+  const handleClear = () => {
+    if (mode === 'trace') {
+      ring.clear();
+      // 위젯 로컬 10k 링만 비움 + 이후 신규만 표시(과거 재유입 금지)
+      const last = canStore.trace[canStore.trace.length - 1];
+      lastTsRef.current = last ? last.ts : -Infinity;
+      droppedRef.current = 0;
+      frozenRef.current = null;
+      if (paused) setPaused(false);
+      forceUpdate();
+    } else {
+      canStore.clearFrames();
+    }
   };
-  const traceSource = rawTraceSource; // keep original for counts
-  const displayRows = decimate(rawTraceSource);
+
+  // 화면에 표시할 rows — 일시정지 시 동결 스냅샷, 아니면 링 전체
+  // Clear 직후 즉시 0개로 보이도록 gen 세대에 의존
+  const liveRingRows = useMemo(
+    () => (paused && frozenRef.current ? frozenRef.current : ring.toArray()),
+    [version, paused, gen],
+  );
+  const ringSize = liveRingRows.length;
 
   return (
     <div className="msg-display">
@@ -227,35 +297,31 @@ function MessageDisplayCore({ config }: { config: WidgetConfig }) {
         <button
           className={`small-btn ${paused ? 'primary' : ''}`}
           onClick={togglePause}
-          title="일시중지하면 최근 1분간 수신된 메시지를 스크롤로 확인할 수 있습니다"
+          title={paused ? '재개하면 버려진 이후 데이터는 표시되지 않습니다' : '일시정지하면 현재까지 버퍼가 동결되고 이후 수신은 버려집니다. 과거는 위쪽으로 스크롤해 확인하세요.'}
         >
-          {paused ? '▶ 재개' : '⏸ 일시중지'}
+          {paused ? '▶ 재개' : '⏸ 일시정지'}
         </button>
         <button
           className={`small-btn ${filterActive ? 'primary' : ''}`}
           onClick={() => setShowFilterPicker(true)}
-          title="Pass 필터: 선택한 메시지 ID만 표시"
+          title="Pass 필터: 선택한 메시지 ID만 표시 (저장 시 필터 적용)"
         >
           필터{filterActive ? ` (${passFilterIds.length})` : ''}
         </button>
         <span className="hint">
-          {paused
-            ? `일시중지 — 최근 1분 ${snapshotRows.length}개`
-            : mode === 'fixed'
-              ? `${frames.length} IDs`
-              : displayRows.length < traceSource.length
-                ? `${displayRows.length}/${traceSource.length}개 표시 중 (최근 1분, 간략)`
-                : `${traceSource.length}개 (최근 1분)`}
+          {mode === 'fixed'
+            ? `${frames.length} IDs`
+            : paused
+              ? `일시중지 — ${ringSize}개${droppedRef.current > 0 ? ` (버림 ${droppedRef.current}개)` : ''}`
+              : `${ringSize}/10000개`}
         </span>
         <span className="spacer" />
-        <button className="small-btn" onClick={() => canStore.clearFrames()}>
+        <button className="small-btn" onClick={handleClear}>
           Clear
         </button>
       </div>
-      {paused ? (
-        <TraceView rows={snapshotRows} live={false} />
-      ) : mode === 'trace' ? (
-        <TraceView rows={displayRows} rawTotal={traceSource.length} live={true} onUserScroll={handleUserScrollPause} />
+      {mode === 'trace' ? (
+        <TraceView rows={liveRingRows} live={!paused} />
       ) : (
         <FixedTable frames={frames} dbc={dbc} expanded={expanded} onToggle={toggleExpanded} />
       )}
@@ -444,31 +510,19 @@ function SignalDetail({ frame, dbc }: { frame: FrameEntry; dbc: DbcSummary }) {
   );
 }
 
-// Lightweight virtual list: the last-minute buffer can hold tens of
-// thousands of frames, so only the visible rows are rendered.
-// Live mode: oldest at top, newest at bottom, auto-scroll down only when
-// user is already at bottom. While live we decimate rows in the parent
-// (full skip) so render load stays low; paused shows all rows.
+// 위젯 로컬 10k 링버퍼용 가상 스크롤 뷰.
+// - 맨 윗줄부터 순차 표시, 창 가득 후 live에서는 tail pin (아래→위 한 줄씩, burst 시 스킵 허용)
+// - 일시정지(live=false) 시 동결 스냅샷을 자유 스크롤(위로 올려 과거 확인), 자동 pause 없음
 const ROW_H = 22;
 const OVERSCAN = 10;
 
-function TraceView({
-  rows,
-  live,
-  rawTotal: _rawTotal,
-  onUserScroll,
-}: {
-  rows: RxFrame[];
-  live: boolean;
-  rawTotal?: number;
-  onUserScroll?: () => void;
-}) {
+function TraceView({ rows, live }: { rows: RxFrame[]; live: boolean }) {
   const outerRef = useRef<HTMLDivElement>(null);
   const [scrollTop, setScrollTop] = useState(0);
   const [viewH, setViewH] = useState(200);
   const total = rows.length;
-  const rafScrollRef = useRef<number | null>(null);
   const tickingRef = useRef(false);
+  const didMountPausedRef = useRef(false);
 
   useEffect(() => {
     const el = outerRef.current;
@@ -480,20 +534,28 @@ function TraceView({
     return () => ro.disconnect();
   }, []);
 
-  // auto-scroll down only when already at bottom (natural scroll)
-  useEffect(() => {
-    if (!live || !outerRef.current) return;
+  // P0: 창이 안 찬 상태에서는 핀 금지 — 맨 윗줄부터 순차 유지, 깜빡임 방지
+  // P1: useLayoutEffect로 페인트 전 동기 핀 — 이중 rAF 제거
+  useLayoutEffect(() => {
     const el = outerRef.current;
-    const wasAtBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
-    if (!wasAtBottom) return;
-    if (rafScrollRef.current !== null) cancelAnimationFrame(rafScrollRef.current);
-    rafScrollRef.current = requestAnimationFrame(() => {
-      if (outerRef.current) outerRef.current.scrollTop = outerRef.current.scrollHeight;
-      rafScrollRef.current = null;
-    });
-    return () => {
-      if (rafScrollRef.current !== null) cancelAnimationFrame(rafScrollRef.current);
-    };
+    if (!el) return;
+    // paused 진입 시 1회만 바닥으로 스크롤해 최신이 보이게 함 — 이후 사용자 스크롤은 유지
+    if (!live) {
+      if (total > 0 && !didMountPausedRef.current) {
+        didMountPausedRef.current = true;
+        if (el.scrollHeight > el.clientHeight) {
+          el.scrollTop = el.scrollHeight;
+          setScrollTop(el.scrollTop);
+        }
+      }
+      return;
+    }
+    didMountPausedRef.current = false;
+    // live: 오버플로우일 때만 tail pin (여러 줄 스킵 허용 — 요구 4)
+    if (el.scrollHeight <= el.clientHeight) return;
+    el.scrollTop = el.scrollHeight;
+    // DOM과 React 상태를 동기화해 가상 윈도우가 한 프레임 늦지 않게 함
+    setScrollTop(el.scrollTop);
   }, [live, total]);
 
   const first = Math.max(0, Math.floor(scrollTop / ROW_H) - OVERSCAN);
@@ -520,10 +582,6 @@ function TraceView({
           requestAnimationFrame(() => {
             tickingRef.current = false;
             setScrollTop(el.scrollTop);
-            if (live && onUserScroll) {
-              const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
-              if (!atBottom) onUserScroll();
-            }
           });
         }}
       >

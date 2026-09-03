@@ -83,7 +83,7 @@ export interface BackendStatus {
     tx_count: number;
     rx_count: number;
     duration_s: number;
-    progress: { sent: number; skipped: number; total: number; running: boolean };
+    progress: { sent: number; skipped: number; total: number; running: boolean; paused?: boolean };
   };
   dbc: { loaded: boolean; filename: string | null };
   settings: { ws_flush_ms: number };
@@ -184,6 +184,7 @@ export interface TestRunnerSummary {
   loaded: boolean;
   filename: string | null;
   running: boolean;
+  paused: boolean;
   running_case: string | null;
   case_count: number;
   result_count: number;

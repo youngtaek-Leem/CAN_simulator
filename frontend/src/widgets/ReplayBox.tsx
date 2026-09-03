@@ -51,6 +51,33 @@ export function ReplayBox({ config }: { config: WidgetConfig }) {
     }
   };
 
+  const pause = async () => {
+    try {
+      await api.replayPause();
+      setError(null);
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
+
+  const resume = async () => {
+    try {
+      await api.replayResume();
+      setError(null);
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
+
+  const stop = async () => {
+    try {
+      await api.replayStop();
+      setError(null);
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
+
   const filterHint =
     selectedIds.length === 0
       ? '선택 없음 → 전체 재생'
@@ -102,12 +129,31 @@ export function ReplayBox({ config }: { config: WidgetConfig }) {
           onClick={start}
           disabled={!replay?.loaded || progress?.running}
         >
-          ▶ Replay Start
+          ▶ Start
         </button>
+        {progress?.paused ? (
+          <button
+            className="small-btn primary"
+            onClick={resume}
+            disabled={!progress?.running || !progress?.paused}
+          >
+            ▶ Resume
+          </button>
+        ) : (
+          <button
+            className="small-btn"
+            onClick={pause}
+            disabled={!progress?.running || progress?.paused}
+            title={progress?.running ? '일시정지 — Stop과 달리 진행률을 유지합니다' : ''}
+          >
+            ⏸ Pause
+          </button>
+        )}
         <button
           className="small-btn danger"
-          onClick={() => api.replayStop()}
-          disabled={!progress?.running}
+          onClick={stop}
+          disabled={!replay?.loaded || (!progress?.running && progress?.sent === 0 && progress?.skipped === 0)}
+          title="정지 후 Progress를 초기 로딩 상태로 되돌립니다"
         >
           ■ Stop
         </button>
@@ -118,7 +164,7 @@ export function ReplayBox({ config }: { config: WidgetConfig }) {
       <div className="replay-row hint">
         {progress
           ? `${progress.sent} sent / ${progress.skipped} skipped / ${progress.total} total ${
-              progress.running ? '(재생 중)' : ''
+              progress.paused ? '(일시정지)' : progress.running ? '(재생 중)' : ''
             }`
           : ''}
       </div>

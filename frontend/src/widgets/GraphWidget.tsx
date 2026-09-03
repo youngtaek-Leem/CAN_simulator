@@ -1,6 +1,5 @@
 // CAN signal graph widget: left signal picker (DBC-based) + right chart stack.
-// Left layout mirrors CanLogAnalysisWidget: "signal 이름 직접입력" + 메시지별/Signal별
-// Right shows selected signals as stacked canvas charts sharing xWindowMs.
+// Shared X: 좌측 0s 단조 증가, 좌→우로 채운 뒤 우측 도달 후 우→좌 슬라이드. Pause는 그리기만 동결.
 
 import { useEffect, useRef, useState, type MutableRefObject } from 'react';
 import { canStore, useCanVersion, type HistoryPoint } from '../store/canStore';
@@ -22,13 +21,6 @@ interface GraphSeries {
   color: string;
 }
 
-interface ViewRange {
-  xMin: number | null;
-  xMax: number | null;
-  yMin: number | null;
-  yMax: number | null;
-}
-
 interface Geom {
   xMin: number;
   xMax: number;
@@ -39,6 +31,8 @@ interface Geom {
   plotW: number;
   plotH: number;
 }
+
+type SharedXView = { xMin: number | null; xMax: number | null };
 
 const PALETTE = [
   '#3b82f6',
@@ -79,11 +73,22 @@ function niceTicks(min: number, max: number, count: number): number[] {
   return Array.from({ length: count + 1 }, (_, i) => min + step * i);
 }
 
-function fmtValue(v: number, mode: 'hex' | 'dec'): string {
-  const n = Math.round(v);
-  if (mode === 'dec') return n.toString();
-  const abs = Math.abs(n).toString(16).toUpperCase();
-  return n < 0 ? `-0x${abs}` : `0x${abs}`;
+function fmtTimeMs(ms: number): string {
+  if (ms < 1000) return `${ms.toFixed(0)}ms`;
+  return `${(ms / 1000).toFixed(3)}s`;
+}
+
+function fmtValueRaw(v: number, mode: 'dec' | 'hex' | 'desc', choices: Record<string, string> | null): string {
+  if (mode === 'hex') {
+    const n = Math.round(v);
+    const abs = Math.abs(n).toString(16).toUpperCase();
+    return n < 0 ? `-0x${abs}` : `0x${abs}`;
+  }
+  if (mode === 'desc' && choices) {
+    const lbl = choices[String(Math.round(v))];
+    if (lbl !== undefined) return `${lbl} (${Math.round(v)})`;
+  }
+  return String(Math.round(v));
 }
 
 function fmtWindow(ms: number): string {
@@ -103,6 +108,15 @@ function visibleWithPadding(points: HistoryPoint[], xMin: number, xMax: number):
   if (end < points.length - 1) end += 1;
   if (start > end) return [];
   return points.slice(start, end + 1);
+}
+
+function findHeldPoint(points: HistoryPoint[], hoverX: number): HistoryPoint | null {
+  let held: HistoryPoint | null = null;
+  for (const p of points) {
+    if (canStore.relMs(p.ts) <= hoverX) held = p;
+    else break;
+  }
+  return held;
 }
 
 export function GraphWidget({ config }: { config: WidgetConfig }) {
@@ -163,6 +177,15 @@ export function GraphWidget({ config }: { config: WidgetConfig }) {
     setXWindowMs((w) => Math.min(MAX_X_WINDOW_MS, Math.max(MIN_X_WINDOW_MS, w + deltaMs)));
   };
 
+  // 광역 값 표시 모드 (모든 그래프에 일괄 적용) — 레이아웃에 저장
+  const globalValueMode = (config.options.globalValueMode as 'dec' | 'hex' | 'desc' | undefined) ?? 'dec';
+  const [globalValueVersion, setGlobalValueVersion] = useState(0);
+  const cycleGlobalValueMode = () => {
+    const next = globalValueMode === 'dec' ? 'hex' : globalValueMode === 'hex' ? 'desc' : 'dec';
+    updateWidget({ ...config, options: { ...config.options, globalValueMode: next } });
+    setGlobalValueVersion((v) => v + 1);
+  };
+
   const [cursorMode, setCursorMode] = useState(false);
   const [cursorA, setCursorA] = useState<number | null>(null);
   const [cursorB, setCursorB] = useState<number | null>(null);
@@ -172,8 +195,8 @@ export function GraphWidget({ config }: { config: WidgetConfig }) {
   };
   const toggleCursorMode = () => {
     if (!cursorMode && cursorA === null && cursorB === null) {
-      const xMax = canStore.nowMs();
-      const xMin = xMax - xWindowMs;
+      const xMax = sharedXRef.current.xMax ?? canStore.nowMs();
+      const xMin = sharedXRef.current.xMin ?? Math.max(0, xMax - xWindowMs);
       setCursorA(xMin + (xMax - xMin) / 3);
       setCursorB(xMin + ((xMax - xMin) * 2) / 3);
     }
@@ -181,6 +204,46 @@ export function GraphWidget({ config }: { config: WidgetConfig }) {
   };
   const cursor: DiffCursorState = { mode: cursorMode, a: cursorA, b: cursorB, onMove: onCursorMove };
   const cursorDeltaMs = cursorA !== null && cursorB !== null ? Math.abs(cursorB - cursorA) : null;
+
+  // 공유 X + Pause + Hover (전 차트 동기)
+  const sharedXRef = useRef<SharedXView>({ xMin: null, xMax: null });
+  const [sharedVersion, setSharedVersion] = useState(0);
+  const notifyChange = () => setSharedVersion((n) => n + 1);
+  const [paused, setPaused] = useState(false);
+  const frozenXMaxRef = useRef<number | null>(null);
+  const hoverXRef = useRef<number | null>(null);
+  const hoveredIdxRef = useRef<number | null>(null);
+  const setHoverX = (x: number | null) => {
+    hoverXRef.current = x;
+    notifyChange();
+  };
+  const [resetToken, setResetToken] = useState(0);
+
+  const togglePause = () => {
+    if (!paused) {
+      frozenXMaxRef.current = sharedXRef.current.xMax ?? canStore.nowMs();
+      setPaused(true);
+    } else {
+      frozenXMaxRef.current = null;
+      sharedXRef.current = { xMin: null, xMax: null };
+      setPaused(false);
+      notifyChange();
+    }
+  };
+  const resetSharedX = () => {
+    sharedXRef.current = { xMin: null, xMax: null };
+    setResetToken((n) => n + 1);
+    notifyChange();
+  };
+
+  // 라이브 롤링 — 공유 X가 auto일 때만 tick, Pause 시 정지
+  useEffect(() => {
+    if (paused) return;
+    const id = setInterval(() => {
+      if (sharedXRef.current.xMin === null) notifyChange();
+    }, LIVE_TICK_MS);
+    return () => clearInterval(id);
+  }, [paused]);
 
   const rxNode = canStore.getRxNode();
   const searchLower = search.trim().toLowerCase();
@@ -260,6 +323,12 @@ export function GraphWidget({ config }: { config: WidgetConfig }) {
         <button className="icon-btn" title="X축 확대 (시간 범위 5초 좁게)" onClick={() => zoomXWindow(-X_WINDOW_STEP_MS)}>
           +
         </button>
+        <button className="icon-btn" title="모든 그래프 값 표시 형식 일괄 전환 (DEC/HEX/DESC) — 각 그래프 로컬 버튼은 해당 그래프만 변경" onClick={cycleGlobalValueMode}>
+          {globalValueMode === 'dec' ? 'DEC' : globalValueMode === 'hex' ? 'HEX' : 'DESC'}
+        </button>
+        <button className={`small-btn ${paused ? 'primary' : ''}`} title={paused ? '그래프 재개 (수집은 계속됨)' : '그래프 일시정지 (그리기만 멈춤, 수집은 계속)'} onClick={togglePause}>
+          {paused ? '▶ Resume' : '⏸ Pause'}
+        </button>
         <button className={`small-btn ${cursorMode ? 'primary' : ''}`} title="차트에서 드래그해 두 커서를 움직이면 그 사이의 시간 간격을 읽을 수 있습니다" onClick={toggleCursorMode}>
           커서 {cursorMode ? 'ON' : 'OFF'}
         </button>
@@ -271,6 +340,9 @@ export function GraphWidget({ config }: { config: WidgetConfig }) {
             {`: Δ ${fmtDelta(cursorDeltaMs)}`}
           </span>
         )}
+        <button className="icon-btn" title="모든 그래프 X/Y 리셋" onClick={resetSharedX}>
+          ⟲
+        </button>
       </div>
       <div className="syslog-body">
         <div className="syslog-idlist">
@@ -385,7 +457,19 @@ export function GraphWidget({ config }: { config: WidgetConfig }) {
                 series={s}
                 showXAxis={i === series.length - 1}
                 xWindowMs={xWindowMs}
+                xViewRef={sharedXRef}
+                xVersion={sharedVersion}
+                notifyChange={notifyChange}
+                paused={paused}
+                frozenXMax={frozenXMaxRef.current}
+                hoverXRef={hoverXRef}
+                hoveredIdxRef={hoveredIdxRef}
+                setHoverX={setHoverX}
+                graphIndex={i}
                 cursor={cursor}
+                resetToken={resetToken}
+                globalValueMode={globalValueMode}
+                globalValueVersion={globalValueVersion}
                 onRemove={() => removeSeries(seriesKey(s))}
                 onMoveUp={() => moveSeries(i, -1)}
                 onMoveDown={() => moveSeries(i, 1)}
@@ -475,12 +559,24 @@ function VerticalScrollbar({ targetRef }: { targetRef: MutableRefObject<HTMLDivE
   );
 }
 
-// One independent mini-chart for a single signal: own canvas, own X/Y view
+// 공유 X + Pause + Hover + 광역/로컬 값 표시 대응 SignalChart
 function SignalChart({
   series,
   showXAxis,
   xWindowMs,
+  xViewRef,
+  xVersion,
+  notifyChange,
+  paused,
+  frozenXMax,
+  hoverXRef,
+  hoveredIdxRef,
+  setHoverX,
+  graphIndex,
   cursor,
+  resetToken,
+  globalValueMode,
+  globalValueVersion,
   onRemove,
   onMoveUp,
   onMoveDown,
@@ -495,7 +591,19 @@ function SignalChart({
   series: GraphSeries;
   showXAxis: boolean;
   xWindowMs: number;
+  xViewRef: MutableRefObject<SharedXView>;
+  xVersion: number;
+  notifyChange: () => void;
+  paused: boolean;
+  frozenXMax: number | null;
+  hoverXRef: MutableRefObject<number | null>;
+  hoveredIdxRef: MutableRefObject<number | null>;
+  setHoverX: (x: number | null) => void;
+  graphIndex: number;
   cursor: DiffCursorState;
+  resetToken: number;
+  globalValueMode: 'dec' | 'hex' | 'desc';
+  globalValueVersion: number;
   onRemove: () => void;
   onMoveUp: () => void;
   onMoveDown: () => void;
@@ -507,14 +615,24 @@ function SignalChart({
   onDrop?: (e: React.DragEvent) => void;
   onDragEnd?: () => void;
 }) {
-  useCanVersion();
+  const version = useCanVersion();
   const key = seriesKey(series);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
-  const viewRef = useRef<ViewRange>({ xMin: null, xMax: null, yMin: null, yMax: null });
-  const dragRef = useRef<{ x: number; y: number; view: ViewRange } | null>(null);
+  const yViewRef = useRef<{ yMin: number | null; yMax: number | null }>({ yMin: null, yMax: null });
+  const dragRef = useRef<{ x: number; y: number; xView: SharedXView; yView: { yMin: number | null; yMax: number | null } } | null>(null);
   const cursorDragRef = useRef<'a' | 'b' | null>(null);
-  const [valueMode, setValueMode] = useState<'hex' | 'dec'>('hex');
+  // 로컬 값 표시 모드 (null이면 광역 추종) — 광역 변경 시 덮어쓰기
+  const [localValueMode, setLocalValueMode] = useState<'hex' | 'dec' | 'desc' | null>(null);
+  useEffect(() => {
+    setLocalValueMode(null);
+  }, [globalValueVersion]);
+  const valueMode = localValueMode ?? globalValueMode;
+  const cycleLocalValueMode = () => {
+    const eff = localValueMode ?? globalValueMode;
+    const next = eff === 'dec' ? 'hex' : eff === 'hex' ? 'desc' : 'dec';
+    setLocalValueMode(next);
+  };
   const lastGeomRef = useRef<Geom>({
     xMin: 0,
     xMax: 1,
@@ -526,8 +644,12 @@ function SignalChart({
     plotH: 1,
   });
   const [size, setSize] = useState({ w: 260, h: 200 });
-  const [, bump] = useState(0);
-  const redraw = () => bump((n) => n + 1);
+  const { dbc } = useApp();
+  const choices = (() => {
+    const msg = dbc.messages?.find((m) => m.name === series.message);
+    const sig = msg?.signals.find((s) => s.name === series.signal);
+    return sig?.choices ?? null;
+  })();
 
   useEffect(() => {
     canStore.watchSignal(key);
@@ -545,38 +667,29 @@ function SignalChart({
   }, []);
 
   useEffect(() => {
-    const id = setInterval(() => {
-      if (viewRef.current.xMin === null) redraw();
-    }, LIVE_TICK_MS);
-    return () => clearInterval(id);
-  }, []);
-
-  const resetView = () => {
-    viewRef.current = { xMin: null, xMax: null, yMin: null, yMax: null };
-    redraw();
-  };
+    yViewRef.current = { yMin: null, yMax: null };
+  }, [resetToken]);
 
   const zoomXButton = (factor: number) => {
     const g = lastGeomRef.current;
-    const v = viewRef.current;
-    const xMin = v.xMin ?? g.xMin;
-    const xMax = v.xMax ?? g.xMax;
+    const xMin = xViewRef.current.xMin ?? g.xMin;
+    const xMax = xViewRef.current.xMax ?? g.xMax;
     const center = (xMin + xMax) / 2;
     const halfWidth = ((xMax - xMin) / 2) * factor;
-    v.xMin = center - halfWidth;
-    v.xMax = center + halfWidth;
-    redraw();
+    xViewRef.current.xMin = center - halfWidth;
+    xViewRef.current.xMax = center + halfWidth;
+    notifyChange();
   };
   const zoomYButton = (factor: number) => {
     const g = lastGeomRef.current;
-    const v = viewRef.current;
+    const v = yViewRef.current;
     const yMin = v.yMin ?? g.yMin;
     const yMax = v.yMax ?? g.yMax;
     const center = (yMin + yMax) / 2;
     const halfHeight = ((yMax - yMin) / 2) * factor;
     v.yMin = center - halfHeight;
     v.yMax = center + halfHeight;
-    redraw();
+    notifyChange();
   };
 
   useEffect(() => {
@@ -602,11 +715,18 @@ function SignalChart({
 
     const points = canStore.signalHistory.get(key) ?? [];
 
-    let xMin = viewRef.current.xMin;
-    let xMax = viewRef.current.xMax;
+    let xMin = xViewRef.current.xMin;
+    let xMax = xViewRef.current.xMax;
     if (xMin === null || xMax === null) {
-      xMax = canStore.nowMs();
-      xMin = xMax - xWindowMs;
+      const now = paused && frozenXMax !== null ? frozenXMax : canStore.nowMs();
+      xMax = now;
+      xMin = Math.max(0, xMax - xWindowMs);
+      // 초기 + Pause 중에도 xMin이 0에서 시작해 단조 증가하도록 클램프
+      // xMax가 window보다 작을 때는 0~xMax로 신축, 이후 window 폭 유지
+      if (xMax < xWindowMs) {
+        xMin = 0;
+        // xMax는 그대로 now (창이 다 차기 전까지는 오른쪽 여백이 생김 — 좌→우 채우기)
+      }
     }
 
     const visible = points.filter((p) => {
@@ -614,8 +734,8 @@ function SignalChart({
       return x >= xMin! && x <= xMax!;
     });
 
-    let yMin = viewRef.current.yMin;
-    let yMax = viewRef.current.yMax;
+    let yMin = yViewRef.current.yMin;
+    let yMax = yViewRef.current.yMax;
     if (yMin === null || yMax === null) {
       if (visible.length > 0) {
         const ys = visible.map((p) => p.value);
@@ -637,21 +757,25 @@ function SignalChart({
     ctx.fillStyle = '#8b909c';
     ctx.font = '10px monospace';
     ctx.lineWidth = 1;
-    for (const t of niceTicks(xMin, xMax, 3)) {
+    for (const t of niceTicks(xMin, xMax, 10)) {
       const px = xToPx(t);
       ctx.beginPath();
       ctx.moveTo(px, plotTop);
       ctx.lineTo(px, plotTop + plotH);
       ctx.stroke();
-      if (showXAxis) ctx.fillText(`${Math.round(t)}`, px - 12, h - 6);
+      if (showXAxis) ctx.fillText(fmtTimeMs(t), px - 16, h - 6);
     }
-    for (const t of niceTicks(yMin, yMax, 4)) {
+    // Y 틱: DESC이고 distinct가 12개 이하면 실제 값으로, 아니면 niceTicks
+    const distinct = [...new Set(visible.map((p) => p.value))].sort((a, b) => a - b);
+    const yTickValues = valueMode === 'desc' && distinct.length > 0 && distinct.length <= 12 ? distinct : niceTicks(yMin, yMax, 4);
+    for (const t of yTickValues) {
       const py = yToPx(t);
+      if (py < plotTop - 0.5 || py > plotTop + plotH + 0.5) continue;
       ctx.beginPath();
       ctx.moveTo(plotLeft, py);
       ctx.lineTo(plotLeft + plotW, py);
       ctx.stroke();
-      ctx.fillText(fmtValue(t, valueMode), 2, py + 3);
+      ctx.fillText(fmtValueRaw(t, valueMode, choices), 2, py + 3);
     }
     ctx.strokeStyle = '#4b5160';
     ctx.strokeRect(plotLeft, plotTop, plotW, plotH);
@@ -697,10 +821,41 @@ function SignalChart({
 
     drawDiffCursors(ctx, cursor, xMin, xMax, plotTop, plotH, xToPx);
 
+    // 전 차트 동기 Hover: 십자선 + 툴팁
+    const hoverX = hoverXRef.current;
+    if (hoverX !== null && hoverX >= xMin && hoverX <= xMax) {
+      const px = xToPx(hoverX);
+      ctx.save();
+      ctx.strokeStyle = '#ffffff88';
+      ctx.setLineDash([2, 2]);
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(px, plotTop);
+      ctx.lineTo(px, plotTop + plotH);
+      ctx.stroke();
+      ctx.restore();
+    }
+    if (hoverX !== null && hoveredIdxRef.current === graphIndex) {
+      const held = findHeldPoint(points, hoverX);
+      const text = `${fmtTimeMs(hoverX)}  ${held ? fmtValueRaw(held.value, valueMode, choices) : '-'}`;
+      ctx.font = '10px monospace';
+      const tw = ctx.measureText(text).width;
+      const px = xToPx(hoverX);
+      let tx = px + 6;
+      if (tx + tw + 6 > w) tx = px - tw - 6;
+      const ty = plotTop + 12;
+      ctx.fillStyle = 'rgba(0,0,0,0.8)';
+      ctx.fillRect(tx - 3, ty - 10, tw + 6, 14);
+      ctx.fillStyle = '#ffffff';
+      ctx.fillText(text, tx, ty);
+    }
+
     lastGeomRef.current = { xMin, xMax, yMin, yMax, plotLeft, plotTop, plotW, plotH };
-  });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [size, xWindowMs, xVersion, paused, frozenXMax, series, showXAxis, valueMode, resetToken, version]);
 
   const onWheel = (e: React.WheelEvent<HTMLCanvasElement>) => {
+    if (!e.ctrlKey) return;
     e.preventDefault();
     const rect = canvasRef.current!.getBoundingClientRect();
     const px = e.clientX - rect.left;
@@ -714,23 +869,24 @@ function SignalChart({
 
     const zoomX = overXAxisStrip || (inX && inY);
     const zoomY = overYAxisStrip;
-    const v = viewRef.current;
 
     if (zoomX) {
       const cursorX = g.xMin + ((px - g.plotLeft) / g.plotW) * (g.xMax - g.xMin);
-      const xMin = v.xMin ?? g.xMin;
-      const xMax = v.xMax ?? g.xMax;
-      v.xMin = cursorX - (cursorX - xMin) * factor;
-      v.xMax = cursorX + (xMax - cursorX) * factor;
+      const xMin = xViewRef.current.xMin ?? g.xMin;
+      const xMax = xViewRef.current.xMax ?? g.xMax;
+      xViewRef.current.xMin = cursorX - (cursorX - xMin) * factor;
+      xViewRef.current.xMax = cursorX + (xMax - cursorX) * factor;
+      notifyChange();
+      return;
     }
     if (zoomY) {
       const cursorY = g.yMax - ((py - g.plotTop) / g.plotH) * (g.yMax - g.yMin);
-      const yMin = v.yMin ?? g.yMin;
-      const yMax = v.yMax ?? g.yMax;
-      v.yMin = cursorY - (cursorY - yMin) * factor;
-      v.yMax = cursorY + (yMax - cursorY) * factor;
+      const yMin = yViewRef.current.yMin ?? g.yMin;
+      const yMax = yViewRef.current.yMax ?? g.yMax;
+      yViewRef.current.yMin = cursorY - (cursorY - yMin) * factor;
+      yViewRef.current.yMax = cursorY + (yMax - cursorY) * factor;
+      notifyChange();
     }
-    redraw();
   };
 
   const onPointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
@@ -752,11 +908,13 @@ function SignalChart({
     dragRef.current = {
       x: e.clientX,
       y: e.clientY,
-      view: {
-        xMin: orFallback(viewRef.current.xMin, g.xMin),
-        xMax: orFallback(viewRef.current.xMax, g.xMax),
-        yMin: orFallback(viewRef.current.yMin, g.yMin),
-        yMax: orFallback(viewRef.current.yMax, g.yMax),
+      xView: {
+        xMin: orFallback(xViewRef.current.xMin, g.xMin),
+        xMax: orFallback(xViewRef.current.xMax, g.xMax),
+      },
+      yView: {
+        yMin: orFallback(yViewRef.current.yMin, g.yMin),
+        yMax: orFallback(yViewRef.current.yMax, g.yMax),
       },
     };
   };
@@ -769,23 +927,49 @@ function SignalChart({
       return;
     }
     const drag = dragRef.current;
-    if (!drag) return;
+    if (drag) {
+      const g = lastGeomRef.current;
+      const dxPx = e.clientX - drag.x;
+      const dyPx = e.clientY - drag.y;
+      const dataDx = (dxPx / g.plotW) * (drag.xView.xMax! - drag.xView.xMin!);
+      const dataDy = (dyPx / g.plotH) * (drag.yView.yMax! - drag.yView.yMin!);
+      xViewRef.current = {
+        xMin: drag.xView.xMin! - dataDx,
+        xMax: drag.xView.xMax! - dataDx,
+      };
+      yViewRef.current = {
+        yMin: drag.yView.yMin! + dataDy,
+        yMax: drag.yView.yMax! + dataDy,
+      };
+      notifyChange();
+      return;
+    }
+    // Hover (전 차트 동기) — 드래그/커서 드래그 중이 아닐 때만
     const g = lastGeomRef.current;
-    const dxPx = e.clientX - drag.x;
-    const dyPx = e.clientY - drag.y;
-    const dataDx = (dxPx / g.plotW) * (drag.view.xMax! - drag.view.xMin!);
-    const dataDy = (dyPx / g.plotH) * (drag.view.yMax! - drag.view.yMin!);
-    viewRef.current = {
-      xMin: drag.view.xMin! - dataDx,
-      xMax: drag.view.xMax! - dataDx,
-      yMin: drag.view.yMin! + dataDy,
-      yMax: drag.view.yMax! + dataDy,
-    };
-    redraw();
+    const rect = canvasRef.current!.getBoundingClientRect();
+    const px = e.clientX - rect.left;
+    const py = e.clientY - rect.top;
+    if (px < g.plotLeft || px > g.plotLeft + g.plotW || py < g.plotTop || py > g.plotTop + g.plotH) {
+      if (hoverXRef.current !== null) {
+        setHoverX(null);
+        hoveredIdxRef.current = null;
+      }
+      return;
+    }
+    setHoverX(g.xMin + ((px - g.plotLeft) / g.plotW) * (g.xMax - g.xMin));
+    hoveredIdxRef.current = graphIndex;
   };
   const onPointerUp = () => {
     dragRef.current = null;
     cursorDragRef.current = null;
+  };
+  const onPointerLeave = () => {
+    dragRef.current = null;
+    cursorDragRef.current = null;
+    if (hoverXRef.current !== null) {
+      setHoverX(null);
+      hoveredIdxRef.current = null;
+    }
   };
 
   return (
@@ -796,8 +980,8 @@ function SignalChart({
           {series.signal}
         </span>
         <span className="spacer" />
-        <button className="icon-btn" title="Y값 표시 형식(16진수/10진수) 전환" onClick={() => setValueMode((m) => (m === 'hex' ? 'dec' : 'hex'))}>
-          {valueMode === 'hex' ? 'HEX' : 'DEC'}
+        <button className="icon-btn" title="이 그래프만 값 표시 형식 전환 (로컬, DEC/HEX/DESC)" onClick={cycleLocalValueMode}>
+          {valueMode === 'dec' ? 'DEC' : valueMode === 'hex' ? 'HEX' : 'DESC'}
         </button>
         <button className="icon-btn" title="X축 확대" onClick={() => zoomXButton(1 / BUTTON_ZOOM_FACTOR)}>
           X+
@@ -811,7 +995,7 @@ function SignalChart({
         <button className="icon-btn" title="Y축 축소" onClick={() => zoomYButton(BUTTON_ZOOM_FACTOR)}>
           Y−
         </button>
-        <button className="icon-btn" title="X/Y 축 자동 맞춤으로 리셋" onClick={resetView}>
+        <button className="icon-btn" title="X/Y 리셋 (공유 X)" onClick={() => { yViewRef.current = { yMin: null, yMax: null }; xViewRef.current = { xMin: null, xMax: null }; notifyChange(); }}>
           ⟲
         </button>
         <button className="icon-btn" title="위로 이동" disabled={!canMoveUp} onClick={onMoveUp}>
@@ -831,7 +1015,7 @@ function SignalChart({
           onPointerDown={onPointerDown}
           onPointerMove={onPointerMove}
           onPointerUp={onPointerUp}
-          onPointerLeave={onPointerUp}
+          onPointerLeave={onPointerLeave}
         />
       </div>
     </div>

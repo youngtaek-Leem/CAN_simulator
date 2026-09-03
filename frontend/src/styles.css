@@ -1329,6 +1329,42 @@ td.empty {
   resize: vertical;
   font-size: 12px;
   padding: 6px;
+  line-height: 18px;
+}
+
+.isotp-data-wrap {
+  position: relative;
+  flex: 1;
+  display: flex;
+  min-height: 60px;
+}
+
+.isotp-data-highlight {
+  position: absolute;
+  inset: 0;
+  padding: 6px;
+  font-family: 'SF Mono', Menlo, Consolas, 'Courier New', monospace;
+  font-size: 12px;
+  line-height: 18px;
+  white-space: pre;
+  overflow: hidden;
+  pointer-events: none;
+  border-radius: 4px;
+}
+
+.isotp-line {
+  min-height: 18px;
+}
+
+.isotp-line-active {
+  background: rgba(59, 130, 246, 0.18);
+  border-radius: 2px;
+}
+
+.isotp-data-input--overlay {
+  position: relative;
+  background: transparent;
+  /* 텍스트는 그대로 보이되 뒤 하이라이트가 비치도록 */
 }
 
 .isotp-result {

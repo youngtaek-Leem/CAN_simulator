@@ -179,6 +179,8 @@ class TestRunnerService:
         self._run_queue: list[Case] = []
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
+        self._pause_event = threading.Event()
+        self._paused = False
         self._running = False
         self._running_case: Optional[str] = None
         self._events: list[dict] = []
@@ -239,6 +241,7 @@ class TestRunnerService:
                 "loaded": self._script_name is not None,
                 "filename": self._script_name,
                 "running": self._running,
+                "paused": self._paused,
                 "running_case": self._running_case,
                 "case_count": len(self._cases),
                 "result_count": len(self._results),
@@ -288,16 +291,50 @@ class TestRunnerService:
     def _launch_thread(self) -> dict:
         self._last_recording = None
         self._stop_event.clear()
+        self._pause_event.clear()
+        self._paused = False
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
         return self.status()
 
+    def pause(self) -> dict:
+        with self._lock:
+            if not self._running:
+                raise RuntimeError("테스트 시나리오가 실행 중이 아닙니다")
+            if self._paused:
+                raise RuntimeError("이미 일시정지 상태입니다")
+            self._pause_event.set()
+            self._paused = True
+        self._log(type="Pause", status="일시정지")
+        return self.status()
+
+    def resume(self) -> dict:
+        with self._lock:
+            if not self._running:
+                raise RuntimeError("테스트 시나리오가 실행 중이 아닙니다")
+            if not self._paused:
+                raise RuntimeError("일시정지 상태가 아닙니다")
+            self._pause_event.clear()
+            self._paused = False
+        self._log(type="Resume", status="재개")
+        return self.status()
+
     def stop(self) -> dict:
         self._stop_event.set()
+        self._pause_event.clear()
+        with self._lock:
+            self._paused = False
         thread = self._thread
         if thread and thread.is_alive():
             thread.join(timeout=5.0)
         return self.status()
+
+    def _wait_if_paused(self) -> bool:
+        """일시정지 중이면 재개/중지될 때까지 대기. 중지되면 True 반환."""
+        while self._pause_event.is_set():
+            if self._stop_event.wait(timeout=0.05):
+                return True
+        return False
 
     def _log(self, **fields: Any) -> None:
         entry = {"ts": time.time(), **fields}
@@ -317,6 +354,8 @@ class TestRunnerService:
             for case in cases:
                 if self._stop_event.is_set():
                     break
+                if self._wait_if_paused():
+                    break
                 self._run_case(case)
         finally:
             # a script run is a self-contained scope: whatever periodic
@@ -325,7 +364,9 @@ class TestRunnerService:
             self._tx.stop_auto()
             with self._lock:
                 self._running = False
+                self._paused = False
                 self._running_case = None
+                self._pause_event.clear()
             self._save_result_file()
 
     def _run_case(self, case: Case) -> None:
@@ -333,6 +374,8 @@ class TestRunnerService:
             self._running_case = case.num
         for c in range(case.cycle):
             if self._stop_event.is_set():
+                return
+            if self._wait_if_paused():
                 return
             self._log(case=case.num, msg=f"케이스 {case.num} 반복 {c + 1}/{case.cycle} 시작")
             ok = self._run_steps(case.steps, case.num)
@@ -343,9 +386,13 @@ class TestRunnerService:
         for step in steps:
             if self._stop_event.is_set():
                 return ok
+            if self._wait_if_paused():
+                return ok
             if step.type == "loop":
                 for _ in range(step.cycle):
                     if self._stop_event.is_set():
+                        return ok
+                    if self._wait_if_paused():
                         return ok
                     if not self._run_steps(step.children, case_num):
                         ok = False
@@ -365,7 +412,21 @@ class TestRunnerService:
                 )
                 return True
             if t == "delay":
-                self._stop_event.wait(timeout=b["ms"] / 1000.0)
+                delay_s = b["ms"] / 1000.0
+                deadline = time.time() + delay_s
+                while time.time() < deadline:
+                    if self._stop_event.is_set():
+                        return True
+                    if self._pause_event.is_set():
+                        pause_start = time.time()
+                        if self._wait_if_paused():
+                            return True
+                        deadline += time.time() - pause_start
+                        continue
+                    remaining = deadline - time.time()
+                    if remaining <= 0:
+                        break
+                    self._stop_event.wait(timeout=min(remaining, 0.05))
                 return True
             if t == "CANResp":
                 ok = self._check_response(b)
@@ -440,7 +501,21 @@ class TestRunnerService:
         listener = _RespListener()
         self._can.add_listener(listener)
         try:
-            matched.wait(timeout=timeout_s)
+            deadline = time.time() + timeout_s
+            while time.time() < deadline:
+                if self._stop_event.is_set():
+                    break
+                if self._pause_event.is_set():
+                    pause_start = time.time()
+                    if self._wait_if_paused():
+                        break
+                    deadline += time.time() - pause_start
+                    continue
+                remaining = deadline - time.time()
+                if remaining <= 0:
+                    break
+                if matched.wait(timeout=min(remaining, 0.05)):
+                    break
         finally:
             self._can.remove_listener(listener)
         return matched.is_set()
@@ -537,12 +612,49 @@ class TestRunnerService:
         for _ in range(cycle):
             if self._stop_event.is_set():
                 return True
+            if self._wait_if_paused():
+                return True
             self._replay.start(mode, frame_ids)
+            # pause 시 replay도 함께 pause/resume
+            replay_paused = False
             while self._replay.info()["progress"]["running"]:
                 if self._stop_event.is_set():
                     self._replay.stop()
                     break
+                if self._pause_event.is_set():
+                    if not replay_paused:
+                        try:
+                            self._replay.pause()
+                        except Exception:
+                            pass
+                        replay_paused = True
+                    if self._wait_if_paused():
+                        try:
+                            self._replay.stop()
+                        except Exception:
+                            pass
+                        break
+                    if replay_paused:
+                        try:
+                            self._replay.resume()
+                        except Exception:
+                            pass
+                        replay_paused = False
+                    continue
+                else:
+                    if replay_paused:
+                        try:
+                            self._replay.resume()
+                        except Exception:
+                            pass
+                        replay_paused = False
                 time.sleep(0.05)
+            # 루프 탈출 시 replay가 pause 상태로 남아있지 않도록 정리
+            if replay_paused:
+                try:
+                    self._replay.resume()
+                except Exception:
+                    pass
         self._log(case=case_num, type="CANlogReplay", status="완료")
         return True
 

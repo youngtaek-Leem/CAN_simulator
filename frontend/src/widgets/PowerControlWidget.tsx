@@ -103,6 +103,10 @@ export function PowerControlWidget({ config }: { config: WidgetConfig }) {
     void run(() => api.powerSetBattery(parsed[0], parsed[1]));
   };
 
+  const submitOff = () => {
+    void run(() => api.powerSetBattery(0, 0));
+  };
+
   const toggleAcc = (next: boolean) => void run(() => api.powerSetAccIgn(next ? 'ACC_On' : 'ACC_Off'));
   const toggleIgn = (next: boolean) => void run(() => api.powerSetAccIgn(next ? 'IGN_On' : 'IGN_Off'));
 
@@ -150,6 +154,9 @@ export function PowerControlWidget({ config }: { config: WidgetConfig }) {
           <UnitField value={current} unit="A" disabled={!connected || autoActive} onChange={setCurrent} />
           <button className="small-btn primary" disabled={!connected || autoActive} onClick={submitBattery}>
             OK
+          </button>
+          <button className="small-btn" disabled={!connected || autoActive} onClick={submitOff} title="출력만 0V, 0A로 설정 (입력 값은 유지 — OK로 원래 값 복귀)">
+            OFF
           </button>
         </div>
         {connected && (

@@ -64,6 +64,7 @@ export function AudioMonitorWidget(_: { config: WidgetConfig }) {
   const [error, setError] = useState<string | null>(null);
   const [savedMsg, setSavedMsg] = useState<string | null>(null);
   const [xWindowMs, setXWindowMs] = useState(DEFAULT_X_WINDOW_MS);
+  const [resetToken, setResetToken] = useState(0);
   // Tracks the widget's own Record filename across polls so a 30-minute
   // segment rotation (server-side, see audio_service.py's rotation timer)
   // can be surfaced as an activity line instead of happening silently.
@@ -108,6 +109,7 @@ export function AudioMonitorWidget(_: { config: WidgetConfig }) {
     try {
       const r = await api.audioMonitorStart();
       if (!r.ok && r.reason) setError(r.reason);
+      else setResetToken((n) => n + 1);
     } catch (e) {
       setError((e as Error).message);
     }
@@ -119,6 +121,7 @@ export function AudioMonitorWidget(_: { config: WidgetConfig }) {
     try {
       const r = await api.audioRecordStart();
       if (!r.ok && r.reason) setError(r.reason);
+      else setResetToken((n) => n + 1);
     } catch (e) {
       setError((e as Error).message);
     }
@@ -146,6 +149,16 @@ export function AudioMonitorWidget(_: { config: WidgetConfig }) {
   const channels = level?.channels ?? [{ index: 0, peak: 0, rms: 0 }, { index: 1, peak: 0, rms: 0 }];
   const inputDevices = (audio?.devices ?? []).filter((d) => d.channels > 0);
   const streamStartedAtMs = level?.stream_started_at != null ? level.stream_started_at * 1000 : null;
+
+  // Start는 항상 Stop 상태에서만 호출되어야 하며, 버퍼 및 그래프를 모두 초기화 후 재시작
+  const prevActiveRef = useRef(false);
+  useEffect(() => {
+    const wasActive = prevActiveRef.current;
+    if (active && !wasActive) {
+      setResetToken((n) => n + 1);
+    }
+    prevActiveRef.current = active;
+  }, [active]);
 
   // Live/frozen "now" anchor: while active, tracks the current moment
   // (refreshed on every redraw); the instant `active` goes false, freezes at
@@ -235,8 +248,8 @@ export function AudioMonitorWidget(_: { config: WidgetConfig }) {
             nowAnchor={nowAnchor}
             xTickMode="sinceStreamStart"
             xTickDecimals={2}
-            resetToken={0}
-            onResetClick={() => {}}
+            resetToken={resetToken}
+            onResetClick={() => setResetToken((n) => n + 1)}
             resetTitle="X/Y 축 자동 맞춤으로 리셋"
           />
         ))}

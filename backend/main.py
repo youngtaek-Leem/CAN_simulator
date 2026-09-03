@@ -834,6 +834,22 @@ def replay_start(req: ReplayStartRequest):
         raise HTTPException(status_code=400, detail=str(exc))
 
 
+@app.post("/api/replay/pause")
+def replay_pause():
+    try:
+        return replay_service.pause()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/api/replay/resume")
+def replay_resume():
+    try:
+        return replay_service.resume()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
 @app.post("/api/replay/stop")
 def replay_stop():
     return replay_service.stop()
@@ -920,6 +936,22 @@ def testrunner_start():
         raise HTTPException(status_code=400, detail="no DBC loaded")
     try:
         return test_runner_service.start()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/api/testrunner/pause")
+def testrunner_pause():
+    try:
+        return test_runner_service.pause()
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/api/testrunner/resume")
+def testrunner_resume():
+    try:
+        return test_runner_service.resume()
     except RuntimeError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
@@ -1297,6 +1329,12 @@ def audio_record_start():
 @app.post("/api/audio/record/stop")
 def audio_record_stop():
     return audio_service.stop_widget_recording()
+
+
+@app.post("/api/audio/recording/stop")
+def audio_recording_stop():
+    """테스트 Sequence 실행기에서 러너가 시작한 녹음(owner='recording')을 위젯에서 Stop."""
+    return audio_service.stop()
 
 
 @app.post("/api/testrunner/golden/upload")
