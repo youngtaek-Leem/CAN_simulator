@@ -13,6 +13,9 @@ export interface DbcSignal {
   choices: Record<number, string> | null;
   send_type: 'event' | 'periodic';
   invalid_raw: number;
+  // DBC 정의 초기값의 물리값 (GenSigStartValue, 미정의 시 Invalid raw의
+  // 물리값). 구 백엔드 요약에는 없어 null일 수 있다.
+  default_value: number | null;
 }
 
 export interface DbcMessage {
@@ -542,4 +545,12 @@ export interface TxRow {
   periodic: boolean;
   isFd: boolean;
   bitrateSwitch: boolean;
+  // DBC 행의 수동 hex 오버라이드 모드 -- true면 신호 상태값 대신 dataHex를
+  // DBC의 frame_id로 직접 전송 (ID는 DBC 고정). 구 레이아웃에는 없어서
+  // undefined이며, 그 경우 false(신호 모드)로 취급한다.
+  rawOverride?: boolean;
+  // 신호 모드 행의 신호별 입력 텍스트 (물리값). 미입력 신호는 DBC 기본값
+  // (default_value, 없으면 Invalid)을 사용한다. 페이지 이동·레이아웃
+  // 저장 후에도 유지되도록 행에 영속화한다.
+  signalValues?: Record<string, string>;
 }

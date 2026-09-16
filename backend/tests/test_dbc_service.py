@@ -151,3 +151,62 @@ def test_fd_message_encode_decode_32_bytes():
     assert decoded["name"] == "FdSensorData"
     assert decoded["signals"]["Pressure"] == 1013.2
     assert decoded["signals"]["Humidity"] == 45.0
+
+
+def test_encode_initial_uses_start_value_or_invalid():
+    svc = DbcService()
+    svc.load_string(
+        """
+        BU_: ECU_A
+        BO_ 100 InitMsg: 8 ECU_A
+         SG_ WithStart : 0|8@1+ (1,0) [0|255] "" ECU_A
+         SG_ NoStart : 8|4@1+ (1,0) [0|15] "" ECU_A
+        BA_DEF_ SG_ "GenSigStartValue" INT 0 100000;
+        BA_ "GenSigStartValue" SG_ 100 WithStart 16;
+        """,
+        "init.dbc",
+    )
+    data = svc.encode_initial("InitMsg")
+    assert len(data) == 8
+    assert data[0] == 16  # DBC 정의 초기값
+    assert data[1] & 0x0F == 0x0F  # 미정의 신호는 Invalid(비트幅 최대값)
+
+
+def test_encode_initial_all_undefined_is_all_invalid():
+    # sample.dbc에는 GenSigStartValue가 없어 전 신호가 Invalid가 된다
+    svc = make_service()
+    data = svc.encode_initial("DriverCommand")
+    assert data[0] & 0x0F == 0x0F  # TurnSignal (4-bit)
+    assert (data[0] >> 4) & 0x1 == 1  # HornRequest (1-bit)
+    assert data[1] == 0xFF  # WiperMode (8-bit)
+    fd = svc.encode_initial("FdSensorData")
+    assert len(fd) == 32
+
+
+def test_summary_signal_default_value():
+    svc = make_service()
+    summary = svc.summary()
+    driver = next(m for m in summary["messages"] if m["name"] == "DriverCommand")
+    by_name = {s["name"]: s for s in driver["signals"]}
+    # GenSigStartValue 미정의 -> Invalid raw의 물리값
+    assert by_name["TurnSignal"]["default_value"] == 0xF
+    assert by_name["HornRequest"]["default_value"] == 1
+    assert by_name["WiperMode"]["default_value"] == 0xFF
+
+
+def test_summary_signal_default_value_uses_start_value():
+    svc = DbcService()
+    svc.load_string(
+        """
+        BU_: ECU_A
+        BO_ 100 InitMsg: 8 ECU_A
+         SG_ WithStart : 0|8@1+ (10,5) [0|255] "" ECU_A
+         SG_ NoStart : 8|8@1+ (1,0) [0|255] "" ECU_A
+        BA_DEF_ SG_ "GenSigStartValue" INT 0 100000;
+        BA_ "GenSigStartValue" SG_ 100 WithStart 16;
+        """,
+        "init.dbc",
+    )
+    by_name = {s["name"]: s for s in svc.summary()["messages"][0]["signals"]}
+    assert by_name["WithStart"]["default_value"] == 16 * 10 + 5
+    assert by_name["NoStart"]["default_value"] == 0xFF

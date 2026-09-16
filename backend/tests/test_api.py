@@ -872,3 +872,56 @@ def test_shutdown_endpoint_cleans_up_then_kills_process(monkeypatch):
 
     assert set(calls) >= {"tx", "can", "power", "audio"}
     assert kill_args == {"pid": main.os.getpid(), "sig": signal.SIGTERM}
+
+
+def test_dbc_message_initial_endpoint():
+    """GET /api/dbc/messages/{name}/initial -- TX 박스 직접 입력 모드의
+    프리필 값: DBC 정의 초기값(GenSigStartValue), 미정의 신호는 Invalid.
+    (dbc_service는 프로세스 전역 싱글톤이라 앞선 테스트의 DBC가 남아 있을
+    수 있어, DBC 미로드 분기는 여기서 assert하지 않는다.)"""
+    with make_client() as client:
+        client.post("/api/connect", json={"interface": "virtual", "channel": "t_api_init"})
+        try:
+            client.post(
+                "/api/dbc/upload",
+                files={"file": ("sample.dbc", (SAMPLES_DIR / "sample.dbc").read_bytes())},
+            )
+            r = client.get("/api/dbc/messages/DriverCommand/initial")
+            assert r.status_code == 200
+            body = r.json()
+            assert body["length"] == 8
+            assert body["is_fd"] is False
+            # sample.dbc에 초기값 정의가 없어 전 신호 Invalid
+            raw = bytes.fromhex(body["data_hex"])
+            assert len(raw) == 8
+            assert raw[0] & 0x0F == 0x0F  # TurnSignal (4-bit)
+            assert (raw[0] >> 4) & 0x1 == 1  # HornRequest (1-bit)
+            assert raw[1] == 0xFF  # WiperMode (8-bit)
+            r = client.get("/api/dbc/messages/FdSensorData/initial")
+            assert r.status_code == 200
+            assert r.json()["length"] == 32
+            assert r.json()["is_fd"] is True
+            assert len(bytes.fromhex(r.json()["data_hex"])) == 32
+            assert client.get("/api/dbc/messages/NoSuchMsg/initial").status_code == 400
+        finally:
+            client.post("/api/disconnect")
+
+
+def test_tx_signal_preset_endpoint():
+    """/api/tx/signal/preset -- 전송 없이 상태만 저장. CAN 미연결 상태에서도
+    저장만 가능해야 apply 단계에서 쓸 수 있다."""
+    with make_client() as client:
+        client.post(
+            "/api/dbc/upload",
+            files={"file": ("sample.dbc", (SAMPLES_DIR / "sample.dbc").read_bytes())},
+        )
+        r = client.post(
+            "/api/tx/signal/preset",
+            json={"message_name": "EngineData", "values": {"EngineSpeed": 2500}},
+        )
+        assert r.status_code == 200
+        assert r.json()["preset"] is True
+        # preset만으로는 자동 재전송 항목이 생기지 않는다
+        assert client.get("/api/status").json()["tx"]["auto_entries"] == []
+        client.post("/api/tx/auto/stop", json={})
+        client.post("/api/disconnect")

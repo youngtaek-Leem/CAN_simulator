@@ -130,6 +130,13 @@ class DbcService:
                             ),
                             "send_type": self._signal_send_type(m, s),
                             "invalid_raw": _invalid_raw(s),
+                            # DBC 정의 초기값의 물리값 (GenSigStartValue, 미정의 시
+                            # Invalid raw의 물리값) -- TX 박스 신호 에디터 기본값
+                            "default_value": (
+                                (s.raw_initial if s.raw_initial is not None else _invalid_raw(s))
+                                * float(s.scale)
+                                + float(s.offset)
+                            ),
                         }
                         for s in m.signals
                     ],
@@ -209,6 +216,19 @@ class DbcService:
         message = self.get_message(message_name)
         with self._lock:
             raw = dict(self._signal_state[message_name])
+        return message.encode(raw, scaling=False, strict=False)
+
+    def encode_initial(self, message_name: str) -> bytes:
+        """DBC에 정의된 초기값으로 인코딩한 페이로드.
+
+        각 신호는 GenSigStartValue(raw_initial)가 있으면 그 값을,
+        정의되어 있지 않으면 Invalid 값(비트幅 최대값)으로 채운다.
+        TX 박스의 DBC 직접 입력 모드에서 선택 직후의 프리필 값으로 쓴다."""
+        message = self.get_message(message_name)
+        raw = {
+            s.name: (s.raw_initial if s.raw_initial is not None else _invalid_raw(s))
+            for s in message.signals
+        }
         return message.encode(raw, scaling=False, strict=False)
 
     def set_raw_signal_value(self, message_name: str, signal_name: str, raw_value: int) -> None:

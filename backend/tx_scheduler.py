@@ -26,6 +26,33 @@ import diag_log
 EVENT_INVALID_DELAY_S = 0.030
 MAX_TX_ENTRIES = 20
 DEFAULT_AUTO_PERIOD_MS = 100.0
+MAX_CLASSIC_DATA_LEN = 8
+MAX_FD_DATA_LEN = 64
+# CAN-FD에서 실제로 전송 가능한 DLC 길이 (ISO 11898-1)
+FD_VALID_DATA_LENS = frozenset((0, 1, 2, 3, 4, 5, 6, 7, 8, 12, 16, 20, 24, 32, 48, 64))
+FD_VALID_LIST_TEXT = "0~8, 12, 16, 20, 24, 32, 48, 64"
+
+
+def _validate_raw_payload(data: Optional[bytes], is_fd: bool) -> None:
+    """raw 페이로드 길이 검증 -- 어긋나면 한글 ValueError.
+
+    FD 미체크 시 초과분은 자동 절삭하지 않고 에러로 알려 수정을 유도한다."""
+    if data is None:
+        return
+    n = len(data)
+    if not is_fd and n > MAX_CLASSIC_DATA_LEN:
+        raise ValueError(
+            f"{n}바이트 페이로드는 FD를 체크해야 전송할 수 있습니다 "
+            f"(classic CAN 최대 {MAX_CLASSIC_DATA_LEN}바이트)"
+        )
+    if is_fd:
+        if n > MAX_FD_DATA_LEN:
+            raise ValueError(f"{n}바이트는 CAN-FD 최대 {MAX_FD_DATA_LEN}바이트를 초과합니다")
+        if n not in FD_VALID_DATA_LENS:
+            raise ValueError(
+                f"CAN-FD에서는 {n}바이트 길이를 사용할 수 없습니다 "
+                f"(가능한 길이: {FD_VALID_LIST_TEXT})"
+            )
 
 # Diagnostic logging for the Windows "오디오 위젯 사용 중 CAN periodic 전송이 매우
 # 느려진다" 조사 (Requirement.md의 "CAN periodic 신호 영향 점검" 항목에서 이미 GIL
@@ -99,7 +126,12 @@ class TxScheduler:
         new: dict[str, TxEntry] = {}
         for e in entries:
             key = str(e["key"])
-            data = bytes.fromhex(e["data"]) if e.get("data") else None
+            try:
+                data = bytes.fromhex(e["data"]) if e.get("data") else None
+            except ValueError:
+                raise ValueError(f"잘못된 hex 데이터입니다 (key={key})")
+            if not e.get("message_name"):
+                _validate_raw_payload(data, bool(e.get("is_fd", False)))
             new[key] = TxEntry(
                 key=key,
                 arbitration_id=int(e["arbitration_id"]),
@@ -148,6 +180,7 @@ class TxScheduler:
         stored data is updated too, so any later periodic auto-resend for it
         keeps using the fresh value instead of reverting to what was last
         applied via configure()."""
+        _validate_raw_payload(data, is_fd)
         self._can.send(arbitration_id, data, is_extended, is_fd=is_fd, bitrate_switch=bitrate_switch)
         with self._lock:
             entry = self._entries.get(key) if key else None
@@ -193,6 +226,15 @@ class TxScheduler:
         for signal_name in values:
             result["signals"][signal_name] = self._dispatch_send_type(message, signal_name)
         return result
+
+    def preset_signal(self, message_name: str, values: dict[str, Any]) -> dict:
+        """Seed DBC signal state WITHOUT transmitting -- the TX box's signal
+        editor stores per-row values here on apply, so the scheduler's later
+        periodic resend (Start) and one-shot send_signal (Send) pick them up.
+        Unlike send_signal this arms nothing: no immediate frame, no
+        auto-entry, no 30ms-invalid follow-up."""
+        self._dbc.encode_with_values(message_name, values)
+        return {"preset": True, "message_name": message_name, "signals": sorted(values)}
 
     # ---- Random/Range value generators ("Random 버튼" widget) -------------
 

@@ -403,3 +403,35 @@ def test_fd_tx_row_configurable_flags():
         assert all(len(f.data) == 24 and f.is_fd and f.bitrate_switch for f in matching)
     finally:
         teardown_stack(cm, sched, peer)
+
+
+def test_preset_signal_seeds_state_without_transmitting():
+    """preset_signal()은 전송 없이 상태만 저장한다 -- 자동 재전송 항목도
+    생기지 않고, 프레임도 나가지 않으며, 이후 주기 재전송이 저장값을 쓴다."""
+    cm, dbc, sched, peer = setup_stack("t_preset")
+    try:
+        res = sched.preset_signal("EngineData", {"EngineSpeed": 3000})
+        assert res["preset"] is True
+        # nothing armed, nothing sent
+        assert sched.status()["auto_entries"] == []
+        assert peer.recv(timeout=0.15) is None
+        # the seeded value is what a later periodic resend picks up
+        sched.configure(
+            [
+                {
+                    "key": "eng",
+                    "arbitration_id": 0x100,
+                    "period_ms": 20,
+                    "message_name": "EngineData",
+                }
+            ]
+        )
+        sched.start()
+        frames = collect(peer, 0.3)
+        sched.stop()
+        engine = [f for f in frames if f.arbitration_id == 0x100]
+        assert len(engine) >= 5
+        decoded = {dbc.decode(0x100, bytes(f.data))["signals"]["EngineSpeed"] for f in engine}
+        assert decoded == {3000}, f"expected seeded value, got {decoded}"
+    finally:
+        teardown_stack(cm, sched, peer)

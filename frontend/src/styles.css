@@ -597,6 +597,68 @@ td.empty {
   width: 200px;
 }
 
+/* FD 64바이트 입력용: 폭(8바이트 분량)은 그대로 두고 8바이트 단위로
+ * 줄바꿈된 여러 줄을 표시한다. 줄 수는 행의 바이트수에 따라 동적(rows). */
+.data-input--fd {
+  line-height: 1.5;
+  resize: vertical;
+  white-space: pre;
+  vertical-align: top;
+}
+
+.tx-data-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.byte-count {
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+.byte-count--error {
+  color: var(--bad);
+}
+
+.tx-override-note {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* DBC 신호 편집 모드: 신호별 한 줄 에디터 목록 */
+.tx-signal-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 220px;
+}
+
+.tx-signal-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.tx-signal-name {
+  min-width: 90px;
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+}
+
+.tx-signal-input {
+  width: 90px;
+  flex: none;
+}
+
+select.tx-signal-input {
+  width: 130px;
+}
+
 .fd-controls {
   display: inline-flex;
   gap: 6px;

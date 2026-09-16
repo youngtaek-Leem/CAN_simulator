@@ -529,6 +529,27 @@ def get_dbc_raw():
     return dbc_service.raw() or {"loaded": False}
 
 
+@app.get("/api/dbc/messages/{message_name}/initial")
+def get_dbc_message_initial(message_name: str):
+    """DBC 메시지의 초기값 페이로드 (TX 박스 직접 입력 모드 프리필용).
+
+    DBC에 정의된 초기값(GenSigStartValue)이 있으면 그 값을, 정의되어
+    있지 않은 신호는 Invalid 값(비트幅 최대값)으로 채워 인코딩한다."""
+    if not dbc_service.loaded:
+        raise HTTPException(status_code=400, detail="DBC가 로드되지 않았습니다")
+    try:
+        message = dbc_service.get_message(message_name)
+        data = dbc_service.encode_initial(message_name)
+    except (ValueError, KeyError, AttributeError) as exc:
+        raise HTTPException(status_code=400, detail=f"초기값을 구할 수 없습니다: {exc}")
+    return {
+        "message_name": message_name,
+        "length": message.length,
+        "is_fd": message.is_fd,
+        "data_hex": data.hex(" ").upper(),
+    }
+
+
 class SendTypeOverride(BaseModel):
     message_name: str
     signal_name: str
@@ -617,6 +638,19 @@ def tx_signal(req: SignalSendRequest):
         raise HTTPException(status_code=400, detail="no DBC loaded")
     try:
         return tx_scheduler.send_signal(req.message_name, req.values)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/api/tx/signal/preset")
+def tx_signal_preset(req: SignalSendRequest):
+    """TX 박스 신호 에디터의 행 값을 전송 없이 상태로만 저장 -- 이후의
+    Start(주기 재전송)와 Send(1회 전송)가 이 값을 사용한다. CAN 연결 없이도
+    저장만 할 수 있어 적용(apply) 단계에서 호출된다."""
+    if not dbc_service.loaded:
+        raise HTTPException(status_code=400, detail="DBC가 로드되지 않았습니다")
+    try:
+        return tx_scheduler.preset_signal(req.message_name, req.values)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 

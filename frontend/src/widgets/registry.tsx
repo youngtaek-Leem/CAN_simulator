@@ -56,7 +56,7 @@ export const WIDGET_REGISTRY: Record<WidgetType, WidgetMeta> = {
   manualValue: {
     label: '입력 박스',
     component: ManualValueWidget,
-    defaultSize: { w: 2, h: 3, minW: 2, minH: 1 },
+    defaultSize: { w: 4, h: 3, minW: 2, minH: 1 },
   },
   functionButton: {
     label: 'Function 버튼',
@@ -91,7 +91,7 @@ export const WIDGET_REGISTRY: Record<WidgetType, WidgetMeta> = {
   multiManualValue: {
     label: '멀티 입력 박스',
     component: MultiManualValueWidget,
-    defaultSize: { w: 6, h: 5, minW: 1, minH: 2 },
+    defaultSize: { w: 8, h: 7, minW: 1, minH: 2 },
   },
   functionMultiButton: {
     label: '멀티 Function 버튼',
@@ -106,42 +106,42 @@ export const WIDGET_REGISTRY: Record<WidgetType, WidgetMeta> = {
   txBox: {
     label: 'CAN 메시지 전송[IG]',
     component: TxBox,
-    defaultSize: { w: 7, h: 10, minW: 4, minH: 3 },
+    defaultSize: { w: 12, h: 10, minW: 4, minH: 3 },
   },
   isotpTx: {
     label: 'ISO-TP 메시지 전송[UDS]',
     component: IsoTpBox,
-    defaultSize: { w: 7, h: 7, minW: 1, minH: 2 },
+    defaultSize: { w: 10, h: 12, minW: 1, minH: 2 },
   },
   replayBox: {
     label: 'CAN 로그 Replay',
     component: ReplayBox,
-    defaultSize: { w: 8, h: 7, minW: 3, minH: 2 },
+    defaultSize: { w: 9, h: 8, minW: 3, minH: 2 },
   },
   testRunner: {
     label: '테스트 Sequence 실행기',
     component: TestRunnerBox,
-    defaultSize: { w: 11, h: 12, minW: 4, minH: 3 },
+    defaultSize: { w: 14, h: 12, minW: 4, minH: 3 },
   },
   signalGraph: {
     label: 'CAN 신호 그래프',
     component: GraphWidget,
-    defaultSize: { w: 9, h: 6, minW: 1, minH: 2 },
+    defaultSize: { w: 12, h: 20, minW: 1, minH: 2 },
   },
   canMessageDisplay: {
     label: 'CAN 메시지 표시창',
     component: CanMessageDisplay,
-    defaultSize: { w: 8, h: 11, minW: 3, minH: 2 },
+    defaultSize: { w: 12, h: 20, minW: 3, minH: 2 },
   },
   rxSignalDisplay: {
     label: '수신 CAN 신호 표시창',
     component: RxSignalDisplay,
-    defaultSize: { w: 8, h: 11, minW: 3, minH: 2 },
+    defaultSize: { w: 10, h: 20, minW: 3, minH: 2 },
   },
   textDisplay: {
     label: '텍스트 표시창',
     component: TextDisplay,
-    defaultSize: { w: 8, h: 11, minW: 2, minH: 2 },
+    defaultSize: { w: 10, h: 20, minW: 2, minH: 2 },
   },
   udsSwdl: {
     label: 'CAN-SWDL',

@@ -63,6 +63,10 @@ export const api = {
   uploadDbc: (file: File) => upload('/api/dbc/upload', file),
   getDbc: () => request('/api/dbc'),
   getDbcRaw: () => request<{ filename: string; content: string } | { loaded: false }>('/api/dbc/raw'),
+  getDbcMessageInitial: (message_name: string) =>
+    request<{ message_name: string; length: number; is_fd: boolean; data_hex: string }>(
+      `/api/dbc/messages/${encodeURIComponent(message_name)}/initial`,
+    ),
   overrideSendType: (message_name: string, signal_name: string, send_type: string) =>
     post('/api/dbc/send-type', { message_name, signal_name, send_type }),
 
@@ -79,6 +83,8 @@ export const api = {
   }) => post('/api/tx/send_once', entry),
   txSignal: (message_name: string, values: Record<string, number | string>) =>
     post('/api/tx/signal', { message_name, values }),
+  txSignalPreset: (message_name: string, values: Record<string, number | string>) =>
+    post('/api/tx/signal/preset', { message_name, values }),
   txAutoStop: (message_name?: string) =>
     post('/api/tx/auto/stop', { message_name: message_name ?? null }),
   enableAllPeriodic: (rx_node: string) =>
