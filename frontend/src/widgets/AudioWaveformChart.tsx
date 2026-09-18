@@ -20,7 +20,7 @@
 
 import { useEffect, useRef, useState, type MutableRefObject } from 'react';
 import { api } from '../api/client';
-import { drawDiffCursors, nearestCursor, type DiffCursorState } from './DiffCursor';
+import { drawDiffCursors, drawLevelCursors, fmtDelta, fmtLevel, nearestCursor, nearestDiffCursor, nearestLevelCursor, type DiffCursorState, type LevelCursorState } from './DiffCursor';
 import type { AudioWaveformPoint } from '../types';
 
 export interface AudioChartMargin {
@@ -122,11 +122,21 @@ export interface AudioWaveformChartProps {
    * called for it. */
   onResetClick: () => void;
   resetTitle: string;
-  /** Difference-cursor overlay (CanAudioLatencyWidget only -- AudioMonitor
-   * Widget never passes this, so its charts are completely unaffected).
-   * While `cursor.mode` is on, dragging moves the nearest cursor instead of
-   * panning the view. */
+  /** Difference-cursor overlay (X pair). While `cursor.mode` is on, dragging
+   * moves the nearest X line instead of panning the view -- unless `yCursor`
+   * is also set and a Y line is nearer, in which case the Y line wins. */
   cursor?: DiffCursorState;
+  /** Level-cursor overlay (Y pair, amplitude ratio in the chart's own Y
+   * unit). Optional -- CanAudioLatencyWidget never passes this, so its
+   * charts keep the exact X-only behavior. Shares the on/off `mode` with
+   * `cursor` (the parent toggles both together). */
+  yCursor?: LevelCursorState;
+  /** Reports this chart's actually-drawn data view after every draw (for a
+   * parent that seeds cursors inside the visible area). Ref-write only --
+   * never triggers a render, and not part of the draw effect's deps.
+   * Optional -- absent in CanAudioLatencyWidget, which already shares one
+   * X view it can read directly. */
+  reportView?: (v: Geom) => void;
   /** Shifts this chart's audio data earlier by this many ms before drawing --
    * compensates for the sounddevice capture pipeline's fixed callback-arrival
    * bias (a block only reaches the callback, and gets its `time.time()`
@@ -157,10 +167,13 @@ export function AudioWaveformChart({
   onResetClick,
   resetTitle,
   cursor,
+  yCursor,
+  reportView,
   xOffsetMs = 0,
 }: AudioWaveformChartProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const cursorDragRef = useRef<'a' | 'b' | null>(null);
+  type Grab = { set: 'x'; which: 'a' | 'b' } | { set: 'y'; which: 'c' | 'd' };
+  const cursorDragRef = useRef<Grab | null>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
   const localXViewRef = useRef<AudioChartXView>({ xMin: null, xMax: null });
   const yViewRef = useRef<YView>({ yMin: null, yMax: null });
@@ -177,6 +190,57 @@ export function AudioWaveformChart({
   });
   const pointsRef = useRef<AudioWaveformPoint[]>([]);
   const [size, setSize] = useState({ w: 260, h: 150 });
+  // Hover readout overlay (crosshair divs + tooltip, updated via refs so
+  // hovering never triggers a React render or canvas redraw). Shown only
+  // while plain-hovering the plot -- hidden during pan/cursor drags.
+  const hoverVRef = useRef<HTMLDivElement>(null);
+  const hoverHRef = useRef<HTMLDivElement>(null);
+  const hoverTipRef = useRef<HTMLDivElement>(null);
+
+  const hideHover = () => {
+    if (hoverVRef.current) hoverVRef.current.style.display = 'none';
+    if (hoverHRef.current) hoverHRef.current.style.display = 'none';
+    if (hoverTipRef.current) hoverTipRef.current.style.display = 'none';
+  };
+
+  const updateHover = (px: number, py: number) => {
+    const g = lastGeomRef.current;
+    const vEl = hoverVRef.current;
+    const hEl = hoverHRef.current;
+    const tipEl = hoverTipRef.current;
+    if (!vEl || !hEl || !tipEl) return;
+    if (px < g.plotLeft || px > g.plotLeft + g.plotW || py < g.plotTop || py > g.plotTop + g.plotH) {
+      hideHover();
+      return;
+    }
+    const ms = g.xMin + ((px - g.plotLeft) / g.plotW) * (g.xMax - g.xMin);
+    // nearest decimated column by display-time coordinate
+    let best: AudioWaveformPoint | null = null;
+    let bestDist = Infinity;
+    for (const p of pointsRef.current) {
+      const d = Math.abs(p.t * 1000 - xOffsetMs - ms);
+      if (d < bestDist) {
+        bestDist = d;
+        best = p;
+      }
+    }
+    if (!best) {
+      hideHover();
+      return;
+    }
+    const peak = Math.abs(best.min) >= Math.abs(best.max) ? best.min : best.max;
+    const peakPy = g.plotTop + g.plotH - ((peak - g.yMin) / (g.yMax - g.yMin)) * g.plotH;
+    vEl.style.display = 'block';
+    vEl.style.left = `${px}px`;
+    hEl.style.display = 'block';
+    hEl.style.top = `${peakPy}px`;
+    tipEl.style.display = 'block';
+    tipEl.textContent = `+${fmtDelta(ms - g.xMin)}  ${fmtLevel(peak)}`;
+    // flip to the left of the cursor when too close to the right edge
+    const tipW = 170;
+    tipEl.style.left = px + 12 + tipW > g.plotLeft + g.plotW ? `${px - tipW - 8}px` : `${px + 12}px`;
+    tipEl.style.top = `${Math.max(g.plotTop, peakPy - 12)}px`;
+  };
   // Local version counter for a standalone chart's own redraws (wheel/pan/
   // poll all call notifyChange()) -- must be real state read in the draw
   // effect's deps below, not just a re-render trigger, or the draw effect
@@ -325,16 +389,35 @@ export function AudioWaveformChart({
     let yMin = yViewRef.current.yMin;
     let yMax = yViewRef.current.yMax;
     if (yMin === null || yMax === null) {
-      if (points.length > 0) {
-        const lo = Math.min(...points.map((p) => p.min));
-        const hi = Math.max(...points.map((p) => p.max));
+      // Finite values only: a single NaN column (gap/evicted buffer) would
+      // otherwise poison Math.min/max and erase the whole Y axis (grid +
+      // labels) while the time-based X axis keeps drawing.
+      const flat: number[] = [];
+      for (const p of points) {
+        if (Number.isFinite(p.min)) flat.push(p.min);
+        if (Number.isFinite(p.max)) flat.push(p.max);
+      }
+      if (flat.length > 0) {
+        const lo = Math.min(...flat);
+        const hi = Math.max(...flat);
         const pad = (hi - lo) * 0.15 || 0.05;
         yMin = lo - pad;
         yMax = hi + pad;
+      } else if (
+        Number.isFinite(lastGeomRef.current.yMin) &&
+        Number.isFinite(lastGeomRef.current.yMax) &&
+        lastGeomRef.current.yMax > lastGeomRef.current.yMin
+      ) {
+        yMin = lastGeomRef.current.yMin;
+        yMax = lastGeomRef.current.yMax;
       } else {
         yMin = -1;
         yMax = 1;
       }
+    }
+    if (!Number.isFinite(yMin) || !Number.isFinite(yMax) || yMax <= yMin) {
+      yMin = -1;
+      yMax = 1;
     }
 
     const xToPx = (ms: number) => plotLeft + ((ms - xMin!) / (xMax! - xMin!)) * plotW;
@@ -392,16 +475,22 @@ export function AudioWaveformChart({
     }
 
     drawDiffCursors(ctx, cursor, xMin, xMax, plotTop, plotH, xToPx);
+    drawLevelCursors(ctx, yCursor, plotLeft, plotW, plotTop, plotH, yToPx);
 
     lastGeomRef.current = { xMin, xMax, yMin, yMax, plotLeft, plotTop, plotW, plotH };
+    reportView?.(lastGeomRef.current);
+    // cursor primitives (not the objects) are deps: the parent re-renders on
+    // every level poll, but object identity churn must not redraw -- only real
+    // value changes do, alongside the existing triggers.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [size, xWindowMs, xVersion, xOffsetMs]);
+  }, [size, xWindowMs, xVersion, xOffsetMs, cursor?.a, cursor?.b, cursor?.mode, yCursor?.c, yCursor?.d, yCursor?.mode]);
 
   // ---- interaction: wheel-zoom (per-axis) + drag-to-pan ---------------------
 
   const onWheel = (e: React.WheelEvent<HTMLCanvasElement>) => {
     if (!e.ctrlKey && !e.metaKey) return;
     e.preventDefault();
+    hideHover();
     const rect = canvasRef.current!.getBoundingClientRect();
     const px = e.clientX - rect.left;
     const py = e.clientY - rect.top;
@@ -451,10 +540,32 @@ export function AudioWaveformChart({
     const py = e.clientY - rect.top;
     if (px < g.plotLeft || px > g.plotLeft + g.plotW || py < g.plotTop || py > g.plotTop + g.plotH) return;
     (e.target as HTMLCanvasElement).setPointerCapture(e.pointerId);
+    hideHover();
+    if (yCursor?.mode) {
+      // X and Y lines compete: grab whichever placed line is pixel-nearest.
+      const msToPx = (ms: number) => g.plotLeft + ((ms - g.xMin) / (g.xMax - g.xMin)) * g.plotW;
+      const vToPx = (v: number) => g.plotTop + g.plotH - ((v - g.yMin) / (g.yMax - g.yMin)) * g.plotH;
+      const xBest = cursor?.mode ? nearestDiffCursor(cursor, px, msToPx) : null;
+      const yBest = nearestLevelCursor(yCursor, py, vToPx);
+      if (xBest && (!yBest || xBest.dist <= yBest.dist)) {
+        cursorDragRef.current = { set: 'x', which: xBest.which };
+        cursor!.onMove(xBest.which, g.xMin + ((px - g.plotLeft) / g.plotW) * (g.xMax - g.xMin));
+      } else if (yBest) {
+        cursorDragRef.current = { set: 'y', which: yBest.which };
+        yCursor.onMove(yBest.which, g.yMax - ((py - g.plotTop) / g.plotH) * (g.yMax - g.yMin));
+      } else if (cursor?.mode) {
+        cursorDragRef.current = { set: 'x', which: 'a' };
+        cursor.onMove('a', g.xMin + ((px - g.plotLeft) / g.plotW) * (g.xMax - g.xMin));
+      } else {
+        cursorDragRef.current = { set: 'y', which: 'c' };
+        yCursor.onMove('c', g.yMax - ((py - g.plotTop) / g.plotH) * (g.yMax - g.yMin));
+      }
+      return;
+    }
     if (cursor?.mode) {
       const msToPx = (ms: number) => g.plotLeft + ((ms - g.xMin) / (g.xMax - g.xMin)) * g.plotW;
       const which = nearestCursor(cursor, px, msToPx);
-      cursorDragRef.current = which;
+      cursorDragRef.current = { set: 'x', which };
       cursor.onMove(which, g.xMin + ((px - g.plotLeft) / g.plotW) * (g.xMax - g.xMin));
       return;
     }
@@ -472,27 +583,43 @@ export function AudioWaveformChart({
     };
   };
   const onPointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
-    if (cursorDragRef.current && cursor) {
+    const grab = cursorDragRef.current;
+    if (grab) {
       const g = lastGeomRef.current;
       const rect = canvasRef.current!.getBoundingClientRect();
       const px = e.clientX - rect.left;
-      cursor.onMove(cursorDragRef.current, g.xMin + ((px - g.plotLeft) / g.plotW) * (g.xMax - g.xMin));
+      const py = e.clientY - rect.top;
+      if (grab.set === 'x' && cursor) {
+        cursor.onMove(grab.which, g.xMin + ((px - g.plotLeft) / g.plotW) * (g.xMax - g.xMin));
+      } else if (grab.set === 'y' && yCursor) {
+        yCursor.onMove(grab.which, g.yMax - ((py - g.plotTop) / g.plotH) * (g.yMax - g.yMin));
+      }
       return;
     }
     const drag = dragRef.current;
-    if (!drag) return;
-    const g = lastGeomRef.current;
-    const dxPx = e.clientX - drag.x;
-    const dyPx = e.clientY - drag.y;
-    const dataDx = (dxPx / g.plotW) * (drag.xView.xMax! - drag.xView.xMin!);
-    const dataDy = (dyPx / g.plotH) * (drag.yView.yMax! - drag.yView.yMin!);
-    xViewRef.current = { xMin: drag.xView.xMin! - dataDx, xMax: drag.xView.xMax! - dataDx };
-    yViewRef.current = { yMin: drag.yView.yMin! + dataDy, yMax: drag.yView.yMax! + dataDy };
-    notifyChange();
+    if (drag) {
+      const g = lastGeomRef.current;
+      const dxPx = e.clientX - drag.x;
+      const dyPx = e.clientY - drag.y;
+      const dataDx = (dxPx / g.plotW) * (drag.xView.xMax! - drag.xView.xMin!);
+      const dataDy = (dyPx / g.plotH) * (drag.yView.yMax! - drag.yView.yMin!);
+      xViewRef.current = { xMin: drag.xView.xMin! - dataDx, xMax: drag.xView.xMax! - dataDx };
+      yViewRef.current = { yMin: drag.yView.yMin! + dataDy, yMax: drag.yView.yMax! + dataDy };
+      notifyChange();
+      return;
+    }
+    const rect = canvasRef.current!.getBoundingClientRect();
+    updateHover(e.clientX - rect.left, e.clientY - rect.top);
   };
   const onPointerUp = () => {
     dragRef.current = null;
     cursorDragRef.current = null;
+    hideHover();
+  };
+  const onPointerLeave = () => {
+    dragRef.current = null;
+    cursorDragRef.current = null;
+    hideHover();
   };
 
   return (
@@ -512,8 +639,11 @@ export function AudioWaveformChart({
           onPointerDown={onPointerDown}
           onPointerMove={onPointerMove}
           onPointerUp={onPointerUp}
-          onPointerLeave={onPointerUp}
+          onPointerLeave={onPointerLeave}
         />
+        <div ref={hoverVRef} className="hover-vline" style={{ display: 'none' }} />
+        <div ref={hoverHRef} className="hover-hline" style={{ display: 'none' }} />
+        <div ref={hoverTipRef} className="hover-tip mono" style={{ display: 'none' }} />
       </div>
     </div>
   );

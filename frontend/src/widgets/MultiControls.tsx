@@ -13,8 +13,7 @@ import { parseFlexibleInt } from './controls';
 import { SignalPicker } from './MessageOptions';
 import type { MultiCell, WidgetConfig } from '../types';
 
-function getGrid(config: WidgetConfig): { rows: number; cols: number; cells: MultiCell[] } {
-  const rows = Math.max(1, Math.min(10, Number(config.options.rows) || 3));
+function getGrid(config: WidgetConfig): { rows: number; cols: number; cells: MultiCell[] } {  const rows = Math.max(1, Math.min(10, Number(config.options.rows) || 3));
   const cols = Math.max(1, Math.min(10, Number(config.options.cols) || 4));
   const cells = (config.options.cells as MultiCell[] | undefined) ?? [];
   return { rows, cols, cells };
@@ -37,10 +36,6 @@ export function MultiButtonWidget({ config }: { config: WidgetConfig }) {
   const updateCell = useCellUpdater(config);
   const [editingIndex, setEditingIndex] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
-  // per-cell toggle state -- only meaningful for cells bound to a Periodic
-  // signal, see ButtonWidget's usePeriodicInvalidToggle for the same design
-  const [pending, setPending] = useState<Record<number, 'valid' | 'invalid'>>({});
-  const [lastSent, setLastSent] = useState<Record<number, 'valid' | 'invalid'>>({});
 
   const send = async (cell: MultiCell) => {
     if (!cell.binding?.signal) return;
@@ -52,26 +47,24 @@ export function MultiButtonWidget({ config }: { config: WidgetConfig }) {
     }
   };
 
-  const activate = async (i: number, cell: MultiCell) => {
+  // Periodic: inverted one-shot pulse (INVALID immediately, cell value 30ms
+  // later, server-side) on every click -- no toggle. Event: existing
+  // behavior, unchanged.
+  const activate = async (cell: MultiCell) => {
     if (!cell.binding?.signal) return;
     const isPeriodic = findSignal(dbc, cell.binding)?.signal.send_type === 'periodic';
     if (!isPeriodic) {
       send(cell);
       return;
     }
-    const next = pending[i] ?? 'valid';
-    if (next === 'invalid') {
-      try {
-        await canStore.sendInvalid(cell.binding.message, cell.binding.signal);
-        setError(null);
-      } catch (e) {
-        setError((e as Error).message);
-      }
-    } else {
-      await send(cell);
+    try {
+      await canStore.sendSignalInvalidFirst(cell.binding.message, {
+        [cell.binding.signal]: cell.value ?? 1,
+      });
+      setError(null);
+    } catch (e) {
+      setError((e as Error).message);
     }
-    setLastSent((s) => ({ ...s, [i]: next }));
-    setPending((s) => ({ ...s, [i]: next === 'invalid' ? 'valid' : 'invalid' }));
   };
 
   return (
@@ -82,19 +75,18 @@ export function MultiButtonWidget({ config }: { config: WidgetConfig }) {
       >
         {Array.from({ length: rows * cols }, (_, i) => {
           const cell = cells[i] ?? {};
-          const invalidActive = lastSent[i] === 'invalid';
-          const label = cell.label || (invalidActive ? `${cell.binding?.signal} = INVALID` : cell.binding?.signal) || `#${i + 1}`;
+          const label = cell.label || cell.binding?.signal || `#${i + 1}`;
           return (
             <div className="multi-cell" key={i}>
               <button
                 className="big-btn multi-cell-btn"
                 disabled={!cell.binding?.signal}
-                title={cell.binding?.signal ? `${cell.binding.message}.${cell.binding.signal} = ${invalidActive ? 'INVALID' : (cell.value ?? 1)}` : '신호 미할당'}
-                onClick={() => activate(i, cell)}
+                title={cell.binding?.signal ? `${cell.binding.message}.${cell.binding.signal} = ${cell.value ?? 1}` : '신호 미할당'}
+                onClick={() => activate(cell)}
                 onKeyDown={(e) => {
                   if (e.key === ' ' || e.key === 'Enter') {
                     e.preventDefault();
-                    activate(i, cell);
+                    activate(cell);
                   }
                 }}
               >
@@ -421,10 +413,17 @@ export function MultiManualValueWidget({ config }: { config: WidgetConfig }) {
       setErrors((e) => ({ ...e, [i]: `범위 초과 (raw ${min} ~ ${max})` }));
       return;
     }
+    const physical = raw * bound.signal.scale + bound.signal.offset;
     try {
-      await canStore.sendSignal(cell.binding.message, {
-        [cell.binding.signal]: raw * bound.signal.scale + bound.signal.offset,
-      });
+      if (bound.signal.send_type === 'periodic') {
+        await canStore.sendSignalInvalidFirst(cell.binding.message, {
+          [cell.binding.signal]: physical,
+        });
+      } else {
+        await canStore.sendSignal(cell.binding.message, {
+          [cell.binding.signal]: physical,
+        });
+      }
       setErrors((e) => ({ ...e, [i]: '' }));
     } catch (err) {
       setErrors((e) => ({ ...e, [i]: (err as Error).message }));
@@ -582,6 +581,10 @@ export function FunctionMultiButtonWidget({ config }: { config: WidgetConfig }) 
 // file for the generating<->invalid periodic toggle design). Every
 // periodic-bound cell's generator is (re-)registered on mount so it survives
 // independently of any single cell being clicked.
+// Event-bound cells instead toggle periodic Random sending at the cell's ms
+// period (see RandomButtonWidget for the shared design).
+const clampEventPeriodMs = (v: number | undefined) =>
+  Math.min(60000, Math.max(10, Math.round(v ?? 1000) || 1000));
 export function RandomMultiButtonWidget({ config }: { config: WidgetConfig }) {
   useCanVersion();
   const { editMode, dbc } = useApp();
@@ -612,7 +615,27 @@ export function RandomMultiButtonWidget({ config }: { config: WidgetConfig }) {
 
   const activate = async (i: number, cell: MultiCell) => {
     if (!cell.binding?.signal) return;
-    const isPeriodic = findSignal(dbc, cell.binding)?.signal.send_type === 'periodic';
+    const sendType = findSignal(dbc, cell.binding)?.signal.send_type;
+    // Event: periodic Random at the cell's ms period (click toggles
+    // start/stop, running flag persisted in the cell). Periodic: existing
+    // generate<->invalid toggle, unchanged.
+    if (sendType === 'event') {
+      const period = clampEventPeriodMs(cell.eventPeriodMs);
+      try {
+        if (cell.eventRunning) {
+          await canStore.stopEventPeriodic(cell.binding.message, cell.binding.signal);
+          updateCell(i, { ...cell, eventRunning: false });
+        } else {
+          await canStore.startEventPeriodic(cell.binding.message, cell.binding.signal, period);
+          updateCell(i, { ...cell, eventRunning: true });
+        }
+        setError(null);
+      } catch (e) {
+        setError((e as Error).message);
+      }
+      return;
+    }
+    const isPeriodic = sendType === 'periodic';
     try {
       const next = isPeriodic ? (pending[i] ?? 'generate') : 'generate';
       if (next === 'invalid') {
@@ -658,7 +681,13 @@ export function RandomMultiButtonWidget({ config }: { config: WidgetConfig }) {
                 : 'Random';
           const label =
             cell.label ||
-            (cell.binding?.signal ? (invalidActive ? `${cell.binding.signal} = INVALID` : `${cell.binding.signal} [${modeLabel}]`) : `#${i + 1}`);
+            (cell.binding?.signal
+              ? findSignal(dbc, cell.binding)?.signal.send_type === 'event'
+                ? `${cell.binding.signal} [${modeLabel}] ${cell.eventRunning ? '■' : '▶'} ${clampEventPeriodMs(cell.eventPeriodMs)}ms`
+                : invalidActive
+                  ? `${cell.binding.signal} = INVALID`
+                  : `${cell.binding.signal} [${modeLabel}]`
+              : `#${i + 1}`);
           return (
             <div className="multi-cell" key={i}>
               <button
@@ -850,14 +879,27 @@ function CellEditModal({
         {kind === 'random' && (
           <>
             <label>
-              값 모드
-              <select
+              값 모드              <select
                 value={draft.mode ?? 'random'}
                 onChange={(e) => setDraft({ ...draft, mode: e.target.value as 'random' | 'range' })}
               >
                 <option value="random">Random (기본: 전체 bit 범위)</option>
                 <option value="range">Range (순차 순환)</option>
               </select>
+            </label>
+            <label>
+              Event 주기 Random 송신 주기 (ms)
+              {!bound || bound.signal.send_type !== 'periodic' ? null : (
+                <span className="hint">Periodic 신호 셀에는 적용되지 않음</span>
+              )}
+              <input
+                type="number"
+                min={10}
+                max={60000}
+                step={10}
+                value={String(draft.eventPeriodMs ?? 1000)}
+                onChange={(e) => setDraft({ ...draft, eventPeriodMs: clampEventPeriodMs(Number(e.target.value)) })}
+              />
             </label>
             <div className="row-2">
               {bound && (

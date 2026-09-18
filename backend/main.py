@@ -642,6 +642,22 @@ def tx_signal(req: SignalSendRequest):
         raise HTTPException(status_code=400, detail=str(exc))
 
 
+@app.post("/api/tx/signal/invalid_first")
+def tx_signal_invalid_first(req: SignalSendRequest):
+    """Periodic 신호 전용 반전 펄스 (버튼/입력박스/멀티버튼/멀티입력박스):
+    Invalid 프레임 즉시 전송 + 30ms 후 설정값 전송. Event 신호는 기존
+    /api/tx/signal 경로를 그대로 쓴다."""
+    _require_running()
+    if not can_manager.connected:
+        raise HTTPException(status_code=400, detail="CAN bus is not connected")
+    if not dbc_service.loaded:
+        raise HTTPException(status_code=400, detail="no DBC loaded")
+    try:
+        return tx_scheduler.send_signal_invalid_first(req.message_name, req.values)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
 @app.post("/api/tx/signal/preset")
 def tx_signal_preset(req: SignalSendRequest):
     """TX 박스 신호 에디터의 행 값을 전송 없이 상태로만 저장 -- 이후의
@@ -740,6 +756,36 @@ def tx_signal_invalid(req: InvalidSendRequest):
         raise HTTPException(status_code=400, detail="no DBC loaded")
     try:
         return tx_scheduler.send_invalid(req.message_name, req.signal_name)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+class EventPeriodicRequest(BaseModel):
+    message_name: str
+    signal_name: str
+    period_ms: float
+
+
+@app.post("/api/tx/signal/event_periodic")
+def tx_signal_event_periodic(req: EventPeriodicRequest):
+    """Event 신호 주기 Random 송신 시작 (Random 버튼 위젯): 주기마다 생성기
+    값을 전송하고 Event 규칙(30ms 후 Invalid)을 따른다."""
+    _require_running()
+    if not can_manager.connected:
+        raise HTTPException(status_code=400, detail="CAN bus is not connected")
+    if not dbc_service.loaded:
+        raise HTTPException(status_code=400, detail="no DBC loaded")
+    try:
+        return tx_scheduler.start_event_periodic(req.message_name, req.signal_name, req.period_ms)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/api/tx/signal/event_periodic/stop")
+def tx_signal_event_periodic_stop(req: InvalidSendRequest):
+    """Event 신호 주기 Random 송신 정지 (멱등 -- 실행 중이 아니어도 성공)."""
+    try:
+        return tx_scheduler.stop_event_periodic(req.message_name, req.signal_name)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 

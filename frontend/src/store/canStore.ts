@@ -258,6 +258,20 @@ class CanStore {
     return result;
   }
 
+  /** Inverted one-shot pulse for Periodic signals (button/input widgets):
+   * INVALID immediately, configured value 30ms later (server-side). Both
+   * halves are logged -- unlike Event sends, here the leading INVALID is
+   * the user-intended essence of the action, not routine cleanup. */
+  async sendSignalInvalidFirst(message: string, values: Record<string, number | string>) {
+    const result = await api.txSignalInvalidFirst(message, values);
+    for (const [signal, value] of Object.entries(values)) {
+      const sig = this.findDbcSignal(message, signal);
+      this.logSignalSend(message, signal, 'INVALID', sig?.send_type, 'invalid');
+      this.logSignalSend(message, signal, this.formatSignalValue(sig, value), sig?.send_type, 'valid');
+    }
+    return result;
+  }
+
   async sendGenerated(message: string, signal: string) {
     const result = await api.sendGenerated(message, signal);
     const sig = this.findDbcSignal(message, signal);
@@ -269,6 +283,19 @@ class CanStore {
   async sendInvalid(message: string, signal: string) {
     const result = await api.sendInvalid(message, signal);
     this.logSignalSend(message, signal, 'INVALID', result.send_type, 'invalid');
+    return result;
+  }
+
+  /** Event-signal periodic Random start/stop (Random button widgets). */
+  async startEventPeriodic(message: string, signal: string, periodMs: number) {
+    const result = await api.startEventPeriodic(message, signal, periodMs);
+    this.pushActivity(`${message}.${signal} 주기 Random 시작 (${periodMs}ms)`);
+    return result;
+  }
+
+  async stopEventPeriodic(message: string, signal: string) {
+    const result = await api.stopEventPeriodic(message, signal);
+    this.pushActivity(`${message}.${signal} 주기 Random 정지`);
     return result;
   }
 

@@ -98,10 +98,54 @@ const freeCompactor: Compactor = {
 // of squeezing widgets down.
 const GRID_WIDTH = 1800;
 
+// grid columns (must match GridLayout gridConfig.cols)
+const GRID_COLS = 24;
+
+interface MinimizedPrevRect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+/** options.prevRect (unknown shape from saved layouts) → validated rect. */
+function readPrevRect(raw: unknown): MinimizedPrevRect | undefined {
+  if (typeof raw !== 'object' || raw === null) return undefined;
+  const r = raw as Record<string, unknown>;
+  if (
+    typeof r.x !== 'number' ||
+    typeof r.y !== 'number' ||
+    typeof r.w !== 'number' ||
+    typeof r.h !== 'number'
+  ) {
+    return undefined;
+  }
+  return { x: r.x, y: r.y, w: r.w, h: r.h };
+}
+
+/** Build the grid item for un-minimizing: last pre-minimize position
+ * ("마지막 위치로 복귀"), clamped into the grid and the widget's min size. */
+function restoredItem(widget: WidgetConfig, item: LayoutItem): LayoutItem {
+  const defaultSize = WIDGET_REGISTRY[widget.type].defaultSize;
+  const prev = readPrevRect(widget.options.prevRect);
+  const prevH =
+    typeof widget.options.prevH === 'number' ? (widget.options.prevH as number) : undefined;
+  const w = Math.min(prev?.w ?? item.w, GRID_COLS);
+  const h = Math.max(prev?.h ?? prevH ?? defaultSize.h, defaultSize.minH);
+  const x = Math.min(Math.max(prev?.x ?? item.x, 0), Math.max(0, GRID_COLS - w));
+  const y = Math.max(prev?.y ?? item.y, 0);
+  return { ...item, x, y, w, h };
+}
+
 export default function App() {
   useCanVersion();
   const [dbc, setDbc] = useState<DbcSummary>({ loaded: false });
-  const [editMode, setEditMode] = useState(true);
+  // 편집 모드는 별도 토글이 아니라 서버 run 상태에서 유도된다: Stop이면
+  // 편집 가능(위젯 설정/삭제, 페이지 구조 편집), Start면 편집 OFF.
+  // App은 useCanVersion()으로 구독 중이라 상태 브로드캐스트(0.5초 주기)가
+  // 닿으면 최대 ~0.5초 뒤에 편집 UI가 전환된다.
+  const running = canStore.status?.run?.running ?? false;
+  const editMode = !running;
   const [pages, setPages] = useState<Page[]>([makePage('p1', 'Page 1')]);
   const [activePageId, setActivePageId] = useState('p1');
   const [layoutName, setLayoutName] = useState('default');
@@ -122,10 +166,12 @@ export default function App() {
     }
   }, [pages, activePageId]);
 
-  // requirement: while in edit mode all TX/RX activity must be stopped
+  // 백엔드 기본값이 running=True이므로 마운트 시 1회 정지시켜 정지(편집
+  // 가능) 상태로 시작한다 -- 리로드로 실행이 끊겨도 항상 정지로 시작.
+  // 이후의 Stop/Start는 TopBar 버튼이 직접 runStop/runStart를 호출한다.
   useEffect(() => {
-    if (editMode) api.runStop().catch(() => {});
-  }, [editMode]);
+    api.runStop().catch(() => {});
+  }, []);
 
   const refreshDbc = useCallback(() => {
     api.getDbc().then((d) => {
@@ -154,26 +200,16 @@ export default function App() {
     [activePageId],
   );
 
-  // 선택한 위젯만 맨 앞으로 — 나머지는 기존 순서 유지
-  // 구현은 DOM 페인트 순서(= widgets/layout 배열 순서)에 의존: 클릭된 위젯/레이아웃을
-  // 배열 맨 끝으로 옮기면 겹친 상태에서 항상 최상위에 그려진다.
-  const bringToFront = useCallback(
-    (id: string) => {
-      setActiveId(id);
-      updateActivePage((p) => {
-        const wIdx = p.widgets.findIndex((w) => w.id === id);
-        if (wIdx === -1 || wIdx === p.widgets.length - 1) return p;
-        const w = p.widgets[wIdx];
-        const l = p.layout.find((it) => it.i === id);
-        return {
-          ...p,
-          widgets: [...p.widgets.filter((x) => x.id !== id), w],
-          layout: l ? [...p.layout.filter((x) => x.i !== id), l] : p.layout,
-        };
-      });
-    },
-    [updateActivePage],
-  );
+  // 선택한 위젯만 맨 앞으로 -- 배열 순서는 절대 건드리지 않는다.
+  // mousedown 제스처 도중에 widgets/layout 배열을 재정렬하면 그리드 자식
+  // DOM 순서가 mousedown/mouseup 사이에 바뀌어 이어지는 click 이벤트가
+  // 소실된다 (위젯 첫 클릭 무시 버그). 앞면 고정은 activeId → zIndex로 하며,
+  // RGL GridItem이 래퍼 div 자체를 .react-grid-item으로 복제하므로 이
+  // z-index는 아이템 간에도 유효하고, activeId가 유지되는 한 sticky하다.
+  // 배열 순서는 생성 순서대로 영구 고정된다 (추가/삭제 시만 변경).
+  const bringToFront = useCallback((id: string) => {
+    setActiveId(id);
+  }, []);
 
   const addWidget = (type: WidgetType) => {
     const meta = WIDGET_REGISTRY[type];
@@ -227,9 +263,124 @@ export default function App() {
     [pages],
   );
 
+  // ---- widget minimize (collapse to the bottom dock bar) -------------------
+  // minimized flag lives in WidgetConfig.options so it persists through
+  // layout save/load. Minimizing hides the widget from the grid entirely and
+  // shows it as a chip in the fixed bottom dock bar (always visible at the
+  // window bottom, above the status bar). options.prevRect remembers the
+  // full pre-minimize rect {x,y,w,h} for restore ("마지막 위치로 복귀").
+  // The widget component unmounts while docked -- TX/backend state is
+  // unaffected (backend is tab/minimize-unaware), but GraphWidget recording
+  // restarts on restore since it only records while mounted.
+  const toggleMinimize = useCallback(
+    (id: string) => {
+      let restoring = false;
+      setPages((ps) =>
+        ps.map((p) => {
+          if (p.id !== activePageId) return p;
+          const widget = p.widgets.find((w) => w.id === id);
+          const item = p.layout.find((it) => it.i === id);
+          if (!widget || !item) return p;
+          const minimized = !(widget.options.minimized === true);
+          if (minimized) {
+            return {
+              ...p,
+              widgets: p.widgets.map((w) =>
+                w.id === id
+                  ? {
+                      ...w,
+                      options: {
+                        ...w.options,
+                        minimized,
+                        prevRect: { x: item.x, y: item.y, w: item.w, h: item.h },
+                      },
+                    }
+                  : w,
+              ),
+            };
+          }
+          restoring = true;
+          // fronting은 setActiveId → zIndex가 담당하므로 배열 순서는 유지한다
+          // (제스처 도중 DOM 순서 변경 금지 -- bringToFront 주석 참조)
+          const widgets = p.widgets.map((w) =>
+            w.id === id ? { ...w, options: { ...w.options, minimized } } : w,
+          );
+          const layout = p.layout.map((it) => (it.i === id ? restoredItem(widget, it) : it));
+          return { ...p, widgets, layout };
+        }),
+      );
+      if (restoring) setActiveId(id);
+    },
+    [activePageId],
+  );
+
+  // restore every docked widget to its pre-minimize position
+  const expandAllMinimized = useCallback(() => {
+    setPages((ps) =>
+      ps.map((p) => {
+        if (p.id !== activePageId) return p;
+        if (!p.widgets.some((w) => w.options.minimized === true)) return p;
+        return {
+          ...p,
+          widgets: p.widgets.map((w) =>
+            w.options.minimized === true
+              ? { ...w, options: { ...w.options, minimized: false } }
+              : w,
+          ),
+          layout: p.layout.map((it) => {
+            const w = p.widgets.find((x) => x.id === it.i);
+            return w && w.options.minimized === true ? restoredItem(w, it) : it;
+          }),
+        };
+      }),
+    );
+  }, [activePageId]);
+
+  // dock every visible widget on the active page (each keeps its own
+  // pre-minimize rect in options.prevRect for later restore)
+  const minimizeAll = useCallback(() => {
+    setPages((ps) =>
+      ps.map((p) => {
+        if (p.id !== activePageId) return p;
+        if (!p.widgets.some((w) => w.options.minimized !== true)) return p;
+        const rectById = new Map(p.layout.map((it) => [it.i, it]));
+        return {
+          ...p,
+          widgets: p.widgets.map((w) => {
+            if (w.options.minimized === true) return w;
+            const it = rectById.get(w.id);
+            return {
+              ...w,
+              options: {
+                ...w.options,
+                minimized: true,
+                prevRect: it
+                  ? { x: it.x, y: it.y, w: it.w, h: it.h }
+                  : w.options.prevRect,
+              },
+            };
+          }),
+        };
+      }),
+    );
+  }, [activePageId]);
+
   const ctx = useMemo(
-    () => ({ dbc, editMode, updateWidget, removeWidget, refreshDbc }),
-    [dbc, editMode, updateWidget, removeWidget, refreshDbc],
+    () => ({ dbc, editMode, updateWidget, removeWidget, toggleMinimize, refreshDbc }),
+    [dbc, editMode, updateWidget, removeWidget, toggleMinimize, refreshDbc],
+  );
+
+  // Docked (minimized) widgets are hidden from the grid entirely and shown
+  // in the bottom dock bar instead -- so the grid only ever sees visible
+  // widgets. Stored layout items of docked widgets are kept untouched (their
+  // restore position lives in options.prevRect).
+  const minimizedWidgets = useMemo(
+    () => activePage.widgets.filter((w) => w.options.minimized === true),
+    [activePage.widgets],
+  );
+  const visibleWidgets = useMemo(
+    () => activePage.widgets.filter((w) => w.options.minimized !== true),
+    [activePage.widgets],
   );
 
   // Resize limits (minW/minH) always come live from the registry rather than
@@ -238,12 +389,14 @@ export default function App() {
   // registry.tsx takes effect immediately for existing widgets too.
   const effectiveLayout = useMemo(
     () =>
-      activePage.layout.map((item) => {
-        const widget = activePage.widgets.find((w) => w.id === item.i);
-        if (!widget) return item;
-        const { minW, minH } = WIDGET_REGISTRY[widget.type].defaultSize;
-        return { ...item, minW, minH };
-      }),
+      activePage.layout
+        .filter((item) => activePage.widgets.some((w) => w.id === item.i && w.options.minimized !== true))
+        .map((item) => {
+          const widget = activePage.widgets.find((w) => w.id === item.i);
+          if (!widget) return item;
+          const { minW, minH } = WIDGET_REGISTRY[widget.type].defaultSize;
+          return { ...item, minW, minH };
+        }),
     [activePage.layout, activePage.widgets],
   );
 
@@ -369,9 +522,18 @@ export default function App() {
 
   // bring an existing widget to the front (same mechanism as clicking it)
   // and scroll it into view -- used by the top bar's "위젯 리스트" picker.
+  // A docked (minimized) widget is restored to its pre-minimize position
+  // first, since there is nothing visible to scroll to otherwise.
   const focusWidget = (id: string) => {
-    bringToFront(id);
-    widgetRefs.current[id]?.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'center' });
+    const target = activePage.widgets.find((w) => w.id === id);
+    if (target && target.options.minimized === true) {
+      toggleMinimize(id);
+    } else {
+      bringToFront(id);
+    }
+    window.setTimeout(() => {
+      widgetRefs.current[id]?.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'center' });
+    }, 60);
   };
 
   // ---- page (tab) management -------------------------------------------------
@@ -421,10 +583,9 @@ export default function App() {
         <TopBar
           dbc={dbc}
           refreshDbc={refreshDbc}
-          editMode={editMode}
-          setEditMode={setEditMode}
           addWidget={addWidget}
           arrange={arrange}
+          minimizeAll={minimizeAll}
           widgets={activePage.widgets}
           onFocusWidget={focusWidget}
           layoutName={layoutName}
@@ -457,9 +618,15 @@ export default function App() {
             compactor={freeCompactor}
             dragConfig={{ enabled: true, handle: '.drag-handle' }}
             resizeConfig={{ enabled: true, handles: ['se', 'e', 's'] }}
-            onLayoutChange={(l: Layout) => updateActivePage((p) => ({ ...p, layout: [...l] }))}
+            onLayoutChange={(l: Layout) =>
+              updateActivePage((p) => ({
+                ...p,
+                // the grid only knows visible items -- keep docked items untouched
+                layout: p.layout.map((it) => l.find((u) => u.i === it.i) ?? it),
+              }))
+            }
           >
-            {activePage.widgets.map((w) => {
+            {visibleWidgets.map((w) => {
               const Comp = WIDGET_REGISTRY[w.type].component;
               return (
                 <div
@@ -481,6 +648,29 @@ export default function App() {
             </div>
           )}
         </div>
+        {minimizedWidgets.length > 0 && (
+          <div className="minimized-dock">
+            <span className="minimized-dock-label" title="접힌 위젯 -- 칩을 클릭하면 원래 위치로 펼쳐집니다">
+              접힌 위젯 {minimizedWidgets.length}
+            </span>
+            {minimizedWidgets.map((w) => (
+              <button
+                key={w.id}
+                className="minimized-chip"
+                title={`${w.title} -- 클릭하여 원래 위치로 펼치기`}
+                onClick={() => toggleMinimize(w.id)}
+              >
+                <span className="minimized-chip-title">{w.title}</span>
+                <span aria-hidden>□</span>
+              </button>
+            ))}
+            {minimizedWidgets.length > 1 && (
+              <button className="small-btn minimized-expand-all" onClick={expandAllMinimized}>
+                전체 펼치기
+              </button>
+            )}
+          </div>
+        )}
         <StatusBar />
         {showSettings && <SettingsModal onClose={() => setShowSettings(false)} />}
       </div>
@@ -602,10 +792,9 @@ function PageTabs({ pages, activePageId, editMode, onSwitch, onAdd, onRename, on
 interface TopBarProps {
   dbc: DbcSummary;
   refreshDbc: () => void;
-  editMode: boolean;
-  setEditMode: (v: boolean) => void;
   addWidget: (t: WidgetType) => void;
   arrange: (mode: 'tile' | 'cascade') => void;
+  minimizeAll: () => void;
   widgets: WidgetConfig[];
   onFocusWidget: (id: string) => void;
   layoutName: string;
@@ -756,15 +945,14 @@ function TopBar(props: TopBarProps) {
       </span>
       <button
         className={`small-btn ${running ? 'danger' : 'primary'}`}
-        disabled={props.editMode}
-        title={props.editMode ? '편집 모드에서는 송수신이 정지됩니다' : '전체 메시지 송수신 Start/Stop'}
+        title="전체 메시지 송수신 Start/Stop (Stop 상태에서 위젯 설정·삭제 등 편집 가능)"
         onClick={toggleRun}
       >
         {running ? '■ Stop' : '▶ Start'}
       </button>
       <button
         className={`small-btn ${periodicOn ? 'danger' : 'primary'}`}
-        disabled={props.editMode || !running || !props.dbc.loaded}
+        disabled={!running || !props.dbc.loaded}
         title="DBC의 Periodic Tx 메시지 전체를 각자의 cycle time으로 주기 송신 시작/중지 (기본값으로 시작, 이후 위젯에서 보낸 값으로 계속 전송)"
         onClick={toggleEnableMsg}
       >
@@ -772,7 +960,7 @@ function TopBar(props: TopBarProps) {
       </button>
       <button
         className={`small-btn ${recording ? 'danger' : 'primary'}`}
-        disabled={props.editMode || !connected}
+        disabled={!running || !connected}
         title="현재 CAN 버스 트래픽을 .blf 파일로 기록 시작/중지"
         onClick={toggleLogging}
       >
@@ -791,23 +979,23 @@ function TopBar(props: TopBarProps) {
             </option>
           ))}
         </select>
-        <label className="toggle">
-          <input
-            type="checkbox"
-            checked={props.editMode}
-            onChange={(e) => props.setEditMode(e.target.checked)}
-          />
-          편집 모드
+        <label className="toggle" title={running ? '실행 중 — 편집은 Stop 후 가능' : '정지 중 — 편집 가능'}>
+          <input type="checkbox" checked={!running} disabled onChange={() => {}} />
+          {running ? '실행 중' : '편집 가능'}
         </label>
         <select
           value=""
+          disabled={props.widgets.length === 0}
           onChange={(e) => {
-            if (e.target.value) props.arrange(e.target.value as 'tile' | 'cascade');
+            const v = e.target.value;
+            if (v === 'minimizeAll') props.minimizeAll();
+            else if (v) props.arrange(v as 'tile' | 'cascade');
           }}
         >
           <option value="">자동 정렬…</option>
           <option value="tile">바둑판 정렬</option>
           <option value="cascade">계단식 정렬</option>
+          <option value="minimizeAll">전체 접기</option>
         </select>
         <select
           value=""
@@ -820,7 +1008,7 @@ function TopBar(props: TopBarProps) {
           <option value="">위젯 리스트…</option>
           {props.widgets.map((w) => (
             <option key={w.id} value={w.id}>
-              {w.title}
+              {w.options.minimized === true ? `– ${w.title} (접힘)` : w.title}
             </option>
           ))}
         </select>

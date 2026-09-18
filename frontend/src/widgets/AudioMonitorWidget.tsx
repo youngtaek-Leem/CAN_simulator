@@ -18,7 +18,17 @@
 import { useEffect, useRef, useState } from 'react';
 import { api } from '../api/client';
 import { canStore, useCanVersion } from '../store/canStore';
-import { AudioWaveformChart, type AudioChartMargin } from './AudioWaveformChart';
+import { AudioWaveformChart, type AudioChartMargin, type Geom } from './AudioWaveformChart';
+import {
+  CURSOR_A_COLOR,
+  CURSOR_B_COLOR,
+  CURSOR_C_COLOR,
+  CURSOR_D_COLOR,
+  fmtDelta,
+  fmtLevel,
+  type DiffCursorState,
+  type LevelCursorState,
+} from './DiffCursor';
 import type { AudioLevel, WidgetConfig } from '../types';
 
 const LEVEL_POLL_MS = 100;
@@ -65,6 +75,64 @@ export function AudioMonitorWidget(_: { config: WidgetConfig }) {
   const [savedMsg, setSavedMsg] = useState<string | null>(null);
   const [xWindowMs, setXWindowMs] = useState(DEFAULT_X_WINDOW_MS);
   const [resetToken, setResetToken] = useState(0);
+  // Time/level cursors shared by every channel chart: A/B read time (epoch
+  // ms, drawn per chart in its own X view), C/D read amplitude ratio (drawn
+  // per chart in its own Y view). Every OFF->ON transition re-seeds all four
+  // lines at the center of what's currently visible, so zooming/panning
+  // elsewhere then toggling always brings the cursors back into view (a
+  // dragged placement only survives while staying ON).
+  //
+  // Seeding reads the first channel chart's actually-drawn view (reported
+  // via reportView) so all four lines land inside the central 50% band --
+  // center +/- span/8 each. A fixed seed (e.g. Date.now-based or +/-0.5)
+  // lands outside the view whenever the user has zoomed/panned elsewhere or
+  // frozen on Stop. Falls back to the live window + default Y range when no
+  // chart has drawn yet.
+  const [cursorMode, setCursorMode] = useState(false);
+  const [cursorA, setCursorA] = useState<number | null>(null);
+  const [cursorB, setCursorB] = useState<number | null>(null);
+  const [cursorC, setCursorC] = useState<number | null>(null);
+  const [cursorD, setCursorD] = useState<number | null>(null);
+  const chartViewsRef = useRef<Map<number, Geom>>(new Map());
+  const toggleCursorMode = () => {
+    if (!cursorMode) {
+      const firstView = [...chartViewsRef.current.values()][0];
+      if (firstView && Number.isFinite(firstView.xMax - firstView.xMin) && firstView.xMax > firstView.xMin) {
+        const xc = (firstView.xMin + firstView.xMax) / 2;
+        const xs = firstView.xMax - firstView.xMin;
+        setCursorA(xc - xs / 8);
+        setCursorB(xc + xs / 8);
+      } else {
+        const now = Date.now();
+        setCursorA(now - (xWindowMs * 2) / 3);
+        setCursorB(now - xWindowMs / 3);
+      }
+      if (firstView && Number.isFinite(firstView.yMax - firstView.yMin) && firstView.yMax > firstView.yMin) {
+        const yc = (firstView.yMin + firstView.yMax) / 2;
+        const ys = firstView.yMax - firstView.yMin;
+        setCursorC(yc - ys / 8);
+        setCursorD(yc + ys / 8);
+      } else {
+        setCursorC(0.5);
+        setCursorD(-0.5);
+      }
+    }
+    setCursorMode((m) => !m);
+  };
+  const cursor: DiffCursorState = {
+    mode: cursorMode,
+    a: cursorA,
+    b: cursorB,
+    onMove: (which, ms) => (which === 'a' ? setCursorA(ms) : setCursorB(ms)),
+  };
+  const yCursor: LevelCursorState = {
+    mode: cursorMode,
+    c: cursorC,
+    d: cursorD,
+    onMove: (which, v) => (which === 'c' ? setCursorC(v) : setCursorD(v)),
+  };
+  const cursorDeltaMs = cursorA !== null && cursorB !== null ? Math.abs(cursorB - cursorA) : null;
+  const cursorDeltaLevel = cursorC !== null && cursorD !== null ? Math.abs(cursorD - cursorC) : null;
   // Tracks the widget's own Record filename across polls so a 30-minute
   // segment rotation (server-side, see audio_service.py's rotation timer)
   // can be surfaced as an activity line instead of happening silently.
@@ -218,6 +286,31 @@ export function AudioMonitorWidget(_: { config: WidgetConfig }) {
         <button className="icon-btn" title="X축 확대" onClick={() => zoomXWindow(-X_WINDOW_STEP_MS)}>
           +
         </button>
+        <button
+          className={`small-btn ${cursorMode ? 'primary' : ''}`}
+          title="차트에서 드래그해 커서를 움직임: 세로선 A/B로 시간, 가로선 C/D로 레벨 측정"
+          onClick={toggleCursorMode}
+        >
+          커서 {cursorMode ? 'ON' : 'OFF'}
+        </button>
+        {cursorMode && cursorDeltaMs !== null && (
+          <span className="graph-xwindow mono">
+            <span style={{ color: CURSOR_A_COLOR }}>A</span>
+            {' - '}
+            <span style={{ color: CURSOR_B_COLOR }}>B</span>
+            {`: Δ ${fmtDelta(cursorDeltaMs)}`}
+          </span>
+        )}
+        {cursorMode && (cursorC !== null || cursorD !== null) && (
+          <span className="graph-xwindow mono">
+            <span style={{ color: CURSOR_C_COLOR }}>C</span>
+            {cursorC !== null ? `: ${fmtLevel(cursorC)}` : ': —'}
+            {' / '}
+            <span style={{ color: CURSOR_D_COLOR }}>D</span>
+            {cursorD !== null ? `: ${fmtLevel(cursorD)}` : ': —'}
+            {cursorDeltaLevel !== null && ` (Δ ${fmtLevel(cursorDeltaLevel)})`}
+          </span>
+        )}
       </div>
       {error && <div className="error">{error}</div>}
       {savedMsg && <div className="hint">{savedMsg}</div>}
@@ -251,6 +344,11 @@ export function AudioMonitorWidget(_: { config: WidgetConfig }) {
             resetToken={resetToken}
             onResetClick={() => setResetToken((n) => n + 1)}
             resetTitle="X/Y 축 자동 맞춤으로 리셋"
+            cursor={cursor}
+            yCursor={yCursor}
+            reportView={(v) => {
+              chartViewsRef.current.set(ch.index, v);
+            }}
           />
         ))}
       </div>

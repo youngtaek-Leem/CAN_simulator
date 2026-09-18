@@ -80,6 +80,55 @@ body {
   color: var(--bad);
 }
 
+/* ---- minimized dock (bottom bar, above the status bar) ---- */
+
+.minimized-dock {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px;
+  background: var(--panel);
+  border-top: 1px solid var(--border);
+  overflow-x: auto;
+  flex-shrink: 0;
+}
+
+.minimized-dock-label {
+  font-size: 12px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+
+.minimized-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.minimized-chip:hover {
+  border-color: var(--accent);
+}
+
+.minimized-chip-title {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 200px;
+}
+
+.minimized-expand-all {
+  margin-left: auto;
+  white-space: nowrap;
+}
+
 .logo {
   font-weight: 700;
   color: var(--accent);
@@ -840,9 +889,10 @@ select.tx-signal-input {
   flex-shrink: 0;
 }
 
-/* vertical stack of independent per-signal mini-charts. Only the bottom-most
-   chart draws X-axis (time) tick labels since every chart shares the same
-   time axis. */
+/* vertical stack of independent per-signal mini-charts. In the multiview
+   widget every audio chart draws its own X-axis (time) tick labels (each
+   chart is an independent canvas, so labels never overlap); the Y axis
+   (level) ticks always draw on every chart. */
 .graph-charts-col {
   flex: 1;
   min-height: 0;
@@ -903,6 +953,43 @@ select.tx-signal-input {
 
 .graph-canvas-wrap canvas:active {
   cursor: grabbing;
+}
+
+/* hover readout overlay: crosshair lines + value tooltip, positioned via
+   refs (no React render). pointer-events none so hovering never steals the
+   canvas gesture stream. */
+.hover-vline,
+.hover-hline {
+  position: absolute;
+  pointer-events: none;
+  z-index: 2;
+}
+
+.hover-vline {
+  top: 0;
+  bottom: 0;
+  width: 0;
+  border-left: 1px dashed #9aa0ad;
+}
+
+.hover-hline {
+  left: 0;
+  right: 0;
+  height: 0;
+  border-top: 1px dashed #9aa0ad;
+}
+
+.hover-tip {
+  position: absolute;
+  pointer-events: none;
+  z-index: 3;
+  font-size: 11px;
+  white-space: nowrap;
+  background: rgba(20, 22, 27, 0.92);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px 6px;
+  color: var(--text);
 }
 
 /* ---- sysLog 분석 위젯: 좌측 ID 체크박스 목록(스크롤) + 우측 그래프 스택(스크롤) ---- */
@@ -1383,50 +1470,33 @@ select.tx-signal-input {
 
 .isotp-data-field {
   flex: 1;
+  /* 데이터 입력 textarea와 뒤 하이라이트 레이어는 겹침 구조라 폰트
+   * 메트릭이 1px만 어긋나도 줄이 밀린다 -- 반드시 아래 변수로 공유한다 */
+  --isotp-code-font: 'JetBrains Mono', 'D2Coding', 'SF Mono', Menlo, Consolas, 'Courier New', monospace;
+  --isotp-code-size: 13px;
+  --isotp-code-lh: 20px;
+  --isotp-code-fg: #ffffff;
 }
 
 .isotp-data-input {
   width: 100%;
   min-height: 60px;
   resize: vertical;
-  font-size: 12px;
+  font-family: var(--isotp-code-font);
+  font-size: var(--isotp-code-size);
+  color: var(--isotp-code-fg);
+  caret-color: var(--isotp-code-fg);
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 4px;
   padding: 6px;
-  line-height: 18px;
+  line-height: var(--isotp-code-lh);
 }
 
 .isotp-data-wrap {
-  position: relative;
   flex: 1;
   display: flex;
   min-height: 60px;
-}
-
-.isotp-data-highlight {
-  position: absolute;
-  inset: 0;
-  padding: 6px;
-  font-family: 'SF Mono', Menlo, Consolas, 'Courier New', monospace;
-  font-size: 12px;
-  line-height: 18px;
-  white-space: pre;
-  overflow: hidden;
-  pointer-events: none;
-  border-radius: 4px;
-}
-
-.isotp-line {
-  min-height: 18px;
-}
-
-.isotp-line-active {
-  background: rgba(59, 130, 246, 0.18);
-  border-radius: 2px;
-}
-
-.isotp-data-input--overlay {
-  position: relative;
-  background: transparent;
-  /* 텍스트는 그대로 보이되 뒤 하이라이트가 비치도록 */
 }
 
 .isotp-result {

@@ -1,4 +1,4 @@
-// CAN-오디오 지연 확인: CAN 신호 트리거와 오디오 반응 사이의 지연시간을 눈으로
+// CAN-오디오 멀티뷰: CAN 신호 트리거와 오디오 반응 사이의 지연시간을 눈으로
 // 재기 위한 위젯. CAN 신호 그래프(GraphWidget)와 오디오 파형(AudioMonitorWidget)을
 // 하나의 위젯 안에서 같은 시간축(절대 epoch ms)으로 겹쳐 보여준다 -- 두 위젯은
 // 각자 relMs(런 시작 기준 상대시간)/epoch ms를 독립적으로 쓰기 때문에 그대로
@@ -28,17 +28,21 @@ import { AudioWaveformChart, niceTicks, orFallback, type AudioChartXView, type G
 import {
   drawDiffCursors,
   fmtDelta,
+  fmtLevel,
   nearestCursor,
   CURSOR_A_COLOR,
   CURSOR_B_COLOR,
+  CURSOR_C_COLOR,
+  CURSOR_D_COLOR,
   type DiffCursorState,
+  type LevelCursorState,
 } from './DiffCursor';
 import type { DbcSummary, SignalBinding, WidgetConfig } from '../types';
 
 const MARGIN = { left: 52, right: 10, top: 8, bottom: 22 };
 const ZOOM_STEP = 1.15;
 const DOT_RADIUS = 2.5;
-const DEFAULT_X_WINDOW_MS = 10_000;
+const DEFAULT_X_WINDOW_MS = 5_000; // 오디오 신호 모니터와 동일
 const MIN_X_WINDOW_MS = 200;
 const MAX_X_WINDOW_MS = 300_000;
 const X_WINDOW_STEP_FACTOR = 1.1; // +/- toolbar buttons resize the window by 10% per click
@@ -102,6 +106,11 @@ export function CanAudioLatencyWidget({ config }: { config: WidgetConfig }) {
     updateWidget({ ...config, options: { ...config.options, audioOffsetMs: ms } });
   const [level, setLevel] = useState<import('../types').AudioLevel | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [savedMsg, setSavedMsg] = useState<string | null>(null);
+  // Tracks this widget's own Record filename across polls so a 30-minute
+  // segment rotation (server-side, audio_service.py) surfaces as an activity
+  // line instead of happening silently -- same pattern as AudioMonitorWidget.
+  const lastFilenameRef = useRef<string | null>(null);
 
   // Shared X (time) view across the CAN chart + every audio channel chart --
   // stored in a ref (not React state) so drag/wheel handlers can mutate it at
@@ -114,29 +123,59 @@ export function CanAudioLatencyWidget({ config }: { config: WidgetConfig }) {
 
   // Difference cursor: two draggable vertical lines (epoch ms), drawn on
   // every chart via the shared X view so they line up across CAN and audio.
-  // Toggling off only hides them (cursorA/B values are kept, not cleared) so
-  // a careful placement survives an accidental toggle. First turn-on seeds
-  // sensible defaults from whatever's currently in view.
+  // Level cursor: two draggable horizontal lines (amplitude ratio) on the
+  // audio charts only. Every OFF->ON transition re-seeds all lines at the
+  // center of what's currently visible, so zooming/panning elsewhere then
+  // toggling always brings the cursors back into view. A dragged placement
+  // only survives while staying ON.
   const [cursorMode, setCursorMode] = useState(false);
   const [cursorA, setCursorA] = useState<number | null>(null);
   const [cursorB, setCursorB] = useState<number | null>(null);
+  const [cursorC, setCursorC] = useState<number | null>(null);
+  const [cursorD, setCursorD] = useState<number | null>(null);
+  // Y views are per-chart (unlike the shared X view) -- first audio chart's
+  // actually-drawn view seeds C/D, same central-50% rule as AudioMonitorWidget.
+  const audioViewsRef = useRef<Map<number, Geom>>(new Map());
   const onCursorMove = (which: 'a' | 'b', ms: number) => {
     if (which === 'a') setCursorA(ms);
     else setCursorB(ms);
     notifyChange(); // redraw every chart sharing xVersion, same as pan/zoom
   };
   const toggleCursorMode = () => {
-    if (!cursorMode && cursorA === null && cursorB === null) {
+    if (!cursorMode) {
       const v = sharedXRef.current;
       const xMax = v.xMax ?? nowAnchor();
       const xMin = v.xMin ?? xMax - xWindowMs;
-      setCursorA(xMin + (xMax - xMin) / 3);
-      setCursorB(xMin + ((xMax - xMin) * 2) / 3);
+      const xc = (xMin + xMax) / 2;
+      const xs = xMax - xMin;
+      setCursorA(xc - xs / 8);
+      setCursorB(xc + xs / 8);
+      const firstView = [...audioViewsRef.current.values()][0];
+      if (firstView && Number.isFinite(firstView.yMax - firstView.yMin) && firstView.yMax > firstView.yMin) {
+        const yc = (firstView.yMin + firstView.yMax) / 2;
+        const ys = firstView.yMax - firstView.yMin;
+        setCursorC(yc - ys / 8);
+        setCursorD(yc + ys / 8);
+      } else {
+        setCursorC(0.5);
+        setCursorD(-0.5);
+      }
     }
     setCursorMode((m) => !m);
   };
   const cursor: DiffCursorState = { mode: cursorMode, a: cursorA, b: cursorB, onMove: onCursorMove };
+  const yCursor: LevelCursorState = {
+    mode: cursorMode,
+    c: cursorC,
+    d: cursorD,
+    onMove: (which, v) => {
+      if (which === 'c') setCursorC(v);
+      else setCursorD(v);
+      notifyChange();
+    },
+  };
   const cursorDeltaMs = cursorA !== null && cursorB !== null ? Math.abs(cursorB - cursorA) : null;
+  const cursorDeltaLevel = cursorC !== null && cursorD !== null ? Math.abs(cursorD - cursorC) : null;
 
   const active = level?.active ?? false;
 
@@ -192,7 +231,18 @@ export function CanAudioLatencyWidget({ config }: { config: WidgetConfig }) {
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | null = null;
     const poll = () => {
-      api.audioLevel().then(setLevel).catch(() => {}).finally(() => {
+      api.audioLevel().then((lvl) => {
+        setLevel(lvl);
+        if (lvl.owner === 'widget_record' && lvl.current_filename) {
+          const prev = lastFilenameRef.current;
+          if (prev !== null && prev !== lvl.current_filename) {
+            canStore.pushActivity(`오디오 녹음 구간 저장됨: ${prev} (다음 구간: ${lvl.current_filename})`);
+          }
+          lastFilenameRef.current = lvl.current_filename;
+        } else {
+          lastFilenameRef.current = null;
+        }
+      }).catch(() => {}).finally(() => {
         if (!cancelled) timer = setTimeout(poll, LEVEL_POLL_MS);
       });
     };
@@ -252,8 +302,23 @@ export function CanAudioLatencyWidget({ config }: { config: WidgetConfig }) {
 
   const start = async () => {
     setError(null);
+    setSavedMsg(null);
     try {
       const r = await api.audioMonitorStart();
+      if (!r.ok && r.reason) setError(r.reason);
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
+  // WAV recording: same shared-stream owner model as AudioMonitorWidget's
+  // Record -- upgrades this widget's own monitor stream in place, or opens a
+  // fresh recording stream from idle. Timestamped filename + 30-minute
+  // segment rotation come from the backend (audio_service.py) as-is.
+  const record = async () => {
+    setError(null);
+    setSavedMsg(null);
+    try {
+      const r = await api.audioRecordStart();
       if (!r.ok && r.reason) setError(r.reason);
     } catch (e) {
       setError((e as Error).message);
@@ -262,8 +327,14 @@ export function CanAudioLatencyWidget({ config }: { config: WidgetConfig }) {
   const stop = async () => {
     setError(null);
     try {
-      const r = owner === 'widget_record' ? await api.audioRecordStop() : await api.audioMonitorStop();
-      if (!r.ok && r.reason) setError(r.reason);
+      if (owner === 'widget_record') {
+        const r = await api.audioRecordStop();
+        if (!r.ok && r.reason) setError(r.reason);
+        else if (r.filename) setSavedMsg(`저장됨: ${r.filename} (${r.frames ?? 0} frames)`);
+      } else {
+        const r = await api.audioMonitorStop();
+        if (!r.ok && r.reason) setError(r.reason);
+      }
     } catch (e) {
       setError((e as Error).message);
     }
@@ -298,6 +369,14 @@ export function CanAudioLatencyWidget({ config }: { config: WidgetConfig }) {
         </select>
         <button className={`small-btn ${active ? '' : 'primary'}`} onClick={start} disabled={owner !== null}>
           ▶ Start
+        </button>
+        <button
+          className="small-btn"
+          onClick={record}
+          disabled={owner === 'recording' || owner === 'widget_record'}
+          title="파형을 보여주면서 WAV로 저장 (30분 단위 구간 분할, 파일명 자동 생성)"
+        >
+          ● Record
         </button>
         <button className={`small-btn ${canStop ? 'danger' : ''}`} onClick={stop} disabled={!canStop}>
           ■ Stop
@@ -343,8 +422,19 @@ export function CanAudioLatencyWidget({ config }: { config: WidgetConfig }) {
             {`: Δ ${fmtDelta(cursorDeltaMs)}`}
           </span>
         )}
+        {cursorMode && (cursorC !== null || cursorD !== null) && (
+          <span className="graph-xwindow mono">
+            <span style={{ color: CURSOR_C_COLOR }}>C</span>
+            {cursorC !== null ? `: ${fmtLevel(cursorC)}` : ': —'}
+            {' / '}
+            <span style={{ color: CURSOR_D_COLOR }}>D</span>
+            {cursorD !== null ? `: ${fmtLevel(cursorD)}` : ': —'}
+            {cursorDeltaLevel !== null && ` (Δ ${fmtLevel(cursorDeltaLevel)})`}
+          </span>
+        )}
       </div>
       {error && <div className="error">{error}</div>}
+      {savedMsg && <div className="hint">{savedMsg}</div>}
       {owner === 'recording' && <div className="hint">테스트 러너 녹음 중 (같은 스트림에서 표시 중)</div>}
       {showPcanWarning && (
         <div className="error">
@@ -380,7 +470,7 @@ export function CanAudioLatencyWidget({ config }: { config: WidgetConfig }) {
             streamStartedAtMs={null}
             shared={{ xViewRef: sharedXRef, xVersion: sharedVersion, notifyChange }}
             xWindowMs={xWindowMs}
-            showXAxis={i === channels.length - 1}
+            showXAxis
             nowAnchor={nowAnchor}
             xTickMode="sinceWindowLeft"
             xTickDecimals={1}
@@ -389,7 +479,11 @@ export function CanAudioLatencyWidget({ config }: { config: WidgetConfig }) {
             onResetClick={resetEverything}
             resetTitle="두 차트 모두 X/Y 축 자동 맞춤으로 리셋"
             cursor={cursor}
+            yCursor={yCursor}
             xOffsetMs={audioOffsetMs}
+            reportView={(v) => {
+              audioViewsRef.current.set(ch.index, v);
+            }}
           />
         ))}
       </div>
@@ -453,6 +547,55 @@ function CanSignalChart({
     plotH: 1,
   });
   const [size, setSize] = useState({ w: 260, h: 150 });
+  // Hover readout overlay (crosshair divs + tooltip, updated via refs so
+  // hovering never triggers a React render or canvas redraw). Shown only
+  // while plain-hovering the plot -- hidden during pan/cursor drags.
+  const hoverVRef = useRef<HTMLDivElement>(null);
+  const hoverHRef = useRef<HTMLDivElement>(null);
+  const hoverTipRef = useRef<HTMLDivElement>(null);
+
+  const hideHover = () => {
+    if (hoverVRef.current) hoverVRef.current.style.display = 'none';
+    if (hoverHRef.current) hoverHRef.current.style.display = 'none';
+    if (hoverTipRef.current) hoverTipRef.current.style.display = 'none';
+  };
+
+  const updateHover = (px: number, py: number) => {
+    const g = lastGeomRef.current;
+    const vEl = hoverVRef.current;
+    const hEl = hoverHRef.current;
+    const tipEl = hoverTipRef.current;
+    if (!vEl || !hEl || !tipEl) return;
+    if (px < g.plotLeft || px > g.plotLeft + g.plotW || py < g.plotTop || py > g.plotTop + g.plotH) {
+      hideHover();
+      return;
+    }
+    const ms = g.xMin + ((px - g.plotLeft) / g.plotW) * (g.xMax - g.xMin);
+    const points = canStore.signalHistory.get(bindingKey) ?? [];
+    let best: { ts: number; value: number } | null = null;
+    let bestDist = Infinity;
+    for (const p of points) {
+      const d = Math.abs(p.ts * 1000 - ms);
+      if (d < bestDist) {
+        bestDist = d;
+        best = p;
+      }
+    }
+    if (!best) {
+      hideHover();
+      return;
+    }
+    const vPy = g.plotTop + g.plotH - ((best.value - g.yMin) / (g.yMax - g.yMin)) * g.plotH;
+    vEl.style.display = 'block';
+    vEl.style.left = `${px}px`;
+    hEl.style.display = 'block';
+    hEl.style.top = `${vPy}px`;
+    tipEl.style.display = 'block';
+    tipEl.textContent = `+${fmtXTick(ms - g.xMin)}  ${fmt(best.value)}`;
+    const tipW = 170;
+    tipEl.style.left = px + 12 + tipW > g.plotLeft + g.plotW ? `${px - tipW - 8}px` : `${px + 12}px`;
+    tipEl.style.top = `${Math.max(g.plotTop, vPy - 12)}px`;
+  };
 
   useEffect(() => {
     const el = wrapRef.current;
@@ -625,6 +768,7 @@ function CanSignalChart({
 
   const onWheel = (e: React.WheelEvent<HTMLCanvasElement>) => {
     e.preventDefault();
+    hideHover();
     const rect = canvasRef.current!.getBoundingClientRect();
     const px = e.clientX - rect.left;
     const py = e.clientY - rect.top;
@@ -667,6 +811,7 @@ function CanSignalChart({
     const py = e.clientY - rect.top;
     if (px < g.plotLeft || px > g.plotLeft + g.plotW || py < g.plotTop || py > g.plotTop + g.plotH) return;
     (e.target as HTMLCanvasElement).setPointerCapture(e.pointerId);
+    hideHover();
     if (cursor.mode) {
       const msToPx = (ms: number) => g.plotLeft + ((ms - g.xMin) / (g.xMax - g.xMin)) * g.plotW;
       const which = nearestCursor(cursor, px, msToPx);
@@ -696,19 +841,24 @@ function CanSignalChart({
       return;
     }
     const drag = dragRef.current;
-    if (!drag) return;
-    const g = lastGeomRef.current;
-    const dxPx = e.clientX - drag.x;
-    const dyPx = e.clientY - drag.y;
-    const dataDx = (dxPx / g.plotW) * (drag.xView.xMax! - drag.xView.xMin!);
-    const dataDy = (dyPx / g.plotH) * (drag.yView.yMax! - drag.yView.yMin!);
-    xViewRef.current = { xMin: drag.xView.xMin! - dataDx, xMax: drag.xView.xMax! - dataDx };
-    yViewRef.current = { yMin: drag.yView.yMin! + dataDy, yMax: drag.yView.yMax! + dataDy };
-    notifyChange();
+    if (drag) {
+      const g = lastGeomRef.current;
+      const dxPx = e.clientX - drag.x;
+      const dyPx = e.clientY - drag.y;
+      const dataDx = (dxPx / g.plotW) * (drag.xView.xMax! - drag.xView.xMin!);
+      const dataDy = (dyPx / g.plotH) * (drag.yView.yMax! - drag.yView.yMin!);
+      xViewRef.current = { xMin: drag.xView.xMin! - dataDx, xMax: drag.xView.xMax! - dataDx };
+      yViewRef.current = { yMin: drag.yView.yMin! + dataDy, yMax: drag.yView.yMax! + dataDy };
+      notifyChange();
+      return;
+    }
+    const rect = canvasRef.current!.getBoundingClientRect();
+    updateHover(e.clientX - rect.left, e.clientY - rect.top);
   };
   const onPointerUp = () => {
     dragRef.current = null;
     cursorDragRef.current = null;
+    hideHover();
   };
 
   return (
@@ -732,6 +882,9 @@ function CanSignalChart({
           onPointerUp={onPointerUp}
           onPointerLeave={onPointerUp}
         />
+        <div ref={hoverVRef} className="hover-vline" style={{ display: 'none' }} />
+        <div ref={hoverHRef} className="hover-hline" style={{ display: 'none' }} />
+        <div ref={hoverTipRef} className="hover-tip mono" style={{ display: 'none' }} />
       </div>
     </div>
   );

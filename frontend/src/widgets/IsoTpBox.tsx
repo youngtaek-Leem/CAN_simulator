@@ -84,9 +84,8 @@ export function IsoTpBox({ config }: { config: WidgetConfig }) {
   const setOpt = (patch: Partial<IsoTpOptions>) =>
     updateWidget({ ...config, options: { ...config.options, ...patch } });
 
-  // 커서 라인 추적
+  // 커서 라인 추적 (줄 단위 전송 대상 결정용)
   const textareaRef = useRef<HTMLTextAreaElement>(null);
-  const highlightRef = useRef<HTMLDivElement>(null);
   const [cursorLine, setCursorLine] = useState(0);
 
   const lines = splitLines(dataHex);
@@ -109,12 +108,6 @@ export function IsoTpBox({ config }: { config: WidgetConfig }) {
     const before = el.value.slice(0, pos);
     const lineIdx = before.split('\n').length - 1;
     setCursorLine(Math.max(0, Math.min(lineIdx, splitLines(el.value).length - 1)));
-  };
-
-  const syncScroll = () => {
-    const ta = textareaRef.current;
-    const hl = highlightRef.current;
-    if (ta && hl) hl.scrollTop = ta.scrollTop;
   };
 
   useEffect(() => {
@@ -227,16 +220,9 @@ export function IsoTpBox({ config }: { config: WidgetConfig }) {
       <label className="isotp-field isotp-data-field">
         데이터 (hex, 공백 허용) — 한 줄 = 한 번 전송, # 또는 // 이후는 주석
         <div className="isotp-data-wrap">
-          <div ref={highlightRef} className="isotp-data-highlight" aria-hidden>
-            {lines.map((ln, i) => (
-              <div key={i} className={i === safeCursorLine ? 'isotp-line-active' : 'isotp-line'}>
-                {ln || '\u00A0'}
-              </div>
-            ))}
-          </div>
           <textarea
             ref={textareaRef}
-            className="mono isotp-data-input isotp-data-input--overlay"
+            className="mono isotp-data-input"
             value={dataHex}
             placeholder={'01 02 03\n# 주석은 전송 안 함\n02 10 01 // 인라인 주석도 가능'}
             onChange={(e) => {
@@ -247,7 +233,6 @@ export function IsoTpBox({ config }: { config: WidgetConfig }) {
             onClick={updateCursorLine}
             onKeyUp={updateCursorLine}
             onKeyDown={updateCursorLine}
-            onScroll={syncScroll}
             onFocus={updateCursorLine}
           />
         </div>

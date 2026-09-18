@@ -24,53 +24,28 @@ function useSendSignal(config: WidgetConfig) {
   return { send, error, setError };
 }
 
-/** Periodic signals: press 1 starts sending the configured value, press 2
- * switches to sending the invalid value (bit-max) continuously, press 3
- * switches back, etc. Event signals are unaffected -- they keep the plain
- * single-value-per-click behavior (the backend's own 30ms-later invalid
- * follow-up already applies there). */
-function usePeriodicInvalidToggle(config: WidgetConfig, value: number) {
-  const { dbc } = useApp();
-  const bound = findSignal(dbc, config.binding);
-  const isPeriodic = bound?.signal.send_type === 'periodic';
-  // what the *next* click will send, and what the *last* click actually
-  // sent (null before the first click, so the label starts out neutral)
-  const [pending, setPending] = useState<'valid' | 'invalid'>('valid');
-  const [lastSent, setLastSent] = useState<'valid' | 'invalid' | null>(null);
-  const { send, error, setError } = useSendSignal(config);
-
-  const activate = async () => {
-    if (!config.binding?.signal) {
-      send(value);
-      return;
-    }
-    if (!isPeriodic) {
-      send(value);
-      return;
-    }
-    if (pending === 'invalid') {
-      try {
-        await canStore.sendInvalid(config.binding.message, config.binding.signal);
-        setError(null);
-      } catch (e) {
-        setError((e as Error).message);
-      }
-    } else {
-      await send(value);
-    }
-    // advance the toggle regardless of send success -- consistent with the
-    // rest of this app's optimistic (no-rollback-on-failure) UI updates
-    setLastSent(pending);
-    setPending(pending === 'invalid' ? 'valid' : 'invalid');
-  };
-
-  const invalidActive = isPeriodic && lastSent === 'invalid';
-  return { activate, error, invalidActive };
-}
-
 export function ButtonWidget({ config }: { config: WidgetConfig }) {
   const value = Number(config.options.value ?? 1);
-  const { activate, error, invalidActive } = usePeriodicInvalidToggle(config, value);
+  const { dbc } = useApp();
+  const { send, error, setError } = useSendSignal(config);
+  const isPeriodic = findSignal(dbc, config.binding)?.signal.send_type === 'periodic';
+  // Periodic: inverted one-shot pulse (INVALID immediately, configured
+  // value 30ms later, server-side) on every click -- no toggle.
+  // Event: existing behavior, unchanged (value now + auto-invalid 30ms later).
+  const activate = async () => {
+    if (!config.binding?.signal || !isPeriodic) {
+      send(value);
+      return;
+    }
+    try {
+      await canStore.sendSignalInvalidFirst(config.binding.message, {
+        [config.binding.signal]: value,
+      });
+      setError(null);
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
   return (
     <div className="control-widget">
       <button
@@ -87,11 +62,7 @@ export function ButtonWidget({ config }: { config: WidgetConfig }) {
         }}
         disabled={!config.binding?.signal}
       >
-        {config.binding?.signal
-          ? invalidActive
-            ? `${config.binding.signal} = INVALID`
-            : `${config.binding.signal} = ${value}`
-          : '신호 미할당'}
+        {config.binding?.signal ? `${config.binding.signal} = ${value}` : '신호 미할당'}
       </button>
       {error && <span className="error">{error}</span>}
     </div>
@@ -298,9 +269,9 @@ export function parseFlexibleInt(input: string): number | null {
 }
 
 /** Assign a single CAN signal and type its raw value directly (hex/binary/
- * decimal), then send with the same Event/Periodic rule as every other
- * control widget: Event sends the value then auto-invalidates 30ms later,
- * Periodic keeps resending the value at the signal's cycle time. */
+ * decimal), then send: Event keeps the existing rule (value, then
+ * auto-invalid 30ms later); Periodic sends the inverted pulse (INVALID
+ * immediately, typed value 30ms later, server-side). */
 export function ManualValueWidget({ config }: { config: WidgetConfig }) {
   const { dbc, updateWidget } = useApp();
   const bound = findSignal(dbc, config.binding);
@@ -343,7 +314,19 @@ export function ManualValueWidget({ config }: { config: WidgetConfig }) {
       setError(`범위 초과 (raw ${min} ~ ${max})`);
       return;
     }
-    await send(raw * bound.signal.scale + bound.signal.offset);
+    const physical = raw * bound.signal.scale + bound.signal.offset;
+    if (bound.signal.send_type === 'periodic') {
+      try {
+        await canStore.sendSignalInvalidFirst(config.binding!.message, {
+          [config.binding!.signal]: physical,
+        });
+        setError(null);
+      } catch (e) {
+        setError((e as Error).message);
+      }
+      return;
+    }
+    await send(physical);
   };
 
   return (

@@ -110,6 +110,11 @@ class TxScheduler:
         self._oneshots: list[tuple[float, int, Callable[[], None]]] = []
         # message_name -> signal_name -> generator producing a raw int value
         self._value_generators: dict[str, dict[str, Callable[[], int]]] = {}
+        # (message_name, signal_name) -> {"period_ms", "next_due"} for
+        # Event-signal periodic Random sends (Random button widgets): each
+        # tick generates a fresh value, sends it, and follows the Event rule
+        # (invalid value 30ms later via _schedule_invalid)
+        self._event_periodic: dict[tuple[str, str], dict[str, float]] = {}
         self._seq = itertools.count()
         self._lock = threading.Lock()
         self._running = False        # user TX list start/stop
@@ -227,6 +232,50 @@ class TxScheduler:
             result["signals"][signal_name] = self._dispatch_send_type(message, signal_name)
         return result
 
+    def send_signal_invalid_first(self, message_name: str, values: dict[str, Any]) -> dict:
+        """Inverted one-shot pulse for Periodic signals (button/input widgets):
+        send an all-invalid frame immediately, then the configured (valid)
+        values EVENT_INVALID_DELAY_S later -- the mirror image of the Event
+        rule (valid now + invalid 30ms later). Event signals are rejected:
+        they keep the existing send_signal path untouched.
+
+        The valid values are persisted into signal state right away (via
+        encode_with_values) so the periodic auto-resend armed below keeps
+        transmitting them on every subsequent tick. The delayed valid frame
+        is pre-encoded now (not re-encoded at fire time) so rapid repeated
+        clicks each replay their own values in order."""
+        message = self._dbc.get_message(message_name)
+        if not values:
+            raise ValueError("전송할 신호 값이 없습니다")
+        for signal_name in values:
+            if self._dbc.signal_send_type(message_name, signal_name) != "periodic":
+                raise ValueError(
+                    f"{message_name}.{signal_name}는 Event 신호입니다 "
+                    "(invalid-first 펄스는 Periodic 신호 전용입니다)"
+                )
+        invalid_data = self._dbc.encode_invalid(message_name, next(iter(values)))
+        self._send_frame(message, invalid_data)
+        valid_data = self._dbc.encode_with_values(message_name, values)
+        self._upsert_auto(message)
+
+        def send_valid() -> None:
+            self._can.send(
+                message.frame_id,
+                valid_data,
+                message.is_extended_frame,
+                is_fd=message.is_fd,
+                bitrate_switch=message.is_fd,
+            )
+
+        due = time.perf_counter() + EVENT_INVALID_DELAY_S
+        with self._lock:
+            heapq.heappush(self._oneshots, (due, next(self._seq), send_valid))
+
+        result: dict[str, Any] = {"sent": True, "mode": "invalid_first", "signals": {}}
+        for signal_name in values:
+            result["signals"][signal_name] = "periodic"
+        return result
+
     def preset_signal(self, message_name: str, values: dict[str, Any]) -> dict:
         """Seed DBC signal state WITHOUT transmitting -- the TX box's signal
         editor stores per-row values here on apply, so the scheduler's later
@@ -336,6 +385,64 @@ class TxScheduler:
             "send_type": self._dispatch_send_type(message, signal_name),
         }
 
+    # ---- Event-signal periodic Random sends ("Random 버튼" widget) ----
+
+    def start_event_periodic(self, message_name: str, signal_name: str, period_ms: float) -> dict:
+        """Start (or re-arm) periodic Random sends for an Event signal: every
+        `period_ms` a fresh value comes from the registered generator and is
+        sent immediately, followed by the Event-rule invalid value 30ms
+        later. First tick fires on the next scheduler loop pass (~1ms).
+        Periodic signals are rejected (they have their own generate<->invalid
+        toggle path); the value generator must already be registered via
+        set_value_generator (the widget registers it on mount)."""
+        message = self._dbc.get_message(message_name)
+        if self._dbc.signal_send_type(message_name, signal_name) != "event":
+            raise ValueError(
+                f"{message_name}.{signal_name}는 Periodic 신호입니다 "
+                "(주기 Random 송신은 Event 신호 전용입니다)"
+            )
+        period = float(period_ms)
+        if not 10.0 <= period <= 60000.0:
+            raise ValueError(f"주기 {period_ms}ms는 10~60000 ms 범위여야 합니다")
+        with self._lock:
+            if self._value_generators.get(message_name, {}).get(signal_name) is None:
+                raise ValueError(
+                    f"{message_name}.{signal_name}에 값 생성기가 등록되지 않았습니다"
+                )
+            self._event_periodic[(message_name, signal_name)] = {
+                "period_ms": period,
+                "next_due": time.perf_counter(),
+            }
+        return {
+            "started": True,
+            "message_name": message.name,
+            "signal_name": signal_name,
+            "period_ms": period,
+        }
+
+    def stop_event_periodic(self, message_name: str, signal_name: str) -> dict:
+        """Stop periodic Random sends (idempotent). A 30ms-invalid follow-up
+        already scheduled by the last tick still goes out -- same as the
+        Event rule everywhere else."""
+        with self._lock:
+            self._event_periodic.pop((message_name, signal_name), None)
+        return {"stopped": True, "message_name": message_name, "signal_name": signal_name}
+
+    def _make_event_periodic_job(self, message_name: str, signal_name: str) -> Callable[[], None]:
+        def send() -> None:
+            with self._lock:
+                gen = self._value_generators.get(message_name, {}).get(signal_name)
+            if gen is None:
+                return  # generator vanished mid-run -- skip this tick
+            raw_value = gen()
+            self._dbc.set_raw_signal_value(message_name, signal_name, raw_value)
+            message = self._dbc.get_message(message_name)
+            data = self._dbc.encode_current(message_name)
+            self._send_frame(message, data)
+            self._schedule_invalid(message, signal_name)
+
+        return send
+
     def _schedule_invalid(self, message, signal_name: str) -> None:
         def send_invalid() -> None:
             data = self._dbc.encode_invalid(message.name, signal_name)
@@ -424,9 +531,12 @@ class TxScheduler:
             if message_name is None:
                 self._auto_entries.clear()
                 self._enable_msg_armed.clear()
+                self._event_periodic.clear()
             else:
                 self._auto_entries.pop(message_name, None)
                 self._enable_msg_armed.discard(message_name)
+                for key in [k for k in self._event_periodic if k[0] == message_name]:
+                    del self._event_periodic[key]
         return self.status()
 
     # ---- scheduler loop ---------------------------------------------------
@@ -473,6 +583,14 @@ class TxScheduler:
                 if not paused:
                     while self._oneshots and self._oneshots[0][0] <= now:
                         jobs.append(heapq.heappop(self._oneshots)[2])
+                    for key, ep in self._event_periodic.items():
+                        if ep["next_due"] <= now:
+                            jobs.append(self._make_event_periodic_job(key[0], key[1]))
+                            # keep phase stable; skip cycles if we fell behind
+                            period_s = ep["period_ms"] / 1000.0
+                            ep["next_due"] += period_s
+                            if ep["next_due"] <= now:
+                                ep["next_due"] = now + period_s
                     for entry in self._due_entries(now):
                         jobs.append(self._make_send_job(entry))
                         # keep phase stable; skip cycles if we fell behind

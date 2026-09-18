@@ -26,28 +26,42 @@ function signalValueRange(signal: DbcSignal): { min: number; max: number } {
 }
 
 export function WidgetFrame({ config, children }: { config: WidgetConfig; children: ReactNode }) {
-  const { editMode, removeWidget } = useApp();
+  const { editMode, removeWidget, toggleMinimize } = useApp();
   const [showConfig, setShowConfig] = useState(false);
+  // Minimize hides the widget from the grid into the bottom dock bar
+  // (App.tsx renders docked widgets as chips, not via WidgetFrame).
   return (
     <div className="widget">
       <div className="widget-titlebar drag-handle">
         <span className="widget-title">{config.title}</span>
-        {editMode && (
-          <span className="widget-actions">
-            <button className="icon-btn" title="설정" onClick={() => setShowConfig(true)}>
-              ⚙
-            </button>
-            <button
-              className="icon-btn"
-              title="삭제"
-              onClick={() => {
-                if (window.confirm(`"${config.title}" 위젯을 삭제할까요?`)) removeWidget(config.id);
-              }}
-            >
-              ✕
-            </button>
-          </span>
-        )}
+        <span className="widget-actions">
+          <button
+            className="icon-btn"
+            title="최소화 (하단 독 바로 이동)"
+            onClick={(e) => {
+              e.stopPropagation();
+              toggleMinimize(config.id);
+            }}
+          >
+            –
+          </button>
+          {editMode && (
+            <>
+              <button className="icon-btn" title="설정" onClick={() => setShowConfig(true)}>
+                ⚙
+              </button>
+              <button
+                className="icon-btn"
+                title="삭제"
+                onClick={() => {
+                  if (window.confirm(`"${config.title}" 위젯을 삭제할까요?`)) removeWidget(config.id);
+                }}
+              >
+                ✕
+              </button>
+            </>
+          )}
+        </span>
       </div>
       <div className="widget-body">{children}</div>
       {showConfig && <ConfigModal config={config} onClose={() => setShowConfig(false)} />}
@@ -216,6 +230,25 @@ function ConfigModal({ config, onClose }: { config: WidgetConfig; onClose: () =>
                 </label>
               )}
             </div>
+            <label>
+              Event 주기 Random 송신 주기 (ms)
+              <span className="hint">
+                Event 신호에 바인딩된 경우 버튼 클릭 토글로 주기 송신 시작/정지 (10~60000)
+              </span>
+              <input
+                type="number"
+                min={10}
+                max={60000}
+                step={10}
+                value={String(draft.options.eventPeriodMs ?? 1000)}
+                onChange={(e) =>
+                  setOption(
+                    'eventPeriodMs',
+                    Math.min(60000, Math.max(10, Math.round(Number(e.target.value)) || 1000)),
+                  )
+                }
+              />
+            </label>
           </>
         )}
         {config.type === 'functionButton' && (
@@ -278,7 +311,9 @@ function ConfigModal({ config, onClose }: { config: WidgetConfig; onClose: () =>
           config.type === 'multiCheckbox' ||
           config.type === 'multiDropdown' ||
           config.type === 'multiSlider' ||
-          config.type === 'multiManualValue') && (
+          config.type === 'multiManualValue' ||
+          config.type === 'functionMultiButton' ||
+          config.type === 'randomMultiButton') && (
           <div className="row-2">
             <label>
               가로 개수(열)

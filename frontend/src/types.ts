@@ -469,6 +469,11 @@ export interface MultiCell {
   // to another page and back; App.tsx only mounts the active page's
   // widgets, so anything kept only in local useState resets on remount.
   checked?: boolean;
+  // Event-signal periodic Random (Random button widgets): ms period between
+  // generated sends + whether it is currently running. Persisted like the
+  // other runtime cell values so they survive page switches and layout saves.
+  eventPeriodMs?: number;
+  eventRunning?: boolean;
   selectedRaw?: string;
   sliderCurrent?: number;
   inputCurrent?: string;

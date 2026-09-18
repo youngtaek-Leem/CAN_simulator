@@ -435,3 +435,120 @@ def test_preset_signal_seeds_state_without_transmitting():
         assert decoded == {3000}, f"expected seeded value, got {decoded}"
     finally:
         teardown_stack(cm, sched, peer)
+
+
+def test_invalid_first_sends_invalid_then_valid_after_30ms():
+    """반전 펄스: Invalid 프레임 즉시 + 30ms 후 설정값 (주기 자동재송은
+    끄고 oneshot만 검증 -- Event 30ms 테스트와 같은 스타일)."""
+    cm, dbc, sched, peer = setup_stack("t_invfirst")
+    try:
+        result = sched.send_signal_invalid_first("EngineData", {"EngineSpeed": 3000})
+        assert result["sent"] is True
+        assert result["mode"] == "invalid_first"
+        assert result["signals"]["EngineSpeed"] == "periodic"
+        sched.stop_auto("EngineData")  # oneshot(30ms valid)은 유지된다
+        frames = collect(peer, 0.3)
+        engine = [f for f in frames if f.arbitration_id == 0x100]
+        assert len(engine) == 2, f"expected invalid+valid, got {len(engine)}"
+        invalid_ref = dbc.decode(0x100, dbc.encode_invalid("EngineData", "EngineSpeed"))["signals"]
+        first = dbc.decode(0x100, bytes(engine[0].data))["signals"]
+        second = dbc.decode(0x100, bytes(engine[1].data))["signals"]
+        assert first == invalid_ref, f"first frame not invalid: {first}"
+        assert second["EngineSpeed"] == 3000, f"second frame not valid: {second}"
+        delta_ms = (engine[1].timestamp - engine[0].timestamp) * 1000
+        assert 20 <= delta_ms <= 80, f"valid frame delta {delta_ms:.1f} ms"
+        # 설정값이 영속 상태로 저장되어 있다
+        current = dbc.decode(0x100, dbc.encode_current("EngineData"))["signals"]
+        assert current["EngineSpeed"] == 3000
+    finally:
+        teardown_stack(cm, sched, peer)
+
+
+def test_invalid_first_rejects_event_signals_and_empty_values():
+    cm, dbc, sched, peer = setup_stack("t_invfirst_reject")
+    try:
+        with pytest.raises(ValueError):
+            sched.send_signal_invalid_first("DriverCommand", {"TurnSignal": 2})
+        with pytest.raises(ValueError):
+            sched.send_signal_invalid_first("EngineData", {})
+        # 거부된 호출은 아무것도 전송하지 않는다
+        assert peer.recv(timeout=0.15) is None
+    finally:
+        teardown_stack(cm, sched, peer)
+
+
+def test_invalid_first_keeps_auto_resending_valid():
+    """반전 펄스 후 주기 자동재송이 설정값을 계속 보낸다."""
+    cm, dbc, sched, peer = setup_stack("t_invfirst_auto")
+    try:
+        sched.send_signal_invalid_first("EngineData", {"EngineSpeed": 3000})
+        frames = collect(peer, 0.3)  # EngineData cycle = 10 ms
+        engine = [f for f in frames if f.arbitration_id == 0x100]
+        assert len(engine) >= 10, f"only {len(engine)} periodic frames"
+        decoded = {dbc.decode(0x100, bytes(f.data))["signals"]["EngineSpeed"] for f in engine[1:]}
+        assert decoded == {3000}, f"expected held valid value, got {decoded}"
+    finally:
+        teardown_stack(cm, sched, peer)
+
+
+def test_event_periodic_random_sends_fresh_values_with_invalid_followups():
+    """Event 주기 Random: 매 주기 새 값 + 30ms 후 Invalid (Event 규칙).
+    결정적 Range 생성기로 검증한다."""
+    cm, dbc, sched, peer = setup_stack("t_evtperiod")
+    try:
+        sched.set_value_generator("DriverCommand", "TurnSignal", "range", 0, 3, 1)
+        res = sched.start_event_periodic("DriverCommand", "TurnSignal", 50)
+        assert res["started"] is True
+        assert res["period_ms"] == 50
+        frames = collect(peer, 0.4)
+        cmd = [f for f in frames if f.arbitration_id == 0x300]
+        assert len(cmd) >= 6, f"too few frames: {len(cmd)}"
+        nibbles = [f.data[0] & 0x0F for f in cmd]
+        valids = [n for n in nibbles if n != 0x0F]
+        assert len(set(valids)) >= 3, f"values not cycling: {nibbles}"
+        # 매 Invalid 앞에는 ~30ms 이내의 valid가 있다
+        checked = 0
+        for j in range(1, len(cmd)):
+            if (cmd[j].data[0] & 0x0F) == 0x0F:
+                assert (cmd[j - 1].data[0] & 0x0F) != 0x0F
+                delta_ms = (cmd[j].timestamp - cmd[j - 1].timestamp) * 1000
+                assert 20 <= delta_ms <= 80, f"invalid follow-up delta {delta_ms:.1f} ms"
+                checked += 1
+        assert checked >= 3
+        # 정지 후에는 조용 (이미 예약된 Invalid 배수 0.1초 후)
+        stop_res = sched.stop_event_periodic("DriverCommand", "TurnSignal")
+        assert stop_res["stopped"] is True
+        collect(peer, 0.1)
+        rest = [f for f in collect(peer, 0.2) if f.arbitration_id == 0x300]
+        assert rest == [], f"frames after stop: {len(rest)}"
+    finally:
+        teardown_stack(cm, sched, peer)
+
+
+def test_event_periodic_validation_and_stop_auto_cleanup():
+    cm, dbc, sched, peer = setup_stack("t_evtperiod_val")
+    try:
+        # 생성기 미등록
+        with pytest.raises(ValueError):
+            sched.start_event_periodic("DriverCommand", "TurnSignal", 100)
+        sched.set_value_generator("DriverCommand", "TurnSignal", "range", 0, 3, 1)
+        # Periodic 신호 거부
+        with pytest.raises(ValueError):
+            sched.start_event_periodic("EngineData", "EngineSpeed", 100)
+        # 주기 범위 밖 거부
+        with pytest.raises(ValueError):
+            sched.start_event_periodic("DriverCommand", "TurnSignal", 5)
+        with pytest.raises(ValueError):
+            sched.start_event_periodic("DriverCommand", "TurnSignal", 70000)
+        # 미실행 정지는 멱등 성공
+        assert sched.stop_event_periodic("DriverCommand", "TurnSignal")["stopped"] is True
+        assert peer.recv(timeout=0.1) is None
+        # stop_auto(메시지)로 정리 -- 위젯 삭제 경로
+        sched.start_event_periodic("DriverCommand", "TurnSignal", 50)
+        time.sleep(0.15)
+        sched.stop_auto("DriverCommand")
+        collect(peer, 0.1)
+        rest = [f for f in collect(peer, 0.2) if f.arbitration_id == 0x300]
+        assert rest == [], f"frames after stop_auto: {len(rest)}"
+    finally:
+        teardown_stack(cm, sched, peer)

@@ -3,9 +3,12 @@ import type { DbcMessage, DbcSignal, DbcSummary, SignalBinding, WidgetConfig } f
 
 export interface AppCtx {
   dbc: DbcSummary;
+  // 별도 토글이 아니라 서버 run 상태에서 유도됨 (Stop이면 true/편집 가능).
+  // 위젯 설정·삭제, 멀티셀 편집, 페이지 구조 편집의 표시 조건으로 쓴다.
   editMode: boolean;
   updateWidget: (cfg: WidgetConfig) => void;
   removeWidget: (id: string) => void;
+  toggleMinimize: (id: string) => void;
   refreshDbc: () => void;
 }
 
@@ -14,6 +17,7 @@ export const AppContext = createContext<AppCtx>({
   editMode: false,
   updateWidget: () => {},
   removeWidget: () => {},
+  toggleMinimize: () => {},
   refreshDbc: () => {},
 });
 

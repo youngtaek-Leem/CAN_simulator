@@ -164,7 +164,7 @@ export const WIDGET_REGISTRY: Record<WidgetType, WidgetMeta> = {
     defaultSize: { w: 6, h: 14, minW: 3, minH: 6 },
   },
   canAudioLatency: {
-    label: 'CAN-오디오 지연 확인',
+    label: 'CAN-오디오 멀티뷰',
     component: CanAudioLatencyWidget,
     defaultSize: { w: 8, h: 10, minW: 3, minH: 3 },
   },
