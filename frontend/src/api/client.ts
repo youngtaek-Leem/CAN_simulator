@@ -85,6 +85,8 @@ export const api = {
     post('/api/tx/signal', { message_name, values }),
   txSignalInvalidFirst: (message_name: string, values: Record<string, number | string>) =>
     post('/api/tx/signal/invalid_first', { message_name, values }),
+  txSignalZeroAfter: (message_name: string, values: Record<string, number | string>) =>
+    post('/api/tx/signal/zero_after', { message_name, values }),
   txSignalPreset: (message_name: string, values: Record<string, number | string>) =>
     post('/api/tx/signal/preset', { message_name, values }),
   txAutoStop: (message_name?: string) =>
@@ -115,9 +117,14 @@ export const api = {
       '/api/tx/signal/event_periodic',
       { message_name, signal_name, period_ms },
     ),
-  stopEventPeriodic: (message_name: string, signal_name: string) =>
-    post<{ stopped: boolean; message_name: string; signal_name: string }>(
+  stopEventPeriodic: (message_name: string, signal_name: string, send_final_invalid = false) =>
+    post<{ stopped: boolean; message_name: string; signal_name: string; final_invalid_sent: boolean }>(
       '/api/tx/signal/event_periodic/stop',
+      { message_name, signal_name, send_final_invalid },
+    ),
+  stopGenerated: (message_name: string, signal_name: string) =>
+    post<{ stopped: boolean; raw_value: number }>(
+      '/api/tx/signal/generate/stop',
       { message_name, signal_name },
     ),
 

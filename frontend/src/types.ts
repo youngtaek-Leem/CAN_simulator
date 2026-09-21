@@ -410,6 +410,7 @@ export const SERVICE_DISPLAY_NAMES: Record<string, string> = {
   communicationControl: '통신 제어',
   readDataByIdentifier: 'DID 읽기',
   completeDecision: '완료 판정',
+  delay: '대기 (Delay)',
 };
 
 export type WidgetType =
@@ -474,6 +475,9 @@ export interface MultiCell {
   // other runtime cell values so they survive page switches and layout saves.
   eventPeriodMs?: number;
   eventRunning?: boolean;
+  // Periodic-signal Random/Range transmission in progress (2nd click stops
+  // it and sends a final raw-0x0). Persisted like eventRunning above.
+  generating?: boolean;
   selectedRaw?: string;
   sliderCurrent?: number;
   inputCurrent?: string;

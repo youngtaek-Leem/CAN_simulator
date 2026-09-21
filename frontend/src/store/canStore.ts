@@ -272,6 +272,21 @@ class CanStore {
     return result;
   }
 
+  /** One-shot pulse for Periodic signals (button widgets): configured
+   * value immediately, raw 0x0 30ms later (server-side, 0 persists). Both
+   * halves are logged. */
+  async sendSignalZeroAfter(message: string, values: Record<string, number | string>) {
+    const result = await api.txSignalZeroAfter(message, values);
+    for (const [signal, value] of Object.entries(values)) {
+      const sig = this.findDbcSignal(message, signal);
+      this.logSignalSend(message, signal, this.formatSignalValue(sig, value), sig?.send_type, 'valid');
+      // transmitted zero is raw 0x0 == physical (0 * scale + offset)
+      const zeroPhysical = sig ? 0 * sig.scale + sig.offset : 0;
+      this.logSignalSend(message, signal, this.formatSignalValue(sig, zeroPhysical), sig?.send_type, 'valid');
+    }
+    return result;
+  }
+
   async sendGenerated(message: string, signal: string) {
     const result = await api.sendGenerated(message, signal);
     const sig = this.findDbcSignal(message, signal);
@@ -293,9 +308,24 @@ class CanStore {
     return result;
   }
 
-  async stopEventPeriodic(message: string, signal: string) {
-    const result = await api.stopEventPeriodic(message, signal);
+  async stopEventPeriodic(message: string, signal: string, sendFinalInvalid = false) {
+    const result = await api.stopEventPeriodic(message, signal, sendFinalInvalid);
     this.pushActivity(`${message}.${signal} 주기 Random 정지`);
+    if (result.final_invalid_sent) {
+      // logSignalSend drops event+invalid as routine cleanup, but this
+      // final INVALID is the user's explicit stop action -- log directly.
+      this.pushActivity(`${message}.${signal} = INVALID`);
+    }
+    return result;
+  }
+
+  /** Periodic-signal Random/Range stop: generator cleared, final raw-0x0
+   * frame sent once (0 persists; the message's periodic resend continues
+   * with static 0x0). */
+  async stopGenerated(message: string, signal: string) {
+    const result = await api.stopGenerated(message, signal);
+    const sig = this.findDbcSignal(message, signal);
+    this.logSignalSend(message, signal, this.formatSignalValue(sig, 0), sig?.send_type, 'valid');
     return result;
   }
 

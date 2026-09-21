@@ -658,6 +658,22 @@ def tx_signal_invalid_first(req: SignalSendRequest):
         raise HTTPException(status_code=400, detail=str(exc))
 
 
+@app.post("/api/tx/signal/zero_after")
+def tx_signal_zero_after(req: SignalSendRequest):
+    """Periodic 신호 버튼 펄스 (버튼/멀티버튼 위젯):
+    설정값 즉시 전송 + 30ms 후 raw 0x0 전송 (0 영속, 이후 주기 송신은 0 지속).
+    Event 신호는 기존 /api/tx/signal 경로를 그대로 쓴다."""
+    _require_running()
+    if not can_manager.connected:
+        raise HTTPException(status_code=400, detail="CAN bus is not connected")
+    if not dbc_service.loaded:
+        raise HTTPException(status_code=400, detail="no DBC loaded")
+    try:
+        return tx_scheduler.send_signal_zero_after(req.message_name, req.values)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
 @app.post("/api/tx/signal/preset")
 def tx_signal_preset(req: SignalSendRequest):
     """TX 박스 신호 에디터의 행 값을 전송 없이 상태로만 저장 -- 이후의
@@ -781,11 +797,35 @@ def tx_signal_event_periodic(req: EventPeriodicRequest):
         raise HTTPException(status_code=400, detail=str(exc))
 
 
+class EventPeriodicStopRequest(BaseModel):
+    message_name: str
+    signal_name: str
+    # True: 실행 중이었을 때만 전-invalid 프레임 1회 추가 전송 (Random 버튼 2차 클릭)
+    send_final_invalid: bool = False
+
+
 @app.post("/api/tx/signal/event_periodic/stop")
-def tx_signal_event_periodic_stop(req: InvalidSendRequest):
+def tx_signal_event_periodic_stop(req: EventPeriodicStopRequest):
     """Event 신호 주기 Random 송신 정지 (멱등 -- 실행 중이 아니어도 성공)."""
     try:
-        return tx_scheduler.stop_event_periodic(req.message_name, req.signal_name)
+        return tx_scheduler.stop_event_periodic(
+            req.message_name, req.signal_name, req.send_final_invalid
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/api/tx/signal/generate/stop")
+def tx_signal_generate_stop(req: InvalidSendRequest):
+    """Periodic 신호 Random/Range 송신 정지 (Random 버튼 2차 클릭):
+    생성기 제거 + raw 0x0 프레임 1회 전송 (0 영속, 메세지 주기 송신은 유지)."""
+    _require_running()
+    if not can_manager.connected:
+        raise HTTPException(status_code=400, detail="CAN bus is not connected")
+    if not dbc_service.loaded:
+        raise HTTPException(status_code=400, detail="no DBC loaded")
+    try:
+        return tx_scheduler.stop_generated(req.message_name, req.signal_name)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 

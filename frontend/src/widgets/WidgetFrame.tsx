@@ -70,11 +70,15 @@ export function WidgetFrame({ config, children }: { config: WidgetConfig; childr
 }
 
 function ConfigModal({ config, onClose }: { config: WidgetConfig; onClose: () => void }) {
-  const { dbc, updateWidget, refreshDbc } = useApp();
+  const { dbc, updateWidget, refreshDbc, pages, moveWidgetToPage } = useApp();
   const [draft, setDraft] = useState<WidgetConfig>({
     ...config,
     options: { ...config.options },
   });
+  // Page-move target (the widget's own current page isn't known here, but
+  // moveWidgetToPage no-ops when source === target, so listing all pages
+  // is safe). Shown only when there are 2+ pages.
+  const [moveTargetId, setMoveTargetId] = useState<string>('');
   const bindable = BINDABLE.has(config.type);
   const bound = findSignal(dbc, draft.binding);
 
@@ -110,6 +114,33 @@ function ConfigModal({ config, onClose }: { config: WidgetConfig; onClose: () =>
             onChange={(e) => setDraft({ ...draft, title: e.target.value })}
           />
         </label>
+
+        {pages.length > 1 && (
+          <label>
+            페이지 이동 (크기·설정 유지, 현재 페이지에 머무름)
+            <div className="row-2">
+              <select value={moveTargetId} onChange={(e) => setMoveTargetId(e.target.value)}>
+                <option value="">— 이동할 페이지 선택 —</option>
+                {pages.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.name}
+                  </option>
+                ))}
+              </select>
+              <button
+                disabled={!moveTargetId}
+                onClick={() => {
+                  if (moveTargetId) {
+                    moveWidgetToPage(config.id, moveTargetId);
+                    onClose();
+                  }
+                }}
+              >
+                이동
+              </button>
+            </div>
+          </label>
+        )}
 
         {bindable && (
           <>

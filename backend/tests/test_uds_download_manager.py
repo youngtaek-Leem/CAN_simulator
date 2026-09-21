@@ -560,3 +560,71 @@ def test_uds_request_with_retry_no_send_floor_when_stmin_checkbox_off():
     mgr._uds_request_with_retry(bytearray([0x36, 0x01, 0xAA]), 0.05, "TransferData(seq=1)")
 
     assert sent_kwargs["min_stmin_s"] == 0.0
+
+
+# ---- TransferData per-block NRC retransmission ------------------------------
+# A transient DUT NRC on a TransferData block resends the identical block
+# (same seq/data) up to TRANSFER_BLOCK_MAX_RETRIES times; transport errors
+# (nrc == 0) still abort immediately.
+
+
+def _scripted_transport(monkeypatch, mgr, behaviors):
+    """Replace _uds_request_with_retry with a scripted fake.
+
+    behaviors: per-call UdsError to raise, or None for success. Returns the
+    list of transmitted request bytes (one entry per attempt)."""
+    calls: list = []
+
+    def fake(request, timeout_s, label, **kw):
+        calls.append(bytes(request))
+        behavior = behaviors.pop(0) if behaviors else None
+        if behavior is not None:
+            raise behavior
+        return {"positive": True}
+
+    monkeypatch.setattr(mgr, "_uds_request_with_retry", fake)
+    monkeypatch.setattr(udm, "TRANSFER_BLOCK_RETRY_DELAY_S", 0.01)
+    return calls
+
+
+def test_transfer_data_retries_nrc_then_succeeds(monkeypatch):
+    from uds_core import UdsError
+
+    mgr = _manager(lambda *a, **k: {"sent": True}, lambda *a, **k: b"")
+    mgr._binary_data = bytes([0x11, 0x22, 0x33])
+    calls = _scripted_transport(
+        monkeypatch, mgr,
+        [UdsError("NRC", nrc=0x72), UdsError("NRC", nrc=0x31), None],
+    )
+    mgr._execute_transfer_data(UdsStep(service="transferData", params={
+        "seekAddress": "0x00000000", "writeSize": "0x00000003",
+    }))
+    assert len(calls) == 3
+    assert calls[0] == calls[1] == calls[2]  # identical block resent
+    assert mgr._progress["percent"] == 100.0
+
+
+def test_transfer_data_aborts_after_max_retries(monkeypatch):
+    from uds_core import UdsError
+
+    mgr = _manager(lambda *a, **k: {"sent": True}, lambda *a, **k: b"")
+    mgr._binary_data = bytes([0x11, 0x22, 0x33])
+    calls = _scripted_transport(monkeypatch, mgr, [UdsError("NRC", nrc=0x72)] * 4)
+    with pytest.raises(UdsError):
+        mgr._execute_transfer_data(UdsStep(service="transferData", params={
+            "seekAddress": "0x00000000", "writeSize": "0x00000003",
+        }))
+    assert len(calls) == 4  # initial + 3 retries
+
+
+def test_transfer_data_no_retry_on_transport_error(monkeypatch):
+    from uds_core import UdsError
+
+    mgr = _manager(lambda *a, **k: {"sent": True}, lambda *a, **k: b"")
+    mgr._binary_data = bytes([0x11, 0x22, 0x33])
+    calls = _scripted_transport(monkeypatch, mgr, [UdsError("ISO-TP 수신 실패")])
+    with pytest.raises(UdsError):
+        mgr._execute_transfer_data(UdsStep(service="transferData", params={
+            "seekAddress": "0x00000000", "writeSize": "0x00000003",
+        }))
+    assert len(calls) == 1

@@ -71,6 +71,14 @@ MAX_EVENTS = 500
 TESTER_PRESENT_INTERVAL_S = 2.0
 FUNCTIONAL_REQUEST_ID = 0x7DF
 
+# TransferData per-block retransmission: when the DUT answers a block with
+# an NRC (transient communication error), the identical block (same seq/data)
+# is resent up to this many times before the download is aborted.
+# NRC 0x78 never reaches here (consumed by _uds_request_with_retry's pending
+# wait); transport errors (UdsError with nrc == 0) are NOT retried.
+TRANSFER_BLOCK_MAX_RETRIES = 3
+TRANSFER_BLOCK_RETRY_DELAY_S = 0.5
+
 # States
 STATE_IDLE = "IDLE"
 STATE_LOADING = "LOADING"
@@ -904,6 +912,30 @@ class UdsDownloadManager:
                 pass
             self._log(level="INFO", msg=f"ECU 리셋 명령 전송: mode=0x{reset_mode:02X}")
 
+        elif svc == "delay":
+            # H-OTA package XML <delay time="ms"/>: wait the specified time
+            # (ms) before the next diagnostic command. Stop-aware via
+            # _stop_event.wait() so the Stop button interrupts immediately.
+            # Unchecked in the UI checklist → skipped by _run_steps (same as
+            # any other step).
+            # Long waits (>= 2s) would otherwise let the ECU's S3 session
+            # timer expire, so a suppressed TesterPresent is sent every
+            # TESTER_PRESENT_INTERVAL_S during the wait (same keep-alive as
+            # TransferData uses).
+            raw_ms = params.get("time", params.get("ms", params.get("delayMs", "0")))
+            try:
+                delay_ms = int(str(raw_ms).strip())
+            except (ValueError, TypeError, AttributeError):
+                try:
+                    delay_ms = int(str(raw_ms), 16) if str(raw_ms).startswith("0x") else 0
+                except (ValueError, TypeError):
+                    delay_ms = 0
+            if delay_ms < 0:
+                delay_ms = 0
+            self._log(level="INFO", msg=f"대기: {delay_ms}ms")
+            if delay_ms > 0:
+                self._wait_with_keepalive(delay_ms / 1000.0)
+
         elif svc == "controlDTCSetting":
             self._log(level="INFO", msg=f"DTC 설정 (로깅): {params}")
 
@@ -1020,6 +1052,37 @@ class UdsDownloadManager:
         except Exception as exc:
             self._log(level="WARN", msg=f"TesterPresent 전송 실패(무시): {exc}")
 
+    def _wait_with_keepalive(self, delay_s: float) -> None:
+        """Wait delay_s seconds, sending a suppressed TesterPresent every
+        TESTER_PRESENT_INTERVAL_S while waiting.
+
+        Short waits (< one interval) behave exactly like a single
+        _stop_event.wait() — no keep-alive traffic. Longer waits are split
+        into interval-sized chunks with one TesterPresent per chunk boundary
+        so the ECU's S3 session timer doesn't expire mid-delay. Stop-aware:
+        raises RuntimeError when the Stop button is pressed mid-wait. A
+        TesterPresent send failure never aborts the wait (see
+        _send_tester_present)."""
+        if delay_s <= 0:
+            return
+        if delay_s < TESTER_PRESENT_INTERVAL_S:
+            if self._stop_event.wait(delay_s):
+                raise RuntimeError("사용자에 의해 중단됨")
+            return
+        remaining = delay_s
+        elapsed = 0.0
+        tp_sent = 0
+        while remaining > 0:
+            chunk = min(TESTER_PRESENT_INTERVAL_S, remaining)
+            if self._stop_event.wait(chunk):
+                raise RuntimeError("사용자에 의해 중단됨")
+            remaining -= chunk
+            elapsed += chunk
+            # One TesterPresent per full interval elapsed (first at t=2s).
+            while tp_sent < int(elapsed / TESTER_PRESENT_INTERVAL_S):
+                self._send_tester_present()
+                tp_sent += 1
+
     def _execute_transfer_data(self, step: UdsStep, modified_params: Optional[dict[str, dict]] = None) -> None:
         """Execute TransferData: send binary in blocks."""
         binary = self._binary_data
@@ -1076,16 +1139,24 @@ class UdsDownloadManager:
 
             chunk = binary[offset:min(offset + block_size, end_offset)]
             request = build_transfer_data(seq_num & 0xFF, chunk)
+            label = f"TransferData(seq={seq_num}, offset=0x{offset:06X}, size={len(chunk)})"
 
-            try:
-                self._uds_request_with_retry(
-                    request, timeout_s,
-                    f"TransferData(seq={seq_num}, offset=0x{offset:06X}, size={len(chunk)})",
-                    retry_delay_s=0.5,
-                )
-            except UdsError as exc:
-                self._log(level="ERROR", msg=f"TransferData 블록 {seq_num} 실패: {exc}")
-                raise
+            for retry in range(TRANSFER_BLOCK_MAX_RETRIES + 1):
+                try:
+                    self._uds_request_with_retry(
+                        request, timeout_s, label,
+                        retry_delay_s=0.5,
+                    )
+                    break
+                except UdsError as exc:
+                    if self._stop_event.is_set():
+                        raise RuntimeError("사용자에 의해 전송 중단됨")
+                    if exc.nrc == 0 or retry >= TRANSFER_BLOCK_MAX_RETRIES:
+                        self._log(level="ERROR", msg=f"TransferData 블록 {seq_num} 실패: {exc}")
+                        raise
+                    self._log(level="WARN", msg=f"TransferData 블록 {seq_num} NRC=0x{exc.nrc:02X}, 재전송 {retry + 1}/{TRANSFER_BLOCK_MAX_RETRIES}")
+                    if self._stop_event.wait(TRANSFER_BLOCK_RETRY_DELAY_S):
+                        raise RuntimeError("사용자에 의해 전송 중단됨")
 
             offset += len(chunk)
             seq_num += 1

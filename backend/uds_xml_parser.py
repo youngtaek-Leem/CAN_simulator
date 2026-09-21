@@ -137,6 +137,148 @@ def _parse_rule_section(parent: ET.Element) -> UdsRule:
     return rule
 
 
+def _local_tag(tag: str) -> str:
+    """Strip namespace from an ElementTree tag."""
+    return tag.split("}")[-1] if "}" in tag else tag
+
+
+def _find_child_by_local(parent: ET.Element, local_name: str) -> Optional[ET.Element]:
+    """Find first direct child whose local tag name matches (namespace-agnostic)."""
+    for child in parent:
+        if _local_tag(child.tag) == local_name:
+            return child
+    return None
+
+
+def _find_children_by_local(parent: ET.Element, local_name: str) -> list[ET.Element]:
+    """Find all direct children whose local tag name matches (namespace-agnostic)."""
+    return [c for c in parent if _local_tag(c.tag) == local_name]
+
+
+def _extract_comm_config(proc: UdsProcedure, steps: list[UdsStep]) -> None:
+    """Extract STmin/P2*/NRC78 timing from a startCommunication step's configuration.
+
+    Shared by legacy and H-OTA package formats — first startCommunication wins.
+    """
+    for step in steps:
+        if step.service == "startCommunication":
+            cfg = step.sub_steps[0].params if step.sub_steps else {}
+            proc.stmin_tx = _int_hex(cfg.get("stminTx", "0x0A"))
+            try:
+                proc.p2_can_server_max = int(cfg.get("p2CanServerMax", "50"))
+            except (ValueError, TypeError):
+                proc.p2_can_server_max = 50
+            try:
+                proc.p2_star_can_server_max = int(cfg.get("p2StarCanServerMax", "5000"))
+            except (ValueError, TypeError):
+                proc.p2_star_can_server_max = 5000
+            try:
+                proc.nrc78_repetition_timeout = int(cfg.get("NRC78Repetitiontimeout", "300"))
+            except (ValueError, TypeError):
+                proc.nrc78_repetition_timeout = 300
+            proc.background_stmin_tx = _int_hex(cfg.get("background_stminTx", "0x01"))
+            if cfg.get("dataBitRate"):
+                proc.data_bit_rate = str(cfg.get("dataBitRate", ""))
+            return
+
+
+def _parse_hotapackage_format(root: ET.Element, path: str, proc: UdsProcedure) -> UdsProcedure:
+    """Parse H-OTA package XML (xfrm:root → instance + external-reprogram-rule).
+
+    Used by CAN-SWDL for files like RG3HEV_96370JQ510_*.xml which have no
+    legacy <document>/processing-rule wrapper. The download sequence lives in
+    ``external-reprogram-rule/rule`` as a flat step list (including
+    ``<delay time="ms"/>`` steps, which the download manager honors).
+
+    CAN-ID convention (simulator perspective): TX=request_id=moduleId,
+    RX=response_id=testerId (e.g. TX=0x783, RX=0x78B).
+    """
+    # Root must be xfrm:root (namespace-agnostic check) — otherwise neither
+    # legacy nor H-OTA format fits, keep the legacy error for compatibility.
+    if _local_tag(root.tag) != "root":
+        raise ValueError("XML에 <document> 요소를 찾을 수 없습니다")
+
+    instance = _find_child_by_local(root, "instance")
+    if instance is None:
+        # Fall back to namespaced lookup for robustness
+        instance = root.find("xfrm:instance", NS)
+    ext_rule_probe = _find_child_by_local(root, "external-reprogram-rule")
+    if ext_rule_probe is None:
+        ext_rule_probe = root.find("xfrm:external-reprogram-rule", NS)
+    if instance is None and ext_rule_probe is None:
+        # Neither legacy <document> nor H-OTA content — keep legacy error
+        # so existing clients/error handling keep matching on it.
+        raise ValueError("XML에 <document> 요소를 찾을 수 없습니다")
+
+    if instance is not None:
+        vehicle_info = _find_child_by_local(instance, "vehicleInfo")
+        if vehicle_info is not None:
+            proc.vehicle_model = vehicle_info.get("model", "")
+            proc.vehicle_system = vehicle_info.get("system", "")
+
+        version = _find_child_by_local(instance, "version")
+        if version is not None:
+            proc.unit = version.get("unit", "")
+            software = _find_child_by_local(version, "software")
+            if software is not None:
+                proc.sw_version_source = software.get("source", "")
+                proc.sw_version_target = software.get("target", "")
+            partnumber = _find_child_by_local(version, "partnumber")
+            if partnumber is not None:
+                proc.part_number = partnumber.get("target", "")
+
+        rom = _find_child_by_local(instance, "rom")
+        if rom is not None and rom.text:
+            proc.rom_info = rom.text.strip()
+
+    # ---- Download sequence: external-reprogram-rule ----
+    ext_rule = _find_child_by_local(root, "external-reprogram-rule")
+    if ext_rule is None:
+        ext_rule = root.find("xfrm:external-reprogram-rule", NS)
+    if ext_rule is None:
+        raise ValueError(f"{path}: xfrm:external-reprogram-rule 요소를 찾을 수 없습니다")
+
+    prep_elem = _find_child_by_local(ext_rule, "rule-preparation")
+    rule_elem = _find_child_by_local(ext_rule, "rule")
+    complete_elem = _find_child_by_local(ext_rule, "rule-complete")
+
+    def _parse_flat(container: Optional[ET.Element]) -> list[UdsStep]:
+        if container is None:
+            return []
+        steps: list[UdsStep] = []
+        for child in container:
+            # rule-complete wraps its steps in <completeDecision> — flatten it.
+            if _local_tag(child.tag) == "completeDecision":
+                for sub in child:
+                    steps.append(_parse_step(sub))
+            else:
+                steps.append(_parse_step(child))
+        return steps
+
+    proc.processing_rule.preparation = _parse_flat(prep_elem)
+    proc.processing_rule.unit = _parse_flat(rule_elem)
+    proc.processing_rule.complete = _parse_flat(complete_elem)
+
+    # ---- Communication IDs + timing from startCommunication/configuration ----
+    all_steps = (
+        proc.processing_rule.preparation
+        + proc.processing_rule.unit
+        + proc.processing_rule.complete
+    )
+    _extract_comm_config(proc, all_steps)
+    for step in all_steps:
+        if step.service == "startCommunication":
+            cfg = step.sub_steps[0].params if step.sub_steps else {}
+            # Simulator perspective: TX=moduleId, RX=testerId.
+            if cfg.get("moduleId"):
+                proc.request_id = _int_hex(cfg.get("moduleId", "0"))
+            if cfg.get("testerId"):
+                proc.response_id = _int_hex(cfg.get("testerId", "0"))
+            break
+
+    return proc
+
+
 def parse_xml(path: str) -> UdsProcedure:
     """Parse a UDS software download XML file.
 
@@ -155,13 +297,20 @@ def parse_xml(path: str) -> UdsProcedure:
 
     proc = UdsProcedure()
 
-    # Find the document element
+    # Find the document element (legacy format:
+    # root → xfrm:document → instance/commInfo + processing-rule/...)
     doc = root.find("xfrm:document", NS)
     if doc is None:
         # Try without namespace
         doc = root.find(".//document")
+    # The root itself may BE the <document> element in some legacy files.
+    if doc is None and (_local_tag(root.tag) == "document"):
+        doc = root
     if doc is None:
-        raise ValueError("XML에 <document> 요소를 찾을 수 없습니다")
+        # No legacy <document> — try the H-OTA package format
+        # (xfrm:root → instance + external-reprogram-rule/rule).
+        # Raises its own descriptive error if that is absent too.
+        return _parse_hotapackage_format(root, path, proc)
 
     # ---- Instance information ----
     instance = doc.find("xfrm:instance", NS)
@@ -221,16 +370,12 @@ def parse_xml(path: str) -> UdsProcedure:
     if processing_rule is not None:
         proc.processing_rule = _parse_rule_section(processing_rule)
 
-        # Extract configuration from startCommunication
-        for phase in (proc.processing_rule.preparation, proc.processing_rule.unit, proc.processing_rule.complete):
-            for step in phase:
-                if step.service == "startCommunication":
-                    cfg = step.sub_steps[0].params if step.sub_steps else {}
-                    proc.stmin_tx = _int_hex(cfg.get("stminTx", "0x0A"))
-                    proc.p2_can_server_max = int(cfg.get("p2CanServerMax", "50"))
-                    proc.p2_star_can_server_max = int(cfg.get("p2StarCanServerMax", "5000"))
-                    proc.nrc78_repetition_timeout = int(cfg.get("NRC78Repetitiontimeout", "300"))
-                    proc.background_stmin_tx = _int_hex(cfg.get("background_stminTx", "0x01"))
+        # Extract configuration from startCommunication (legacy behavior preserved)
+        _extract_comm_config(proc, (
+            proc.processing_rule.preparation
+            + proc.processing_rule.unit
+            + proc.processing_rule.complete
+        ))
 
     # ---- Activate rule ----
     activate_rule = doc.find("xfrm:activate-rule", NS)

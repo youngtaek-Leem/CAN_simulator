@@ -47,9 +47,9 @@ export function MultiButtonWidget({ config }: { config: WidgetConfig }) {
     }
   };
 
-  // Periodic: inverted one-shot pulse (INVALID immediately, cell value 30ms
-  // later, server-side) on every click -- no toggle. Event: existing
-  // behavior, unchanged.
+  // Periodic: one-shot pulse (cell value immediately, raw 0x0 30ms later
+  // with 0 persisted, server-side) on every click -- no toggle. Event:
+  // existing behavior, unchanged.
   const activate = async (cell: MultiCell) => {
     if (!cell.binding?.signal) return;
     const isPeriodic = findSignal(dbc, cell.binding)?.signal.send_type === 'periodic';
@@ -58,7 +58,7 @@ export function MultiButtonWidget({ config }: { config: WidgetConfig }) {
       return;
     }
     try {
-      await canStore.sendSignalInvalidFirst(cell.binding.message, {
+      await canStore.sendSignalZeroAfter(cell.binding.message, {
         [cell.binding.signal]: cell.value ?? 1,
       });
       setError(null);
@@ -578,9 +578,9 @@ export function FunctionMultiButtonWidget({ config }: { config: WidgetConfig }) 
 
 // Grid of buttons that each send a Random/Range-generated value for their
 // own bound signal, one cell = one independent RandomButtonWidget (see that
-// file for the generating<->invalid periodic toggle design). Every
-// periodic-bound cell's generator is (re-)registered on mount so it survives
-// independently of any single cell being clicked.
+// file for the transmitting<->stopped toggle design). Every periodic-bound
+// cell's generator is (re-)registered on mount so it survives independently
+// of any single cell being clicked.
 // Event-bound cells instead toggle periodic Random sending at the cell's ms
 // period (see RandomButtonWidget for the shared design).
 const clampEventPeriodMs = (v: number | undefined) =>
@@ -592,8 +592,6 @@ export function RandomMultiButtonWidget({ config }: { config: WidgetConfig }) {
   const updateCell = useCellUpdater(config);
   const [editingIndex, setEditingIndex] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [pending, setPending] = useState<Record<number, 'generate' | 'invalid'>>({});
-  const [lastSent, setLastSent] = useState<Record<number, 'generate' | 'invalid'>>({});
 
   useEffect(() => {
     if (!dbc.loaded) return;
@@ -623,7 +621,7 @@ export function RandomMultiButtonWidget({ config }: { config: WidgetConfig }) {
       const period = clampEventPeriodMs(cell.eventPeriodMs);
       try {
         if (cell.eventRunning) {
-          await canStore.stopEventPeriodic(cell.binding.message, cell.binding.signal);
+          await canStore.stopEventPeriodic(cell.binding.message, cell.binding.signal, true);
           updateCell(i, { ...cell, eventRunning: false });
         } else {
           await canStore.startEventPeriodic(cell.binding.message, cell.binding.signal, period);
@@ -636,12 +634,13 @@ export function RandomMultiButtonWidget({ config }: { config: WidgetConfig }) {
       return;
     }
     const isPeriodic = sendType === 'periodic';
-    try {
-      const next = isPeriodic ? (pending[i] ?? 'generate') : 'generate';
-      if (next === 'invalid') {
-        await canStore.sendInvalid(cell.binding.message, cell.binding.signal);
-      } else {
-        if (isPeriodic) {
+    if (isPeriodic) {
+      try {
+        if (cell.generating) {
+          await canStore.stopGenerated(cell.binding.message, cell.binding.signal);
+          updateCell(i, { ...cell, generating: false });
+        } else {
+          // re-register: stopGenerated() cleared it the last time we stopped
           await api.setValueGenerator(
             cell.binding.message,
             cell.binding.signal,
@@ -650,13 +649,18 @@ export function RandomMultiButtonWidget({ config }: { config: WidgetConfig }) {
             cell.rangeMax,
             cell.step,
           );
+          await canStore.sendGenerated(cell.binding.message, cell.binding.signal);
+          updateCell(i, { ...cell, generating: true });
         }
-        await canStore.sendGenerated(cell.binding.message, cell.binding.signal);
+        setError(null);
+      } catch (e) {
+        setError((e as Error).message);
       }
-      if (isPeriodic) {
-        setLastSent((s) => ({ ...s, [i]: next }));
-        setPending((s) => ({ ...s, [i]: next === 'invalid' ? 'generate' : 'invalid' }));
-      }
+      return;
+    }
+    // Unclassified send type: momentary one-shot generate per click.
+    try {
+      await canStore.sendGenerated(cell.binding.message, cell.binding.signal);
       setError(null);
     } catch (e) {
       setError((e as Error).message);
@@ -671,7 +675,7 @@ export function RandomMultiButtonWidget({ config }: { config: WidgetConfig }) {
       >
         {Array.from({ length: rows * cols }, (_, i) => {
           const cell = cells[i] ?? {};
-          const invalidActive = lastSent[i] === 'invalid';
+          const running = Boolean(cell.eventRunning || cell.generating);
           const cellHasRange = cell.rangeMin !== undefined || cell.rangeMax !== undefined;
           const modeLabel =
             cell.mode === 'range'
@@ -684,14 +688,12 @@ export function RandomMultiButtonWidget({ config }: { config: WidgetConfig }) {
             (cell.binding?.signal
               ? findSignal(dbc, cell.binding)?.signal.send_type === 'event'
                 ? `${cell.binding.signal} [${modeLabel}] ${cell.eventRunning ? '■' : '▶'} ${clampEventPeriodMs(cell.eventPeriodMs)}ms`
-                : invalidActive
-                  ? `${cell.binding.signal} = INVALID`
-                  : `${cell.binding.signal} [${modeLabel}]`
+                : `${cell.binding.signal} [${modeLabel}]${cell.generating ? ' ■' : ''}`
               : `#${i + 1}`);
           return (
             <div className="multi-cell" key={i}>
               <button
-                className="big-btn multi-cell-btn"
+                className={`big-btn multi-cell-btn${running ? ' random-running' : ''}`}
                 disabled={!cell.binding?.signal}
                 title={cell.binding?.signal ? `${cell.binding.message}.${cell.binding.signal}` : '신호 미할당'}
                 onClick={() => activate(i, cell)}

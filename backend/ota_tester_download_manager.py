@@ -70,6 +70,13 @@ MAX_EVENTS = 500
 TESTER_PRESENT_INTERVAL_S = 2.0
 FUNCTIONAL_REQUEST_ID = 0x7DF
 
+# TransferData per-block retransmission (mirrors uds_download_manager.py's
+# CAN-SWDL behavior): on an NRC answer the identical block (same seq/data)
+# is resent up to this many times before the case fails. Transport errors
+# (UdsError with nrc == 0) are NOT retried.
+TRANSFER_BLOCK_MAX_RETRIES = 3
+TRANSFER_BLOCK_RETRY_DELAY_S = 0.5
+
 # securityAccess sub-function levels used for this ECU's RequestSeed/SendKey
 # ([27 11]/[27 12], not build_security_access_*()'s ISO-default [27 01]/
 # [27 02]) -- matches uds_download_manager.py's own default accessMode when
@@ -618,7 +625,31 @@ class OtaTesterDownloadManager:
         dly = float(step.get("params", {}).get("endDelay", "0") or 0)
         if dly > 0:
             self._log(level="INFO", msg=f"Waiting {dly}ms (end delay)")
-            self._stop_event.wait(timeout=dly / 1000.0)
+            self._wait_with_keepalive(dly / 1000.0)
+
+    def _wait_with_keepalive(self, delay_s: float) -> None:
+        """Wait delay_s seconds, sending a suppressed TesterPresent
+        (functional 0x7DF) per full TESTER_PRESENT_INTERVAL_S elapsed so a
+        long end-delay doesn't let the ECU's S3 session timer expire.
+        Short waits (< one interval) are a single stop-aware wait with no
+        keep-alive traffic. A TesterPresent send failure never aborts the
+        wait (see _send_tester_present)."""
+        if delay_s <= 0:
+            return
+        if delay_s < TESTER_PRESENT_INTERVAL_S:
+            self._stop_event.wait(timeout=delay_s)
+            return
+        remaining = delay_s
+        elapsed = 0.0
+        tp_sent = 0
+        while remaining > 0:
+            chunk = min(TESTER_PRESENT_INTERVAL_S, remaining)
+            self._stop_event.wait(timeout=chunk)
+            remaining -= chunk
+            elapsed += chunk
+            while tp_sent < int(elapsed / TESTER_PRESENT_INTERVAL_S):
+                self._send_tester_present()
+                tp_sent += 1
 
     # ---- Internal: UDS transport -------------------------------------------
 
@@ -756,6 +787,28 @@ class OtaTesterDownloadManager:
         """Execute a single step. Returns True on success (including an
         expected negative response when confirm_pos_rsp is False)."""
         try:
+            if service == "delay":
+                # Test-rule XML <delay time="ms"/>: wait the specified time
+                # before the next step. Previously fell through to _build_pdu
+                # (which returns None for delay) and was silently skipped.
+                # Long waits (>= TESTER_PRESENT_INTERVAL_S) emit a suppressed
+                # TesterPresent keep-alive via _wait_with_keepalive so the
+                # ECU's S3 session timer doesn't expire mid-delay.
+                raw_ms = params.get("time", params.get("ms", "0"))
+                try:
+                    delay_ms = int(str(raw_ms).strip())
+                except (ValueError, TypeError, AttributeError):
+                    try:
+                        delay_ms = int(str(raw_ms), 16) if str(raw_ms).startswith("0x") else 0
+                    except (ValueError, TypeError):
+                        delay_ms = 0
+                if delay_ms < 0:
+                    delay_ms = 0
+                self._log(level="INFO", msg=f"대기: {delay_ms}ms", service=service)
+                if delay_ms > 0:
+                    self._wait_with_keepalive(delay_ms / 1000.0)
+                self._log(level="INFO", msg=f"Step {service} OK", service=service)
+                return True
             if service == "securityAccess":
                 self._execute_security_access()
             elif service == "requestDownload":
@@ -941,11 +994,23 @@ class OtaTesterDownloadManager:
                 self._send_tester_present()
                 last_tester_present_ts = now
             request = build_transfer_data(seq_num, chunk)
-            self._uds_request_with_retry(
-                request, timeout_s,
-                f"TransferData(seq={seq_num}, offset=0x{offset:06X}, size={len(chunk)})",
-                retry_delay_s=0.5,
-            )
+            label = f"TransferData(seq={seq_num}, offset=0x{offset:06X}, size={len(chunk)})"
+            for retry in range(TRANSFER_BLOCK_MAX_RETRIES + 1):
+                try:
+                    self._uds_request_with_retry(
+                        request, timeout_s, label,
+                        retry_delay_s=0.5,
+                    )
+                    break
+                except UdsError as exc:
+                    if self._stop_event.is_set():
+                        raise UdsError("사용자에 의해 전송 중단됨")
+                    if exc.nrc == 0 or retry >= TRANSFER_BLOCK_MAX_RETRIES:
+                        self._log(level="ERROR", msg=f"TransferData 블록 {seq_num} 실패: {exc}")
+                        raise
+                    self._log(level="WARN", msg=f"TransferData 블록 {seq_num} NRC=0x{exc.nrc:02X}, 재전송 {retry + 1}/{TRANSFER_BLOCK_MAX_RETRIES}")
+                    if self._stop_event.wait(timeout=TRANSFER_BLOCK_RETRY_DELAY_S):
+                        raise UdsError("사용자에 의해 전송 중단됨")
             last_seq = seq_num
             bytes_sent = offset + len(chunk) - seek_addr
             pct = min(100.0, (bytes_sent / total_size) * 100.0)

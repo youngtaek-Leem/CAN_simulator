@@ -263,6 +263,44 @@ export default function App() {
     [pages],
   );
 
+  // ---- move a widget to another page (from its config modal) ---------------
+  // The widget keeps its config (bindings included -- the backend is
+  // page-unaware so TX/RX is unaffected) and its size; only the position
+  // cascades on the target page (same pattern as addWidget). The current
+  // page stays active.
+  const moveWidgetToPage = useCallback((widgetId: string, targetPageId: string) => {
+    setPages((ps) => {
+      const src = ps.find((p) => p.widgets.some((w) => w.id === widgetId));
+      if (!src || src.id === targetPageId) return ps;
+      const widget = src.widgets.find((w) => w.id === widgetId);
+      const target = ps.find((p) => p.id === targetPageId);
+      if (!widget || !target) return ps;
+      const item = src.layout.find((it) => it.i === widgetId);
+      const defaultSize = WIDGET_REGISTRY[widget.type].defaultSize;
+      const n = target.layout.length;
+      const newItem: LayoutItem = {
+        i: widgetId,
+        x: (n % 6) * 2,
+        y: n,
+        w: Math.min(item?.w ?? defaultSize.w, GRID_COLS),
+        h: Math.max(item?.h ?? defaultSize.h, defaultSize.minH),
+      };
+      return ps.map((p) => {
+        if (p.id === src.id) {
+          return {
+            ...p,
+            widgets: p.widgets.filter((w) => w.id !== widgetId),
+            layout: p.layout.filter((it) => it.i !== widgetId),
+          };
+        }
+        if (p.id === targetPageId) {
+          return { ...p, widgets: [...p.widgets, widget], layout: [...p.layout, newItem] };
+        }
+        return p;
+      });
+    });
+  }, []);
+
   // ---- widget minimize (collapse to the bottom dock bar) -------------------
   // minimized flag lives in WidgetConfig.options so it persists through
   // layout save/load. Minimizing hides the widget from the grid entirely and
@@ -365,9 +403,20 @@ export default function App() {
     );
   }, [activePageId]);
 
+  const pageList = useMemo(() => pages.map((p) => ({ id: p.id, name: p.name })), [pages]);
+
   const ctx = useMemo(
-    () => ({ dbc, editMode, updateWidget, removeWidget, toggleMinimize, refreshDbc }),
-    [dbc, editMode, updateWidget, removeWidget, toggleMinimize, refreshDbc],
+    () => ({
+      dbc,
+      editMode,
+      updateWidget,
+      removeWidget,
+      toggleMinimize,
+      refreshDbc,
+      pages: pageList,
+      moveWidgetToPage,
+    }),
+    [dbc, editMode, updateWidget, removeWidget, toggleMinimize, refreshDbc, pageList, moveWidgetToPage],
   );
 
   // Docked (minimized) widgets are hidden from the grid entirely and shown

@@ -46,10 +46,17 @@ class DbcService:
         self.db: Optional[cantools.database.can.Database] = None
         self.filename: Optional[str] = None
         self.raw_text: Optional[str] = None
-        # last valid signal values per message, used to fill the other
-        # signals of a frame when one signal is written (periodic messages
-        # only -- see encode_with_values)
+        # last signal values per message, used to fill the other signals of
+        # a frame when one signal is written (see _resolve_tx_raw for the
+        # widget-value -> last-valid -> initial -> 0x0 priority).
         self._signal_state: dict[str, dict[str, Any]] = {}
+        # Intentional-invalid marks per (message, signal): set only by
+        # set_raw_invalid() (the Button valid<->invalid toggle). The priority
+        # resolver keeps transmitting these as invalid; every valid write
+        # clears the mark. A bit-max pattern that merely *happens* to be in
+        # state (e.g. a full-range random draw) is NOT remembered as valid --
+        # it falls back to initial/0x0 on the next send.
+        self._forced_invalid: set[tuple[str, str]] = {}
         # user override of send type per "message.signal" key
         self._send_type_override: dict[str, str] = {}
         self._lock = threading.Lock()
@@ -65,8 +72,9 @@ class DbcService:
             self.filename = filename
             self.raw_text = text
             self._signal_state = {
-                m.name: self._zero_state(m) for m in db.messages
+                m.name: self._initial_state(m) for m in db.messages
             }
+            self._forced_invalid = set()
             self._send_type_override = {}
         return self.summary()
 
@@ -79,9 +87,14 @@ class DbcService:
                 return None
             return {"filename": self.filename, "content": self.raw_text}
 
-    def _zero_state(self, message) -> dict[str, Any]:
-        raw = message.decode(bytes(message.length), scaling=False, decode_choices=False)
-        return dict(raw)
+    def _initial_state(self, message) -> dict[str, Any]:
+        """Per-signal initial raw value: the DBC GenSigStartValue when
+        defined, else 0x0. A never-written signal therefore already sits at
+        the "initial -> 0x0" tail of the transmit priority."""
+        return {
+            s.name: (s.raw_initial if s.raw_initial is not None else 0)
+            for s in message.signals
+        }
 
     # ---- introspection -------------------------------------------------
 
@@ -167,19 +180,46 @@ class DbcService:
         messages the "Enable Msg" bulk action arms for periodic auto-resend."""
         return _message_send_type(self.get_message(message_name))
 
+    def _resolve_tx_raw_locked(self, message, explicit: set[str]) -> dict[str, Any]:
+        """Transmit-priority resolution for every signal of a message
+        (caller must hold the lock; explicit values must already be
+        persisted into ``_signal_state``):
+
+        1. widget-provided valid value (the ``explicit`` signals),
+        2. last valid value (persisted state, unless it is a bit-max
+           "invalid" pattern without an intentional-invalid mark),
+        3. DBC initial value (GenSigStartValue),
+        4. 0x0.
+        """
+        state = self._signal_state[message.name]
+        tx_raw: dict[str, Any] = {}
+        for s in message.signals:
+            if s.name in explicit:
+                tx_raw[s.name] = state[s.name]
+                continue
+            v = state.get(s.name)
+            if v is None or (
+                v == _invalid_raw(s)
+                and (message.name, s.name) not in self._forced_invalid
+            ):
+                v = s.raw_initial if s.raw_initial is not None else 0
+            tx_raw[s.name] = v
+        return tx_raw
+
     def encode_with_values(self, message_name: str, values: dict[str, Any]) -> bytes:
         """Encode a frame applying `values` (scaled) over the stored state.
 
-        If any of the signals being set is "event" type, every OTHER signal
-        in the message is forced to its own invalid raw value in the
-        outgoing frame -- an Event send carries exactly one real value (the
-        signal just set); nothing else is "remembered" from earlier writes.
-        This substitution is transmit-only: the persisted state keeps the
-        real (pre-substitution) values, so a later real write still starts
-        from the true baseline. Periodic-only sends are unaffected -- their
-        other signals keep coming from the persisted state as before, since
-        Periodic messages have no invalid concept and rely on that state
-        accumulating real values across successive writes.
+        Other (non-explicit) signals follow the transmit priority
+        (widget value -> last valid -> initial -> 0x0, see
+        `_resolve_tx_raw_locked`), except in an Event send: there every
+        OTHER signal not carried in `values` is forced to its own invalid
+        raw value -- an Event send carries only real values for the signals
+        the widget is actually sending this time (one or several); nothing
+        else is "remembered" from earlier writes.
+        Substitution is transmit-only: the persisted state keeps the real
+        (pre-substitution) values, so a later real write still starts from
+        the true baseline. Explicitly written signals clear their
+        intentional-invalid mark.
         """
         message = self.get_message(message_name)
         with self._lock:
@@ -189,19 +229,48 @@ class DbcService:
             )
             persisted = message.decode(data, scaling=False, decode_choices=False)
             state.update(persisted)
+            for name in values:
+                self._forced_invalid.discard((message_name, name))
 
             is_event_send = any(
                 self._signal_send_type(message, s) == "event"
                 for s in message.signals
                 if s.name in values
             )
+            tx_raw = self._resolve_tx_raw_locked(message, set(values))
             if is_event_send:
-                tx_raw = dict(persisted)
                 for s in message.signals:
                     if s.name not in values:
                         tx_raw[s.name] = _invalid_raw(s)
-                data = message.encode(tx_raw, scaling=False, strict=False)
+            data = message.encode(tx_raw, scaling=False, strict=False)
         return data
+
+    def encode_with_raw_values(self, message_name: str, raw_values: dict[str, Any]) -> bytes:
+        """Raw-unit variant of `encode_with_values` for callers working in
+        raw bit units (Random/Range generators, periodic auto-resend ticks).
+
+        The explicit raw values are persisted (clearing intentional-invalid
+        marks) and the frame follows the same transmit priority / Event rule
+        as `encode_with_values`, so every widget shares one behavior.
+        """
+        message = self.get_message(message_name)
+        with self._lock:
+            state = self._signal_state[message_name]
+            for name, raw in raw_values.items():
+                state[name] = int(raw)
+                self._forced_invalid.discard((message_name, name))
+
+            is_event_send = any(
+                self._signal_send_type(message, s) == "event"
+                for s in message.signals
+                if s.name in raw_values
+            )
+            tx_raw = self._resolve_tx_raw_locked(message, set(raw_values))
+            if is_event_send:
+                for s in message.signals:
+                    if s.name not in raw_values:
+                        tx_raw[s.name] = _invalid_raw(s)
+            return message.encode(tx_raw, scaling=False, strict=False)
 
     def encode_invalid(self, message_name: str, signal_name: str) -> bytes:
         """Encode a frame with every signal in the message -- `signal_name`
@@ -234,9 +303,22 @@ class DbcService:
     def set_raw_signal_value(self, message_name: str, signal_name: str, raw_value: int) -> None:
         """Poke a single signal's raw state directly, bypassing encode/decode --
         used by tx_scheduler's Random/Range value generators, which work in
-        raw bit units rather than physical (scaled) values."""
+        raw bit units rather than physical (scaled) values. Any write clears
+        the signal's intentional-invalid mark (a fresh value supersedes it)."""
         with self._lock:
             self._signal_state[message_name][signal_name] = raw_value
+            self._forced_invalid.discard((message_name, signal_name))
+
+    def set_raw_invalid(self, message_name: str, signal_name: str) -> None:
+        """Persist the bit-max "invalid" pattern AND mark it intentional --
+        the transmit priority keeps sending it (the Button valid<->invalid
+        toggle). This is the only path that marks; every valid write clears.
+        """
+        message = self.get_message(message_name)
+        signal = next(s for s in message.signals if s.name == signal_name)
+        with self._lock:
+            self._signal_state[message_name][signal_name] = _invalid_raw(signal)
+            self._forced_invalid.add((message_name, signal_name))
 
     def _raw_to_scaled(self, message, raw: dict[str, Any]) -> dict[str, Any]:
         data = message.encode(raw, scaling=False, strict=False)

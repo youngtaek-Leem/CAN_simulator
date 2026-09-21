@@ -110,6 +110,14 @@ class TxScheduler:
         self._oneshots: list[tuple[float, int, Callable[[], None]]] = []
         # message_name -> signal_name -> generator producing a raw int value
         self._value_generators: dict[str, dict[str, Callable[[], int]]] = {}
+        # Signals with a RUNNING Random/Range transmission. Registration
+        # alone (widget mount / config save) must NOT randomize a signal:
+        # the periodic auto-resend tick only invokes generators in this
+        # set, so a merely-registered sibling signal in the same message
+        # keeps its last-valid/initial/0x0 value instead of also turning
+        # random. Marked by send_generated()/start_event_periodic(), cleared
+        # by the matching stops, mode="fixed" and stop_auto().
+        self._random_active: set[tuple[str, str]] = set()
         # (message_name, signal_name) -> {"period_ms", "next_due"} for
         # Event-signal periodic Random sends (Random button widgets): each
         # tick generates a fresh value, sends it, and follows the Event rule
@@ -276,6 +284,58 @@ class TxScheduler:
             result["signals"][signal_name] = "periodic"
         return result
 
+    def send_signal_zero_after(self, message_name: str, values: dict[str, Any]) -> dict:
+        """One-shot pulse for Periodic signals (button widgets): send the
+        configured (valid) values immediately, then raw 0x0 for those
+        signals EVENT_INVALID_DELAY_S later -- the mirror image of
+        send_signal_invalid_first. Event signals are rejected: they keep
+        the existing send_signal path untouched.
+
+        The valid values are persisted into signal state right away (via
+        encode_with_values) so the periodic auto-resend armed below keeps
+        transmitting them until the delayed zero frame goes out; the zero
+        values are then persisted too (same call pre-encodes the zero frame
+        with the transmit priority applied to the other signals), so the
+        auto-resend keeps transmitting static 0x0 on every subsequent tick.
+        The delayed zero frame is pre-encoded now (not re-encoded at fire
+        time) so rapid repeated clicks each replay their own values in
+        order."""
+        message = self._dbc.get_message(message_name)
+        if not values:
+            raise ValueError("전송할 신호 값이 없습니다")
+        for signal_name in values:
+            if self._dbc.signal_send_type(message_name, signal_name) != "periodic":
+                raise ValueError(
+                    f"{message_name}.{signal_name}는 Event 신호입니다 "
+                    "(zero-after 펄스는 Periodic 신호 전용입니다)"
+                )
+        valid_data = self._dbc.encode_with_values(message_name, values)
+        self._send_frame(message, valid_data)
+        self._upsert_auto(message)
+        # Raw 0 (not physical 0 -- a signal with an offset would otherwise
+        # land on a nonzero raw pattern), mirroring stop_generated().
+        zero_data = self._dbc.encode_with_raw_values(
+            message_name, {name: 0 for name in values}
+        )
+
+        def send_zero() -> None:
+            self._can.send(
+                message.frame_id,
+                zero_data,
+                message.is_extended_frame,
+                is_fd=message.is_fd,
+                bitrate_switch=message.is_fd,
+            )
+
+        due = time.perf_counter() + EVENT_INVALID_DELAY_S
+        with self._lock:
+            heapq.heappush(self._oneshots, (due, next(self._seq), send_zero))
+
+        result: dict[str, Any] = {"sent": True, "mode": "zero_after", "signals": {}}
+        for signal_name in values:
+            result["signals"][signal_name] = "periodic"
+        return result
+
     def preset_signal(self, message_name: str, values: dict[str, Any]) -> dict:
         """Seed DBC signal state WITHOUT transmitting -- the TX box's signal
         editor stores per-row values here on apply, so the scheduler's later
@@ -306,6 +366,7 @@ class TxScheduler:
         if mode == "fixed":
             with self._lock:
                 self._value_generators.get(message_name, {}).pop(signal_name, None)
+                self._random_active.discard((message_name, signal_name))
             return
 
         message = self._dbc.get_message(message_name)
@@ -351,9 +412,10 @@ class TxScheduler:
         if generator is None:
             raise ValueError(f"no value generator registered for {message_name}.{signal_name}")
         raw_value = generator()
-        self._dbc.set_raw_signal_value(message_name, signal_name, raw_value)
-        data = self._dbc.encode_current(message_name)
+        data = self._dbc.encode_with_raw_values(message_name, {signal_name: raw_value})
         self._send_frame(message, data)
+        with self._lock:
+            self._random_active.add((message_name, signal_name))
         return {
             "sent": True,
             "raw_value": raw_value,
@@ -375,10 +437,11 @@ class TxScheduler:
         signal = next(s for s in message.signals if s.name == signal_name)
         with self._lock:
             self._value_generators.get(message_name, {}).pop(signal_name, None)
-        invalid_raw = (1 << signal.length) - 1
-        self._dbc.set_raw_signal_value(message_name, signal_name, invalid_raw)
+            self._random_active.discard((message_name, signal_name))
+        self._dbc.set_raw_invalid(message_name, signal_name)
         data = self._dbc.encode_current(message_name)
         self._send_frame(message, data)
+        invalid_raw = (1 << signal.length) - 1
         return {
             "sent": True,
             "raw_value": invalid_raw,
@@ -413,6 +476,7 @@ class TxScheduler:
                 "period_ms": period,
                 "next_due": time.perf_counter(),
             }
+            self._random_active.add((message_name, signal_name))
         return {
             "started": True,
             "message_name": message.name,
@@ -420,13 +484,50 @@ class TxScheduler:
             "period_ms": period,
         }
 
-    def stop_event_periodic(self, message_name: str, signal_name: str) -> dict:
+    def stop_event_periodic(
+        self, message_name: str, signal_name: str, send_final_invalid: bool = False
+    ) -> dict:
         """Stop periodic Random sends (idempotent). A 30ms-invalid follow-up
         already scheduled by the last tick still goes out -- same as the
-        Event rule everywhere else."""
+        Event rule everywhere else.
+
+        With send_final_invalid=True (Random button's 2nd click), one
+        all-invalid frame is sent immediately, but only when the signal was
+        actually running -- a stray stop for a non-running signal stays
+        silent. The value generator is deliberately NOT cleared (unlike
+        send_invalid), so the next start_event_periodic() works without
+        re-registering."""
         with self._lock:
-            self._event_periodic.pop((message_name, signal_name), None)
-        return {"stopped": True, "message_name": message_name, "signal_name": signal_name}
+            was_running = self._event_periodic.pop((message_name, signal_name), None) is not None
+            self._random_active.discard((message_name, signal_name))
+        sent_final = False
+        if was_running and send_final_invalid:
+            message = self._dbc.get_message(message_name)
+            data = self._dbc.encode_invalid(message_name, signal_name)
+            self._send_frame(message, data)
+            sent_final = True
+        return {
+            "stopped": True,
+            "message_name": message_name,
+            "signal_name": signal_name,
+            "final_invalid_sent": sent_final,
+        }
+
+    def stop_generated(self, message_name: str, signal_name: str) -> dict:
+        """Stop a Periodic signal's Random/Range transmission (Random button's
+        2nd click): clear the value generator and send a final raw-0 frame
+        once. The 0 is persisted into signal state (mirroring send_invalid's
+        persist behavior) so the message's periodic auto-resend -- which is
+        deliberately kept -- keeps transmitting static 0x0 afterwards. Other
+        widgets' auto-resends for the same message are unaffected."""
+        message = self._dbc.get_message(message_name)
+        with self._lock:
+            self._value_generators.get(message_name, {}).pop(signal_name, None)
+            self._random_active.discard((message_name, signal_name))
+        data = self._dbc.encode_with_raw_values(message_name, {signal_name: 0})
+        self._send_frame(message, data)
+        self._upsert_auto(message)
+        return {"stopped": True, "raw_value": 0}
 
     def _make_event_periodic_job(self, message_name: str, signal_name: str) -> Callable[[], None]:
         def send() -> None:
@@ -435,9 +536,8 @@ class TxScheduler:
             if gen is None:
                 return  # generator vanished mid-run -- skip this tick
             raw_value = gen()
-            self._dbc.set_raw_signal_value(message_name, signal_name, raw_value)
             message = self._dbc.get_message(message_name)
-            data = self._dbc.encode_current(message_name)
+            data = self._dbc.encode_with_raw_values(message_name, {signal_name: raw_value})
             self._send_frame(message, data)
             self._schedule_invalid(message, signal_name)
 
@@ -532,11 +632,14 @@ class TxScheduler:
                 self._auto_entries.clear()
                 self._enable_msg_armed.clear()
                 self._event_periodic.clear()
+                self._random_active.clear()
             else:
                 self._auto_entries.pop(message_name, None)
                 self._enable_msg_armed.discard(message_name)
                 for key in [k for k in self._event_periodic if k[0] == message_name]:
                     del self._event_periodic[key]
+                for key in [k for k in self._random_active if k[0] == message_name]:
+                    self._random_active.discard(key)
         return self.status()
 
     # ---- scheduler loop ---------------------------------------------------
@@ -624,12 +727,20 @@ class TxScheduler:
                 # generator) from request-handling threads, and iterating a
                 # dict while another thread inserts into it raises
                 # "dictionary changed size during iteration".
+                # Only actively-transmitting signals regenerate: a merely
+                # registered sibling (e.g. an unclicked multi-Random cell or
+                # a deleted widget's leftover) keeps last-valid/initial/0x0
+                # via the resolver instead of also turning random.
                 with self._lock:
                     generators = self._value_generators.get(entry.message_name)
-                    generators = list(generators.items()) if generators else []
-                for signal_name, gen in generators:
-                    self._dbc.set_raw_signal_value(entry.message_name, signal_name, gen())
-                data = self._dbc.encode_current(entry.message_name)
+                    active = set(self._random_active)
+                    generators = (
+                        [(n, g) for n, g in generators.items()
+                         if (entry.message_name, n) in active]
+                        if generators else []
+                    )
+                raw_values = {signal_name: gen() for signal_name, gen in generators}
+                data = self._dbc.encode_with_raw_values(entry.message_name, raw_values)
                 message = self._dbc.get_message(entry.message_name)
                 is_fd, brs = message.is_fd, message.is_fd
             else:

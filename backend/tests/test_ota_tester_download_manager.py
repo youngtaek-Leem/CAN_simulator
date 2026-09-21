@@ -998,3 +998,144 @@ def test_uds_request_with_retry_no_send_floor_when_stmin_checkbox_off():
     mgr._uds_request_with_retry(bytearray([0x36, 0x01, 0xAA]), 0.05, "TransferData(seq=1)")
 
     assert sent_kwargs["min_stmin_s"] == 0.0
+
+
+# ---- Standalone <delay> step execution -------------------------------------
+# Test-rule XML files (e.g. reference/OTA_Tester_RG3HEV_*) carry <delay
+# time="ms"/> as independent steps. _execute_step must actually wait (with
+# TesterPresent keep-alive for long waits) instead of falling through to
+# _build_pdu's "Skipping (no TX PDU)" path.
+
+
+def _bare_ota_manager():
+    can = type("FakeCan", (), {"notifier": _FakeNotifier()})()
+    return OtaTesterDownloadManager(can, lambda *a, **k: {"sent": True}, lambda *a, **k: b"")
+
+
+def test_delay_step_waits_specified_ms():
+    mgr = _bare_ota_manager()
+    t0 = time.time()
+    assert mgr._execute_step({}, "delay", {"time": "200", "enable": "true"}, [], True) is True
+    assert 150 <= (time.time() - t0) * 1000.0 <= 600
+
+
+def test_delay_step_zero_is_noop():
+    mgr = _bare_ota_manager()
+    t0 = time.time()
+    assert mgr._execute_step({}, "delay", {"time": "0"}, [], True) is True
+    assert (time.time() - t0) * 1000.0 < 150
+
+
+def test_delay_step_keepalive_for_long_wait(monkeypatch):
+    import ota_tester_download_manager as otdm
+
+    monkeypatch.setattr(otdm, "TESTER_PRESENT_INTERVAL_S", 0.1)
+    mgr = _bare_ota_manager()
+    calls: list = []
+    mgr._send_tester_present = lambda: calls.append(1)  # type: ignore[method-assign]
+    assert mgr._execute_step({}, "delay", {"time": "350"}, [], True) is True
+    assert len(calls) == 3
+
+
+def test_delay_step_no_keepalive_when_short(monkeypatch):
+    import ota_tester_download_manager as otdm
+
+    monkeypatch.setattr(otdm, "TESTER_PRESENT_INTERVAL_S", 10.0)
+    mgr = _bare_ota_manager()
+    calls: list = []
+    mgr._send_tester_present = lambda: calls.append(1)  # type: ignore[method-assign]
+    assert mgr._execute_step({}, "delay", {"time": "200"}, [], True) is True
+    assert calls == []
+
+
+def test_reference_xml_delay_steps_parse():
+    """Reference OTA tester XMLs expose 8 <delay> steps with time values."""
+    import glob
+    import os
+
+    ref = sorted(
+        glob.glob(
+            os.path.join(
+                os.path.dirname(__file__), "..", "..", "reference",
+                "OTA_Tester_RG3HEV_26-09-17-14-16-14", "Testcases", "*", "*.xml",
+            )
+        )
+    )
+    ref = [p for p in ref if os.path.basename(p) != "SWDL.json"]
+    assert ref, "reference OTA tester XMLs missing"
+    for path in ref:
+        steps = parse_test_rule_xml(path)
+        if len(steps) <= 3:  # tiny helper file without download sequence
+            continue
+        delays = [s["params"].get("time") for s in steps if s["service"] == "delay"]
+        assert delays[0] == "2000"
+        assert "15000" in delays
+
+
+# ---- TransferData per-block NRC retransmission ------------------------------
+# Mirrors the CAN-SWDL behavior: a transient DUT NRC resends the identical
+# block up to TRANSFER_BLOCK_MAX_RETRIES times; transport errors (nrc == 0)
+# abort immediately.
+
+
+def _scripted_ota_transport(monkeypatch, mgr, behaviors):
+    calls: list = []
+
+    def fake(request, timeout_s, label, **kw):
+        calls.append(bytes(request))
+        behavior = behaviors.pop(0) if behaviors else None
+        if behavior is not None:
+            raise behavior
+        return {"positive": True}
+
+    monkeypatch.setattr(mgr, "_uds_request_with_retry", fake)
+    import ota_tester_download_manager as otdm
+
+    monkeypatch.setattr(otdm, "TRANSFER_BLOCK_RETRY_DELAY_S", 0.01)
+    return calls
+
+
+def _ota_case(binary: bytes) -> dict:
+    return {"label": "retry-test", "binary_data": binary}
+
+
+def test_transfer_data_retries_nrc_then_succeeds(monkeypatch):
+    from uds_core import UdsError
+
+    mgr = _bare_ota_manager()
+    calls = _scripted_ota_transport(
+        monkeypatch, mgr,
+        [UdsError("NRC", nrc=0x72), UdsError("NRC", nrc=0x31), None],
+    )
+    mgr._execute_transfer_data(
+        _ota_case(bytes([0xAA, 0xBB])),
+        {"seekAddress": "0x00000000", "writeSize": "0x00000002"},
+    )
+    assert len(calls) == 3
+    assert calls[0] == calls[1] == calls[2]
+
+
+def test_transfer_data_aborts_after_max_retries(monkeypatch):
+    from uds_core import UdsError
+
+    mgr = _bare_ota_manager()
+    calls = _scripted_ota_transport(monkeypatch, mgr, [UdsError("NRC", nrc=0x72)] * 4)
+    with pytest.raises(UdsError):
+        mgr._execute_transfer_data(
+            _ota_case(bytes([0xAA, 0xBB])),
+            {"seekAddress": "0x00000000", "writeSize": "0x00000002"},
+        )
+    assert len(calls) == 4  # initial + 3 retries
+
+
+def test_transfer_data_no_retry_on_transport_error(monkeypatch):
+    from uds_core import UdsError
+
+    mgr = _bare_ota_manager()
+    calls = _scripted_ota_transport(monkeypatch, mgr, [UdsError("ISO-TP 수신 실패")])
+    with pytest.raises(UdsError):
+        mgr._execute_transfer_data(
+            _ota_case(bytes([0xAA, 0xBB])),
+            {"seekAddress": "0x00000000", "writeSize": "0x00000002"},
+        )
+    assert len(calls) == 1

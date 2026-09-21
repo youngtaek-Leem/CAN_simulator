@@ -29,8 +29,8 @@ export function ButtonWidget({ config }: { config: WidgetConfig }) {
   const { dbc } = useApp();
   const { send, error, setError } = useSendSignal(config);
   const isPeriodic = findSignal(dbc, config.binding)?.signal.send_type === 'periodic';
-  // Periodic: inverted one-shot pulse (INVALID immediately, configured
-  // value 30ms later, server-side) on every click -- no toggle.
+  // Periodic: one-shot pulse (configured value immediately, raw 0x0 30ms
+  // later with 0 persisted, server-side) on every click -- no toggle.
   // Event: existing behavior, unchanged (value now + auto-invalid 30ms later).
   const activate = async () => {
     if (!config.binding?.signal || !isPeriodic) {
@@ -38,7 +38,7 @@ export function ButtonWidget({ config }: { config: WidgetConfig }) {
       return;
     }
     try {
-      await canStore.sendSignalInvalidFirst(config.binding.message, {
+      await canStore.sendSignalZeroAfter(config.binding.message, {
         [config.binding.signal]: value,
       });
       setError(null);

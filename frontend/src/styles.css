@@ -194,8 +194,8 @@ body {
 }
 
 .page-tab-actions .icon-btn {
-  font-size: 11px;
-  padding: 0 3px;
+  font-size: 16px;
+  padding: 1px 5px;
 }
 
 .page-tab-add {
@@ -320,8 +320,10 @@ button:disabled {
 .icon-btn {
   border: none;
   background: transparent;
-  padding: 0 4px;
+  padding: 2px 7px;
   color: var(--text-dim);
+  font-size: 19px;
+  line-height: 1;
 }
 
 .icon-btn:hover {
@@ -930,6 +932,12 @@ select.tx-signal-input {
 
 .graph-chart-header .icon-btn {
   padding: 0 2px;
+  font-size: 13px;
+}
+
+.graph-toolbar .icon-btn {
+  padding: 0 4px;
+  font-size: 13px;
 }
 
 .graph-xwindow {
@@ -1028,8 +1036,8 @@ select.tx-signal-input {
 }
 
 .syslog-section-title .icon-btn {
-  padding: 0 5px;
-  font-size: 9px;
+  padding: 1px 7px;
+  font-size: 14px;
 }
 
 /* 역주행(시간 단절) 기준으로 나뉜 구간 목록 -- 구간이 많을 수 있어(수백 개까지도)
@@ -1122,8 +1130,8 @@ select.tx-signal-input {
 }
 
 .syslog-id-group-header .icon-btn {
-  padding: 0 5px;
-  font-size: 9px;
+  padding: 1px 7px;
+  font-size: 14px;
 }
 
 /* 그래프 컬럼 + 오른쪽 커스텀 스크롤바를 한 줄에 나란히 놓는 래퍼. */
@@ -1247,6 +1255,12 @@ select.tx-signal-input {
   background: #8c8c8c;
   color: #fff;
   border-color: #5a5a5a;
+}
+
+/* Random 버튼: Random 값 전송 중 표시 (연한 파란색) */
+.control-widget .big-btn.random-running {
+  background: #cce4f7;
+  border-color: var(--accent);
 }
 
 .control-widget input[type='checkbox'] {

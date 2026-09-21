@@ -552,3 +552,225 @@ def test_event_periodic_validation_and_stop_auto_cleanup():
         assert rest == [], f"frames after stop_auto: {len(rest)}"
     finally:
         teardown_stack(cm, sched, peer)
+
+
+# ---- Random 버튼 정지 동작 (전송중 표시/최종값) -------------------------------
+# - Event 정지(final_invalid): 실행 중일 때만 전-invalid 1회, 생성기 유지
+# - Periodic 정지(stop_generated): 생성기 제거 + raw 0x0 1회 (0 영속)
+
+
+def test_stop_event_periodic_final_invalid():
+    cm, dbc, sched, peer = setup_stack("t_ev_final")
+    try:
+        sched.set_value_generator("DriverCommand", "TurnSignal", "random", 0, 5)
+        sched.start_event_periodic("DriverCommand", "TurnSignal", 50)
+        time.sleep(0.2)
+        assert any(f.arbitration_id == 0x300 for f in collect(peer, 0.1))
+        peer.recv(timeout=0)  # flush
+        result = sched.stop_event_periodic("DriverCommand", "TurnSignal", True)
+        assert result["final_invalid_sent"] is True
+        # 전-invalid 프레임: TurnSignal(4bit)=0xF, WiperMode=0xFF
+        final = peer.recv(timeout=0.5)
+        assert final is not None and final.arbitration_id == 0x300
+        assert (final.data[0] & 0x0F) == 0x0F and final.data[1] == 0xFF
+        # 생성기 유지 -- 재등록 없이 시작 가능
+        sched.start_event_periodic("DriverCommand", "TurnSignal", 50)
+        assert any(f.arbitration_id == 0x300 for f in collect(peer, 0.2))
+        sched.stop_event_periodic("DriverCommand", "TurnSignal")
+        # 마지막 tick의 30ms-invalid 후속이 정지 직후 1회 더 나올 수 있음
+        # (기존 동작) -- drain 후에는 무음이어야 함
+        collect(peer, 0.15)
+        rest = [f for f in collect(peer, 0.25) if f.arbitration_id == 0x300]
+        assert rest == [], f"frames after stop: {len(rest)}"
+    finally:
+        teardown_stack(cm, sched, peer)
+
+
+def test_stop_event_periodic_stray_stop_silent():
+    cm, dbc, sched, peer = setup_stack("t_ev_stray")
+    try:
+        result = sched.stop_event_periodic("DriverCommand", "TurnSignal", True)
+        assert result["final_invalid_sent"] is False
+        assert peer.recv(timeout=0.15) is None
+    finally:
+        teardown_stack(cm, sched, peer)
+
+
+def test_stop_generated_sends_zero_and_clears_generator():
+    cm, dbc, sched, peer = setup_stack("t_stop_gen")
+    try:
+        sched.set_value_generator("EngineData", "EngineSpeed", "random", 100, 200)
+        sched.send_generated("EngineData", "EngineSpeed")
+        result = sched.stop_generated("EngineData", "EngineSpeed")
+        assert result["stopped"] is True and result["raw_value"] == 0
+        # 생성기 제거 -- 이후 send_generated 거부
+        with pytest.raises(ValueError):
+            sched.send_generated("EngineData", "EngineSpeed")
+        # 정지 전 random값 프레임 버퍼 비우기
+        while peer.recv(timeout=0) is not None:
+            pass
+        # auto-entry 유지 -- EngineSpeed raw 0 프레임 계속 송신
+        frames = [f for f in collect(peer, 0.3) if f.arbitration_id == 0x100]
+        assert frames, "no frames after stop_generated"
+        assert all(int.from_bytes(f.data[0:2], "little") == 0 for f in frames)
+    finally:
+        teardown_stack(cm, sched, peer)
+
+
+def test_event_periodic_two_signals_independent():
+    cm, dbc, sched, peer = setup_stack("t_ev_two")
+    try:
+        sched.set_value_generator("DriverCommand", "TurnSignal", "random", 0, 5)
+        sched.set_value_generator("DriverCommand", "HornRequest", "random", 0, 1)
+        sched.start_event_periodic("DriverCommand", "TurnSignal", 50)
+        sched.start_event_periodic("DriverCommand", "HornRequest", 50)
+        time.sleep(0.2)
+        sched.stop_event_periodic("DriverCommand", "TurnSignal", True)
+        # HornRequest 계속 송신 중 -- TurnSignal 최종 invalid 1회를 제외하고
+        # 추가 TurnSignal 유효값이 나오면 안 됨은 타이밍상 단정 불가이므로,
+        # HornRequest 유효 프레임이 계속 오는 것만 확인
+        got_horn = False
+        for f in collect(peer, 0.3):
+            if f.arbitration_id == 0x300 and (f.data[0] & 0x0F) == 0x0F and (f.data[0] >> 4) & 0x01 == 0:
+                pass  # 전-invalid (TurnSignal=0xF, HornRequest=0)
+            elif f.arbitration_id == 0x300:
+                got_horn = True
+        assert got_horn, "HornRequest frames stopped after TurnSignal stop"
+        sched.stop_event_periodic("DriverCommand", "HornRequest", True)
+        # 정지 직후에는 명시 최종 invalid + 마지막 tick의 30ms 후속이 나올 수
+        # 있음 -- drain 후에는 무음이어야 함
+        collect(peer, 0.2)
+        rest = [f for f in collect(peer, 0.25) if f.arbitration_id == 0x300]
+        assert rest == [], f"frames after all stopped: {len(rest)}"
+    finally:
+        teardown_stack(cm, sched, peer)
+
+
+def test_event_generated_send_forces_other_signals_invalid():
+    """Event Random 송신(Random 버튼/주기 경로)도 타신호 invalid 규칙 적용."""
+    cm, dbc, sched, peer = setup_stack("t_ev_gen_invalid")
+    try:
+        # 먼저 다른 신호에 last valid를 남김 (setup 프레임 drain)
+        sched.send_signal("DriverCommand", {"WiperMode": 3})
+        while peer.recv(timeout=0) is not None:
+            pass
+        sched.set_value_generator("DriverCommand", "TurnSignal", "random", 2, 2)
+        sched.send_generated("DriverCommand", "TurnSignal")
+        frame = peer.recv(timeout=0.5)
+        assert frame is not None and frame.arbitration_id == 0x300
+        assert frame.data[0] & 0x0F == 0x02  # TurnSignal 유효값
+        assert frame.data[1] == 0xFF  # WiperMode는 last valid(3)가 아닌 invalid
+    finally:
+        teardown_stack(cm, sched, peer)
+
+
+def test_auto_tick_randomizes_only_started_signal():
+    """Bug: WHL_SpdFLVal Random 시작 시 같은 메세지의 FR도 함께 Random으로
+    변했음 -- 마운트/설정 시 등록된 생성기가 auto tick마다 전부 호출됐기
+    때문. 이제 시작된 신호만 재생성되고, 등록만 된 형제는 정적 유지."""
+    cm, dbc, sched, peer = setup_stack("t_gen_sibling")
+    try:
+        # 멀티셀 마운트 시뮬레이션: 두 신호 생성기 등록, 하나만 시작
+        sched.set_value_generator("EngineData", "EngineSpeed", "random")
+        sched.set_value_generator("EngineData", "EngineTemp", "random")
+        sched.send_generated("EngineData", "EngineSpeed")
+        frames = [f for f in collect(peer, 0.3) if f.arbitration_id == 0x100]
+        assert len(frames) >= 5
+        speed_raws = {int.from_bytes(f.data[0:2], "little") for f in frames}
+        temp_raws = {f.data[2] for f in frames}
+        assert len(speed_raws) > 1, "started signal should randomize"
+        assert len(temp_raws) == 1, f"registered-only sibling randomized: {temp_raws}"
+        sched.stop_auto("EngineData")
+    finally:
+        teardown_stack(cm, sched, peer)
+
+
+def test_fixed_generator_clears_active_mark():
+    cm, dbc, sched, peer = setup_stack("t_gen_fixed_active")
+    try:
+        sched.set_value_generator("EngineData", "EngineSpeed", "random")
+        sched.send_generated("EngineData", "EngineSpeed")
+        sched.set_value_generator("EngineData", "EngineSpeed", "fixed")
+        while peer.recv(timeout=0) is not None:
+            pass
+        frames = [f for f in collect(peer, 0.2) if f.arbitration_id == 0x100]
+        assert frames, "auto ticks should continue with last value"
+        raws = {int.from_bytes(f.data[0:2], "little") for f in frames}
+        assert len(raws) == 1, f"ticks kept randomizing after fixed: {raws}"
+        sched.stop_auto("EngineData")
+    finally:
+        teardown_stack(cm, sched, peer)
+
+
+def test_stop_then_restart_randomizes_again():
+    cm, dbc, sched, peer = setup_stack("t_gen_restart")
+    try:
+        sched.set_value_generator("EngineData", "EngineSpeed", "random")
+        sched.send_generated("EngineData", "EngineSpeed")
+        sched.stop_generated("EngineData", "EngineSpeed")
+        while peer.recv(timeout=0) is not None:
+            pass
+        stopped = [f for f in collect(peer, 0.2) if f.arbitration_id == 0x100]
+        assert stopped
+        assert {int.from_bytes(f.data[0:2], "little") for f in stopped} == {0}
+        # 재시작: 생성기 재등록 + 시작 후 다시 randomize
+        sched.set_value_generator("EngineData", "EngineSpeed", "random")
+        sched.send_generated("EngineData", "EngineSpeed")
+        while peer.recv(timeout=0) is not None:
+            pass
+        frames = [f for f in collect(peer, 0.3) if f.arbitration_id == 0x100]
+        raws = {int.from_bytes(f.data[0:2], "little") for f in frames}
+        assert len(raws) > 1, "restarted signal should randomize again"
+        sched.stop_auto("EngineData")
+    finally:
+        teardown_stack(cm, sched, peer)
+
+
+def test_zero_after_pulse_valid_then_zero():
+    """버튼 Periodic 클릭: 설정값 즉시 + 30ms 후 raw 0x0, 이후 0 지속."""
+    cm, dbc, sched, peer = setup_stack("t_zero_after")
+    try:
+        # 타신호 last valid 준비
+        sched.send_signal("EngineData", {"EngineTemp": 50})  # raw 90
+        while peer.recv(timeout=0) is not None:
+            pass
+        sched.send_signal_zero_after("EngineData", {"EngineSpeed": 1000})
+        f1 = peer.recv(timeout=0.5)
+        assert f1 is not None and f1.arbitration_id == 0x100
+        assert int.from_bytes(f1.data[0:2], "little") == 4000  # 물리 1000
+        assert f1.data[2] == 90  # 타신호 last valid 유지
+        # 이후 프레임은 전부 raw 0 (30ms 후속 + 주기 송신 지속)
+        frames = [f for f in collect(peer, 0.3) if f.arbitration_id == 0x100]
+        assert frames
+        assert all(int.from_bytes(f.data[0:2], "little") == 0 for f in frames)
+        assert all(f.data[2] == 90 for f in frames)
+        sched.stop_auto("EngineData")
+    finally:
+        teardown_stack(cm, sched, peer)
+
+
+def test_zero_after_multi_signal_same_send():
+    """같은 송신에 담긴 다중 신호는 모두 valid로 나감."""
+    cm, dbc, sched, peer = setup_stack("t_zero_multi")
+    try:
+        while peer.recv(timeout=0) is not None:
+            pass
+        sched.send_signal_zero_after("EngineData", {"EngineSpeed": 1000, "EngineTemp": 50})
+        f1 = peer.recv(timeout=0.5)
+        assert f1 is not None and f1.arbitration_id == 0x100
+        assert int.from_bytes(f1.data[0:2], "little") == 4000
+        assert f1.data[2] == 90
+        sched.stop_auto("EngineData")
+    finally:
+        teardown_stack(cm, sched, peer)
+
+
+def test_zero_after_rejects_event_signal():
+    cm, dbc, sched, peer = setup_stack("t_zero_event")
+    try:
+        with pytest.raises(ValueError):
+            sched.send_signal_zero_after("DriverCommand", {"TurnSignal": 2})
+        with pytest.raises(ValueError):
+            sched.send_signal_zero_after("EngineData", {})
+    finally:
+        teardown_stack(cm, sched, peer)

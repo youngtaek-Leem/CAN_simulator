@@ -210,3 +210,109 @@ def test_summary_signal_default_value_uses_start_value():
     by_name = {s["name"]: s for s in svc.summary()["messages"][0]["signals"]}
     assert by_name["WithStart"]["default_value"] == 16 * 10 + 5
     assert by_name["NoStart"]["default_value"] == 0xFF
+
+
+# ---- Transmit priority (widget value -> last valid -> initial -> 0x0) ------
+# ---- + Event multi-valid sends (all widgets share this via dbc_service) ---
+
+
+def test_event_send_keeps_all_widget_values_valid():
+    svc = make_service()
+    # 위젯이 한 번에 2개 신호값을 보내면 둘 다 valid, 나머지만 invalid
+    data = svc.encode_with_values("DriverCommand", {"TurnSignal": 2, "WiperMode": 3})
+    assert data[0] & 0x0F == 0x02
+    assert data[1] == 3
+    assert (data[0] >> 4) & 0x1 == 1  # HornRequest invalid
+
+
+def test_event_raw_send_forces_others_invalid():
+    svc = make_service()
+    # Random/주기 경로(raw 단위)도 Event 규칙 동일: 타신호 invalid
+    data = svc.encode_with_raw_values("DriverCommand", {"TurnSignal": 2})
+    assert data[0] & 0x0F == 0x02
+    assert (data[0] >> 4) & 0x1 == 1
+    assert data[1] == 0xFF
+    # 영속 상태는 실제값 유지
+    current = svc.encode_current("DriverCommand")
+    assert current[0] & 0x0F == 0x02
+
+
+def test_periodic_untouched_sibling_uses_initial_value():
+    svc = DbcService()
+    svc.load_string(
+        """
+        BU_: ECU_A
+        CM_ BO_ 100 "[P] periodic";
+        BO_ 100 PMsg: 8 ECU_A
+         SG_ WithStart : 0|8@1+ (1,0) [0|255] "" ECU_A
+         SG_ NoStart : 8|8@1+ (1,0) [0|255] "" ECU_A
+        BA_DEF_ SG_ "GenSigStartValue" INT 0 100000;
+        BA_ "GenSigStartValue" SG_ 100 WithStart 16;
+        """,
+        "init.dbc",
+    )
+    data = svc.encode_with_values("PMsg", {"WithStart": 7})
+    raw = svc.decode_raw(0x64, data)
+    assert raw["WithStart"] == 7
+    assert raw["NoStart"] == 0  # 미정의 초기값 -> 0x0
+    # last valid 유지
+    data = svc.encode_with_values("PMsg", {"NoStart": 1})
+    raw = svc.decode_raw(0x64, data)
+    assert raw["WithStart"] == 7
+    assert raw["NoStart"] == 1
+
+
+def test_periodic_nonforced_invalid_falls_back():
+    svc = make_service()
+    # 강제 표시 없는 bit-max 영속값은 last valid가 아니므로 초기값/0으로 대체
+    # (sample.dbc 무 GenSigStartValue -> 0x0)
+    svc.set_raw_signal_value("EngineData", "EngineSpeed", 0xFFFF)
+    data = svc.encode_with_values("EngineData", {"EngineTemp": 50})
+    raw = svc.decode_raw(0x100, data)
+    assert raw["EngineSpeed"] == 0
+    assert raw["EngineTemp"] == 90  # 물리 50 / scale 1, offset -40 -> raw 90
+
+
+def test_periodic_forced_invalid_kept_until_valid_write():
+    svc = make_service()
+    # 버튼 INVALID 토글(의도적 invalid)은 계속 송신
+    svc.set_raw_invalid("EngineData", "EngineSpeed")
+    data = svc.encode_with_values("EngineData", {"EngineTemp": 50})
+    raw = svc.decode_raw(0x100, data)
+    assert raw["EngineSpeed"] == 0xFFFF
+    # valid 쓰기가 표시 해제 (물리 1000 / scale 0.25 -> raw 4000)
+    svc.encode_with_values("EngineData", {"EngineSpeed": 1000})
+    data = svc.encode_with_values("EngineData", {"EngineTemp": 50})
+    raw = svc.decode_raw(0x100, data)
+    assert raw["EngineSpeed"] == 4000
+
+
+def test_explicit_bitmax_transmits_but_not_remembered():
+    svc = make_service()
+    # 명시 전송은 그대로 나가지만 last valid로는 기억되지 않음
+    # (물리 16383.75 / scale 0.25 -> raw 65535 = 16bit bit-max)
+    data = svc.encode_with_values("EngineData", {"EngineSpeed": 16383.75})
+    raw = svc.decode_raw(0x100, data)
+    assert raw["EngineSpeed"] == 0xFFFF
+    data = svc.encode_with_values("EngineData", {"EngineTemp": 50})
+    raw = svc.decode_raw(0x100, data)
+    assert raw["EngineSpeed"] == 0
+
+
+def test_periodic_never_written_sibling_uses_initial_value():
+    svc = DbcService()
+    svc.load_string(
+        """
+        BU_: ECU_A
+        CM_ BO_ 100 "[P] periodic";
+        BO_ 100 PMsg: 8 ECU_A
+         SG_ WithStart : 0|8@1+ (1,0) [0|255] "" ECU_A
+         SG_ NoStart : 8|8@1+ (1,0) [0|255] "" ECU_A
+        BA_DEF_ SG_ "GenSigStartValue" INT 0 100000;
+        BA_ "GenSigStartValue" SG_ 100 WithStart 16;
+        """,
+        "init.dbc",
+    )
+    data = svc.encode_with_values("PMsg", {"NoStart": 1})
+    raw = svc.decode_raw(0x64, data)
+    assert raw["WithStart"] == 16  # 기록 없는 신호는 초기값

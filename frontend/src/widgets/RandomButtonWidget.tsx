@@ -1,23 +1,15 @@
 // Sends a Random or Range-cycled value for a bound CAN signal instead of a
 // fixed one. The value-generation logic lives entirely on the backend
-// (tx_scheduler.py's per-signal generators), because a Periodic signal's
-// auto-resend ticks happen server-side with no frontend involvement -- this
-// widget only registers the generator (mode/range/step) with the backend and
-// triggers one generated send per click. Periodic signals then keep
-// generating a fresh value on every subsequent auto-resend tick on their
-// own; Event signals only get a new value when this button is clicked.
-//
-// For Periodic signals specifically, clicks also toggle generating<->invalid
-// (mirroring ButtonWidget's valid<->invalid toggle): press 1 starts
-// generating, press 2 sends the invalid value continuously (the backend's
-// send_invalid() clears the registered generator so it can't overwrite
-// invalid on the next tick), press 3 re-registers the generator and resumes.
-//
-// For Event signals, clicks instead toggle periodic Random sending at a
-// user-set period (ms input in the widget body): press 1 starts generating
-// a fresh value every period (each following the Event rule -- valid now,
-// invalid 30ms later, server-side), press 2 stops. Period and running flag
-// persist in options so they survive page switches and layout saves.
+// (tx_scheduler.py's per-signal generators). Clicks toggle transmitting
+// (light-blue button) <-> stopped:
+// - press 1 starts transmitting Random values (Periodic: generator +
+//   one generated send, then a fresh value on every auto-resend tick;
+//   Event: periodic Random sends at the user-set period, each following
+//   the Event rule -- valid now, invalid 30ms later, server-side).
+// - press 2 stops and sends a final value (Event: Invalid frame once;
+//   Periodic: raw 0x0 once, persisted), restoring the button color.
+// Running flags persist in options so they survive page switches and
+// layout saves.
 
 import { useEffect, useState } from 'react';
 import { api } from '../api/client';
@@ -36,8 +28,6 @@ export function RandomButtonWidget({ config }: { config: WidgetConfig }) {
   useCanVersion();
   const { dbc, updateWidget } = useApp();
   const [error, setError] = useState<string | null>(null);
-  const [pending, setPending] = useState<'generate' | 'invalid'>('generate');
-  const [lastSent, setLastSent] = useState<'generate' | 'invalid' | null>(null);
   const binding = config.binding;
   const mode = (config.options.mode as string | undefined) ?? 'random';
   const rangeMin = config.options.rangeMin as number | undefined;
@@ -47,6 +37,7 @@ export function RandomButtonWidget({ config }: { config: WidgetConfig }) {
   const isEvent = findSignal(dbc, binding)?.signal.send_type === 'event';
   const eventPeriodMs = clampPeriodMs(Number(config.options.eventPeriodMs ?? EVENT_PERIOD_DEFAULT_MS));
   const eventRunning = Boolean(config.options.eventRunning ?? false);
+  const generating = Boolean(config.options.generating ?? false);
 
   // Re-register on every mount / config change so a backend restart or a
   // config edit elsewhere always leaves the server-side generator in sync
@@ -64,7 +55,7 @@ export function RandomButtonWidget({ config }: { config: WidgetConfig }) {
     if (isEvent) {
       try {
         if (eventRunning) {
-          await canStore.stopEventPeriodic(binding.message, binding.signal);
+          await canStore.stopEventPeriodic(binding.message, binding.signal, true);
           updateWidget({ ...config, options: { ...config.options, eventRunning: false } });
         } else {
           await canStore.startEventPeriodic(binding.message, binding.signal, eventPeriodMs);
@@ -76,28 +67,33 @@ export function RandomButtonWidget({ config }: { config: WidgetConfig }) {
       }
       return;
     }
-    try {
-      const next = isPeriodic ? pending : 'generate';
-      if (next === 'invalid') {
-        await canStore.sendInvalid(binding.message, binding.signal);
-      } else {
-        if (isPeriodic) {
-          // re-register: send_invalid() cleared it the last time we toggled
+    if (isPeriodic) {
+      try {
+        if (generating) {
+          await canStore.stopGenerated(binding.message, binding.signal);
+          updateWidget({ ...config, options: { ...config.options, generating: false } });
+        } else {
+          // re-register: stopGenerated() cleared it the last time we stopped
           await api.setValueGenerator(binding.message, binding.signal, mode, rangeMin, rangeMax, step);
+          await canStore.sendGenerated(binding.message, binding.signal);
+          updateWidget({ ...config, options: { ...config.options, generating: true } });
         }
-        await canStore.sendGenerated(binding.message, binding.signal);
+        setError(null);
+      } catch (e) {
+        setError((e as Error).message);
       }
-      if (isPeriodic) {
-        setLastSent(next);
-        setPending(next === 'invalid' ? 'generate' : 'invalid');
-      }
+      return;
+    }
+    // Unclassified send type: momentary one-shot generate per click.
+    try {
+      await canStore.sendGenerated(binding.message, binding.signal);
       setError(null);
     } catch (e) {
       setError((e as Error).message);
     }
   };
 
-  const invalidActive = isPeriodic && lastSent === 'invalid';
+  const running = eventRunning || generating;
   const hasRange = rangeMin !== undefined || rangeMax !== undefined;
   const modeLabel =
     mode === 'range'
@@ -109,7 +105,7 @@ export function RandomButtonWidget({ config }: { config: WidgetConfig }) {
   return (
     <div className="control-widget">
       <button
-        className="big-btn"
+        className={`big-btn${running ? ' random-running' : ''}`}
         onClick={activate}
         onKeyDown={(e) => {
           if (e.key === ' ' || e.key === 'Enter') {
@@ -122,9 +118,7 @@ export function RandomButtonWidget({ config }: { config: WidgetConfig }) {
         {binding?.signal
           ? isEvent
             ? `${binding.signal} [${modeLabel}] ${eventRunning ? '■' : '▶'} ${eventPeriodMs}ms`
-            : invalidActive
-              ? `${binding.signal} = INVALID`
-              : `${binding.signal} [${modeLabel}]`
+            : `${binding.signal} [${modeLabel}]${generating ? ' ■' : ''}`
           : '신호 미할당'}
       </button>
       {error && <span className="error">{error}</span>}

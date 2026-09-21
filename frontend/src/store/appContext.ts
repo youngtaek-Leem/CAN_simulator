@@ -10,6 +10,10 @@ export interface AppCtx {
   removeWidget: (id: string) => void;
   toggleMinimize: (id: string) => void;
   refreshDbc: () => void;
+  /** Lightweight page list (id + name) for the widget settings' page-move UI. */
+  pages: { id: string; name: string }[];
+  /** Move a widget (with its size) to another page; stays on current page. */
+  moveWidgetToPage: (widgetId: string, targetPageId: string) => void;
 }
 
 export const AppContext = createContext<AppCtx>({
@@ -19,6 +23,8 @@ export const AppContext = createContext<AppCtx>({
   removeWidget: () => {},
   toggleMinimize: () => {},
   refreshDbc: () => {},
+  pages: [],
+  moveWidgetToPage: () => {},
 });
 
 export const useApp = () => useContext(AppContext);
