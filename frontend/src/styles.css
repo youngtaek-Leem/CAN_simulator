@@ -363,6 +363,10 @@ button:disabled {
   flex: 1;
   overflow: auto;
   position: relative;
+  /* z-index:0 + position:relative = stacking context. 위젯별 z 스택이
+   * 아무리 커져도 캔버스 안에서만 효력을 갖고, 상단 "필수 설정" 패널(z50)이나
+   * 설정 모달(z100, portal) 같은 캔버스 바깥 레이어를 덮지 못한다. */
+  z-index: 0;
   padding: 4px;
 }
 
@@ -422,6 +426,25 @@ button:disabled {
   background: var(--accent);
   opacity: 0.2;
   border-radius: 6px;
+}
+
+/* ---- widget z-order (bringToFront: zOrder 스택 → 인라인 zIndex) ----
+ * 맨앞 순서의 유일한 권한은 App.tsx의 zOrder 스택(클릭 순서대로 1..n 부여,
+ * 클릭되지 않은 위젯은 순서 유지)이다. RGL 내장 stylesheet가
+ * 드래그/리사이즈/placeholder에 부여하는 z-index (dragging 3 / resizing 1 /
+ * placeholder 2)는 클릭하지 않은 위젯을 일시적으로 들어올리므로 무력화한다.
+ * 드래그/리사이즈 대상은 mousedown capture에서 이미 스택 최상위를 받으므로,
+ * stylesheet z를 내려도 드래그 중인 위젯은 그대로 최상위를 유지한다.
+ * 스택에 없는 위젯은 z-index:auto로 DOM 순서 그대로 그려진다. */
+.canvas .react-grid-item {
+  z-index: auto;
+}
+.canvas .react-grid-item.react-draggable-dragging,
+.canvas .react-grid-item.resizing {
+  z-index: auto;
+}
+.canvas .react-grid-item.react-grid-placeholder {
+  z-index: auto;
 }
 
 /* ---- tables (message display / tx box) ---- */

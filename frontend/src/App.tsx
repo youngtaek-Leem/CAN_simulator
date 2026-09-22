@@ -76,6 +76,16 @@ function makePage(id: string, name: string): Page {
   return { id, name, widgets: [], layout: [] };
 }
 
+// Date.now() 단독으로는 같은 ms에 2개를 추가하면 ID가 중복되어 zOrder가
+// 2개 위젯에 동시 매칭되고 둘 다 함께 상단에 나온다.
+// 세션 내 단조 증가 카운터 + 난수를 붙여 충돌을 방지한다.
+let newIdSeq = 0;
+function nextId(prefix: string): string {
+  newIdSeq += 1;
+  const rand = Math.floor(Math.random() * 1296).toString(36).padStart(2, '0');
+  return `${prefix}${Date.now()}-${newIdSeq.toString(36)}${rand}`;
+}
+
 /** DBC message names a widget could have armed an auto-periodic sender for
  * (via POST /api/tx/signal), so we know what to stop_auto() on removal. */
 function sendableMessages(config: WidgetConfig): string[] {
@@ -152,17 +162,25 @@ export default function App() {
   const [layoutList, setLayoutList] = useState<string[]>([]);
   const [showSettings, setShowSettings] = useState(false);
   const [banner, setBanner] = useState<string | null>(null);
-  const [activeId, setActiveId] = useState<string | null>(null);
+  // 위젯별 z-order 스택 (id → 높을수록 앞). 클릭된 위젯만 끝에 추가되고,
+  // 클릭되지 않은 위젯들의 상대 순서는 영구 보존된다. 단일 activeId 슬롯으로는
+  // 배열 순서와 시각 순서가 어긋난 경우(C-A-B가 되어야 하는데 C-B-A가 되는
+  // 경우) 클릭하지 않은 위젯끼리의 순서까지 보존할 수 없어 스택이 필요하다.
+  // ID는 세션 전역에서 유일하므로 페이지 전환 후 돌아와도 맨앞이 복원되고,
+  // 저장/불러오기 시에는 초기화된다 (순서는 저장하지 않음).
+  const [zOrder, setZOrder] = useState<Record<string, number>>({});
   const [canConfig, setCanConfig] = useState<CanConfig>(DEFAULT_CAN_CONFIG);
   const widgetRefs = useRef<Record<string, HTMLDivElement | null>>({});
 
   const activePage = pages.find((p) => p.id === activePageId) ?? pages[0];
 
-  // if the active page was just removed, fall back to the first remaining one
+  // if the active page was just removed, fall back to the first remaining one.
+  // NOTE: zOrder는 일부러 리셋하지 않는다 -- 위젯 ID는 세션 전역에서
+  // 유일하므로 남겨두면 페이지별 맨앞 기억으로 동작한다 (돌아오면 복원).
+  // 매칭되는 위젯이 없는 페이지에서는 아무 일도 일어나지 않는다.
   useEffect(() => {
     if (!pages.some((p) => p.id === activePageId)) {
       setActivePageId(pages[0]?.id ?? 'p1');
-      setActiveId(null);
     }
   }, [pages, activePageId]);
 
@@ -203,17 +221,33 @@ export default function App() {
   // 선택한 위젯만 맨 앞으로 -- 배열 순서는 절대 건드리지 않는다.
   // mousedown 제스처 도중에 widgets/layout 배열을 재정렬하면 그리드 자식
   // DOM 순서가 mousedown/mouseup 사이에 바뀌어 이어지는 click 이벤트가
-  // 소실된다 (위젯 첫 클릭 무시 버그). 앞면 고정은 activeId → zIndex로 하며,
-  // RGL GridItem이 래퍼 div 자체를 .react-grid-item으로 복제하므로 이
-  // z-index는 아이템 간에도 유효하고, activeId가 유지되는 한 sticky하다.
-  // 배열 순서는 생성 순서대로 영구 고정된다 (추가/삭제 시만 변경).
+  // 소실된다 (위젯 첫 클릭 무시 버그). 앞면 고정은 zOrder 스택 → 인라인
+  // zIndex로 하며, RGL GridItem이 래퍼 div 자체를 .react-grid-item으로
+  // 복제하므로 이 z-index는 아이템 간에도 유효하고, 유지되는 한 sticky하다.
+  // 클릭되지 않은 위젯들의 상대 순서는 스택에 손대지 않으므로 그대로 보존된다
+  // (A-B-C에서 C 클릭 → C-A-B). RGL 내장 stylesheet의
+  // dragging/resizing/placeholder z-index는 styles.css에서 무력화되어 있다
+  // (`.canvas .react-grid-item` 블록). 매 클릭마다 1..n으로 정규화하므로
+  // z값은 위젯 개수를 넘지 않는다.
   const bringToFront = useCallback((id: string) => {
-    setActiveId(id);
+    setZOrder((prev) => {
+      const ranked = Object.entries(prev).sort((a, b) => a[1] - b[1]);
+      const next: Record<string, number> = {};
+      let z = 0;
+      for (const [key] of ranked) {
+        if (key === id) continue;
+        z += 1;
+        next[key] = z;
+      }
+      z += 1;
+      next[id] = z;
+      return next;
+    });
   }, []);
 
   const addWidget = (type: WidgetType) => {
     const meta = WIDGET_REGISTRY[type];
-    const id = `w${Date.now()}`;
+    const id = nextId('w');
     updateActivePage((p) => {
       // cascade new widgets from the top-left (no auto-compaction)
       const n = p.layout.length;
@@ -225,7 +259,7 @@ export default function App() {
     });
     // otherwise the new widget can land visually behind whichever widget was
     // last focused, which keeps its elevated z-index indefinitely
-    setActiveId(id);
+    bringToFront(id);
   };
 
   const updateWidget = useCallback(
@@ -338,7 +372,7 @@ export default function App() {
             };
           }
           restoring = true;
-          // fronting은 setActiveId → zIndex가 담당하므로 배열 순서는 유지한다
+          // fronting은 bringToFront → zIndex 스택이 담당하므로 배열 순서는 유지한다
           // (제스처 도중 DOM 순서 변경 금지 -- bringToFront 주석 참조)
           const widgets = p.widgets.map((w) =>
             w.id === id ? { ...w, options: { ...w.options, minimized } } : w,
@@ -347,9 +381,9 @@ export default function App() {
           return { ...p, widgets, layout };
         }),
       );
-      if (restoring) setActiveId(id);
+      if (restoring) bringToFront(id);
     },
-    [activePageId],
+    [activePageId, bringToFront],
   );
 
   // restore every docked widget to its pre-minimize position
@@ -520,7 +554,7 @@ export default function App() {
           : [{ ...makePage('p1', 'Page 1'), widgets: saved.widgets ?? [], layout: saved.layout ?? [] }];
       setPages(loadedPages);
       setActivePageId(loadedPages[0].id);
-      setActiveId(null);
+      setZOrder({});
       setLayoutName(name);
       notify(`레이아웃 "${name}" 불러옴`);
     } catch (e) {
@@ -536,7 +570,7 @@ export default function App() {
     }
     setPages([makePage('p1', 'Page 1')]);
     setActivePageId('p1');
-    setActiveId(null);
+    setZOrder({});
     setLayoutName('');
     setCanConfig(DEFAULT_CAN_CONFIG);
     notify('새 편집 화면으로 초기화되었습니다');
@@ -588,10 +622,11 @@ export default function App() {
   // ---- page (tab) management -------------------------------------------------
 
   const addPage = () => {
-    const id = `p${Date.now()}`;
+    const id = nextId('p');
     setPages((ps) => [...ps, makePage(id, `Page ${ps.length + 1}`)]);
     setActivePageId(id);
-    setActiveId(null);
+    // zOrder 유지 -- 빈 새 페이지에서는 매칭이 없어 효과 없고,
+    // 이전 페이지로 돌아오면 맨앞 상태가 그대로 복원된다.
   };
 
   const renamePage = (id: string, name: string) => {
@@ -604,7 +639,8 @@ export default function App() {
 
   const switchPage = (id: string) => {
     setActivePageId(id);
-    setActiveId(null);
+    // zOrder 유지 -- 돌아왔을 때 맨앞 복원. 다른 페이지 위젯 ID와는
+    // 매칭되지 않으므로 전환된 페이지에서는 부작용이 없다.
   };
 
   const reorderPages = (fromId: string, toId: string) => {
@@ -681,7 +717,7 @@ export default function App() {
                 <div
                   key={w.id}
                   ref={(el) => { widgetRefs.current[w.id] = el; }}
-                  style={activeId === w.id ? { zIndex: 10 } : undefined}
+                  style={zOrder[w.id] !== undefined ? { zIndex: zOrder[w.id] } : undefined}
                   onMouseDownCapture={() => bringToFront(w.id)}
                 >
                   <WidgetFrame config={w}>
