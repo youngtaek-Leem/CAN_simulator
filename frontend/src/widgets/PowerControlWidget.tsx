@@ -4,11 +4,15 @@
 // 백엔드(power_supply_service.py)에서 돌고, 이 위젯은 canStore.status.power를
 // 읽고 /api/power/* 를 호출하기만 한다 (TestRunnerBox의 연결 버튼과 동일한 패턴).
 
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { api } from '../api/client';
 import { canStore, useCanVersion } from '../store/canStore';
 import { useApp } from '../store/appContext';
 import type { WidgetConfig } from '../types';
+
+// 실시간 전압/전류 폴링 주기 (ms). 오디오 레벨 폴링과 같은 self-rescheduling
+// 패턴: 이전 요청이 끝나야 다음을 예약해 요청이 쌓이지 않게 한다.
+const MEASURE_POLL_MS = 200;
 
 function parseNumbers(values: string[]): number[] | null {
   const nums = values.map(Number);
@@ -135,6 +139,55 @@ export function PowerControlWidget({ config }: { config: WidgetConfig }) {
   const sweepEnabled = power?.sweep.enabled ?? false;
   const autoActive = onoffEnabled || sweepEnabled; // either mode owns the voltage channel
 
+  // 실시간 측정값 (영속 불필요 -- 마운트 즉시 폴링으로 채워짐).
+  const [measured, setMeasured] = useState<{ voltage: number | null; current: number | null }>({
+    voltage: null,
+    current: null,
+  });
+  const [measPaused, setMeasPaused] = useState(false);
+  const measTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    const poll = async () => {
+      if (cancelled) return;
+      // 고부하 작업 중에는 측정 폴링 일시정지 (추가 트래픽 0). CAN-SWDL/
+      // OTA는 백엔드 busy 콜백이 measure를 스킵한다.
+      const heavy =
+        canStore.status?.run?.running === true ||
+        canStore.status?.test_runner?.running === true ||
+        canStore.status?.ota_tester?.running === true ||
+        canStore.status?.replay?.progress?.running === true;
+      if (connected && !heavy) {
+        try {
+          const r = await api.powerMeasure();
+          if (cancelled) return;
+          setMeasured({ voltage: r.voltage, current: r.current });
+          setMeasPaused(r.ok === false && r.reason === 'busy');
+        } catch {
+          /* keep last values */
+        }
+      } else if (!cancelled) {
+        setMeasPaused(connected && heavy);
+      }
+      if (!cancelled) measTimerRef.current = setTimeout(poll, MEASURE_POLL_MS);
+    };
+    if (connected) {
+      poll();
+    } else {
+      setMeasured({ voltage: null, current: null });
+      setMeasPaused(false);
+    }
+    return () => {
+      cancelled = true;
+      if (measTimerRef.current) clearTimeout(measTimerRef.current);
+    };
+    // canStore.status는 useCanVersion 구독으로 리렌더되지만, 폴링 루프는
+    // 실행 중에 유지되어야 해서 deps는 connected만 -- heavy 판정은 매
+    // 폴링마다 live 상태로 읽는다.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [connected]);
+
   return (
     <div className="power-control">
       <div className="power-control-toolbar">
@@ -164,6 +217,16 @@ export function PowerControlWidget({ config }: { config: WidgetConfig }) {
             현재: {power!.battery_voltage}V / {power!.battery_current}A
           </div>
         )}
+      </div>
+
+      <div className="power-section">
+        <div className="power-section-title">실시간 전압 / 전류</div>
+        <div className="hint mono">
+          {measured.voltage !== null && measured.current !== null
+            ? `${measured.voltage.toFixed(3)}V / ${measured.current.toFixed(3)}A`
+            : '—'}
+        </div>
+        {measPaused && connected && <div className="hint">일시정지됨 (부하 작업 중)</div>}
       </div>
 
       <div className="power-section">

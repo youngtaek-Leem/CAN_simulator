@@ -1,0 +1,12 @@
+.claude/
+.git/
+.opencode/
+.pytest_cache/
+Automation/
+reference/
+samples/
+.gitattributes/
+.gitignore/
+Temp_req.json/
+
+

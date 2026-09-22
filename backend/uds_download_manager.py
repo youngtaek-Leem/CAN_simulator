@@ -72,12 +72,22 @@ TESTER_PRESENT_INTERVAL_S = 2.0
 FUNCTIONAL_REQUEST_ID = 0x7DF
 
 # TransferData per-block retransmission: when the DUT answers a block with
-# an NRC (transient communication error), the identical block (same seq/data)
-# is resent up to this many times before the download is aborted.
-# NRC 0x78 never reaches here (consumed by _uds_request_with_retry's pending
-# wait); transport errors (UdsError with nrc == 0) are NOT retried.
+# an NRC, or stays silent until the timeout (e.g. it lost tail frames of a
+# fast CF burst), the identical block (same seq/data) is resent up to this
+# many times before the download is aborted. NRC 0x78 never reaches here
+# (consumed by _uds_request_with_retry's pending wait). Non-timeout
+# transport errors (UdsError with nrc == 0 and no "시간 초과") are NOT
+# retried.
 TRANSFER_BLOCK_MAX_RETRIES = 3
 TRANSFER_BLOCK_RETRY_DELAY_S = 0.5
+
+# Minimum inter-CF gap (seconds) forced on TransferData multi-frame sends,
+# on top of whatever the ECU's Flow Control STmin asks for. A zero-gap
+# back-to-back CF burst intermittently loses tail frames on some DUTs/PCAN
+# setups (observed: last CF of a 36-frame burst missing -> response timeout);
+# 200us costs ~7ms per 258-byte block and is invisible next to P2* timeouts.
+# An explicit global STmin override larger than this still wins (max()).
+TRANSFER_BLOCK_MIN_GAP_S = 0.0002
 
 # States
 STATE_IDLE = "IDLE"
@@ -446,6 +456,20 @@ class UdsDownloadManager:
         with self._lock:
             self._progress.update(fields)
 
+    def _send_stats_suffix(self) -> str:
+        """One-line send telemetry for failure logs, e.g.
+        " (송신 37프레임/12.4ms)" -- lets a missing-tail incident read as
+        sender-short (fewer frames than the block needs) or ECU-silent."""
+        try:
+            stats = getattr(self, "_last_send_stats", None) or {}
+            frames = stats.get("frames_sent")
+            ms = stats.get("duration_ms")
+            if frames is None:
+                return ""
+            return f" (송신 {frames}프레임{'' if ms is None else f'/{ms}ms'})"
+        except Exception:
+            return ""
+
     # ---- Internal: UDS transport --------------------------------------------
 
     def _get_fc_stmin(self) -> int:
@@ -475,10 +499,13 @@ class UdsDownloadManager:
         the XML default as a *send*-side floor would slow TransferData down
         even with the "STmin" checkbox off, when unchecking it is supposed
         to go back to sending as fast as the ECU's own FC allows. Only an
-        explicit user override should ever slow the send side down.
+        explicit user override should ever slow the send side down -- plus
+        the small TRANSFER_BLOCK_MIN_GAP_S floor that keeps fast CF bursts
+        from intermittently losing tail frames.
         """
         global_override = getattr(self, '_global_stmin_tx', None)
-        return decode_stmin(global_override) if global_override is not None else 0.0
+        user_floor = decode_stmin(global_override) if global_override is not None else 0.0
+        return max(user_floor, TRANSFER_BLOCK_MIN_GAP_S)
 
     def _uds_request(self, request: bytes, timeout_s: float, label: str = "") -> dict:
         """Send a UDS request and receive the response."""
@@ -621,7 +648,7 @@ class UdsDownloadManager:
         self._can.notifier.add_listener(reader)
         try:
             try:
-                self._isotp_send(
+                send_stats = self._isotp_send(
                     self._can, tx_id, rx_id, request,
                     is_extended_id=is_ext,
                     fc_timeout_s=timeout_s,
@@ -629,6 +656,15 @@ class UdsDownloadManager:
                     min_stmin_s=self._get_send_stmin_floor_s(),
                     stop_event=self._stop_event,
                 )
+                # Remember how many frames actually went out: on a later
+                # failure the transfer loop logs this, so a missing-tail
+                # incident reads as either sender-short or ECU-silent.
+                try:
+                    if isinstance(send_stats, dict):
+                        with self._lock:
+                            self._last_send_stats = dict(send_stats)
+                except Exception:
+                    pass
             except Exception as exc:
                 raise UdsError(f"ISO-TP 송신 실패 ({label}): {exc}")
 
@@ -1151,10 +1187,20 @@ class UdsDownloadManager:
                 except UdsError as exc:
                     if self._stop_event.is_set():
                         raise RuntimeError("사용자에 의해 전송 중단됨")
-                    if exc.nrc == 0 or retry >= TRANSFER_BLOCK_MAX_RETRIES:
-                        self._log(level="ERROR", msg=f"TransferData 블록 {seq_num} 실패: {exc}")
+                    # Retryable: an NRC answer, or a response timeout (the
+                    # DUT may have lost tail frames of the CF burst -- the
+                    # identical block usually goes through on resend). Any
+                    # other transport error aborts immediately, as does an
+                    # exhausted retry budget.
+                    retryable = exc.nrc != 0 or _is_timeout_error(exc)
+                    if not retryable or retry >= TRANSFER_BLOCK_MAX_RETRIES:
+                        self._log(level="ERROR", msg=f"TransferData 블록 {seq_num} 실패: {exc}{self._send_stats_suffix()}")
                         raise
-                    self._log(level="WARN", msg=f"TransferData 블록 {seq_num} NRC=0x{exc.nrc:02X}, 재전송 {retry + 1}/{TRANSFER_BLOCK_MAX_RETRIES}")
+                    if exc.nrc != 0:
+                        reason = f"NRC=0x{exc.nrc:02X}"
+                    else:
+                        reason = "응답 시간초과"
+                    self._log(level="WARN", msg=f"TransferData 블록 {seq_num} {reason}, 재전송 {retry + 1}/{TRANSFER_BLOCK_MAX_RETRIES}{self._send_stats_suffix()}")
                     if self._stop_event.wait(TRANSFER_BLOCK_RETRY_DELAY_S):
                         raise RuntimeError("사용자에 의해 전송 중단됨")
 
@@ -1227,6 +1273,11 @@ class MultiUdsDownloadManager:
                                 log_dir=log_dir, slot_label=f"slot{i + 1}")
             for i in range(self.NUM_SLOTS)
         ]
+        # Sequence token: each start_all() claims a new generation; the
+        # background orchestrator aborts remaining queued slots when a newer
+        # generation appears (i.e. stop_all() was called in between).
+        self._seq = 0
+        self._seq_lock = threading.Lock()
 
     def get_manager(self, slot_index: int) -> UdsDownloadManager:
         if not 0 <= slot_index < self.NUM_SLOTS:
@@ -1268,6 +1319,10 @@ class MultiUdsDownloadManager:
         if not ordered:
             return results
 
+        with self._seq_lock:
+            self._seq += 1
+            seq = self._seq
+
         def resolve(idx: int) -> tuple[Optional[list[int]], Optional[dict[str, dict]]]:
             slot_selected = (
                 per_slot_selected_steps.get(idx) if per_slot_selected_steps is not None else None
@@ -1300,7 +1355,15 @@ class MultiUdsDownloadManager:
                 prev_mgr = first_mgr
                 for idx in remaining:
                     while prev_mgr.running:
+                        with self._seq_lock:
+                            if self._seq != seq:
+                                return
                         time.sleep(0.05)
+                    with self._seq_lock:
+                        if self._seq != seq:
+                            # Superseded by a newer start_all()/stop_all() --
+                            # do not start queued slots.
+                            return
                     mgr = self._managers[idx]
                     slot_selected, slot_params = resolve(idx)
                     try:
@@ -1315,7 +1378,10 @@ class MultiUdsDownloadManager:
         return results
 
     def stop_all(self, slot_indices: list[int]) -> list[dict]:
-        """Stop specified slots."""
+        """Stop specified slots and cancel any queued sequential starts from
+        an in-flight start_all() (bumps the sequence token first)."""
+        with self._seq_lock:
+            self._seq += 1
         results = []
         for idx in slot_indices:
             mgr = self._managers[idx]

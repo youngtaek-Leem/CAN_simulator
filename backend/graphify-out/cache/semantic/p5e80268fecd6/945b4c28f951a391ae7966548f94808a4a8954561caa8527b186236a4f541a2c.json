@@ -1,0 +1,1 @@
+{"nodes": [{"id": "run_mac_uvicorn_command", "label": "Uvicorn Execution Command", "file_type": "code", "source_file": "run_mac.txt", "source_location": null, "source_url": null, "captured_at": null, "author": null, "contributor": null, "rationale": "The file contains a shell command to start a FastAPI/ASGI application using uvicorn."}], "edges": [], "hyperedges": []}

@@ -774,3 +774,235 @@ def test_zero_after_rejects_event_signal():
             sched.send_signal_zero_after("EngineData", {})
     finally:
         teardown_stack(cm, sched, peer)
+
+
+def test_toggle_alternates_across_one_shot_sends():
+    """TxBox 토글: 1회 전송마다 A/B/A... (Event 메세지라 auto tick 없음)."""
+    cm, dbc, sched, peer = setup_stack("t_toggle_sends")
+    try:
+        sched.preset_signal("DriverCommand", {"TurnSignal": 2}, {"TurnSignal": 5})
+        got = []
+        for _ in range(3):
+            sched.send_signal("DriverCommand", {"TurnSignal": 2}, {"TurnSignal": 5})
+            while True:
+                f = peer.recv(timeout=0.5)
+                assert f is not None
+                if f.arbitration_id != 0x300:
+                    continue
+                if f.data[0] & 0x0F == 0x0F:
+                    continue  # 30ms-invalid 후속 스킵
+                got.append(f.data[0] & 0x0F)
+                break
+        assert got == [2, 5, 2]
+    finally:
+        teardown_stack(cm, sched, peer)
+
+
+def test_toggle_alternates_on_periodic_ticks():
+    """Start 후 주기 tick도 A/B 교대. _make_send_job 직접 구동 (결정적)."""
+    import time
+
+    from tx_scheduler import TxEntry
+
+    cm, dbc, sched, peer = setup_stack("t_toggle_ticks")
+    try:
+        sched.preset_signal("EngineData", {"EngineSpeed": 1000}, {"EngineSpeed": 2000})
+        entry = TxEntry(key="t", arbitration_id=0x100, period_ms=10, message_name="EngineData")
+        job = sched._make_send_job(entry)
+        for _ in range(4):
+            job()
+        frames = []
+        deadline = time.perf_counter() + 1.0
+        while len(frames) < 4 and time.perf_counter() < deadline:
+            f = peer.recv(timeout=0.1)
+            if f is not None and f.arbitration_id == 0x100:
+                frames.append(f)
+        raws = [int.from_bytes(f.data[0:2], "little") for f in frames]
+        assert raws == [4000, 8000, 4000, 8000], f"expected A/B alternation, got {raws}"
+    finally:
+        teardown_stack(cm, sched, peer)
+
+
+def test_toggle_cleared_by_preset_without_alt_and_stop_auto():
+    cm, dbc, sched, peer = setup_stack("t_toggle_clear")
+    try:
+        sched.preset_signal("DriverCommand", {"TurnSignal": 2}, {"TurnSignal": 5})
+        assert sched._toggle_values.get("DriverCommand")
+        sched.preset_signal("DriverCommand", {"TurnSignal": 2})
+        assert "DriverCommand" not in sched._toggle_values
+        sched.preset_signal("DriverCommand", {"TurnSignal": 2}, {"TurnSignal": 5})
+        sched.stop_auto("DriverCommand")
+        assert "DriverCommand" not in sched._toggle_values
+    finally:
+        teardown_stack(cm, sched, peer)
+
+
+def test_send_without_alt_leaves_toggle_untouched():
+    """토글 없는 1회 전송(다른 위젯)은 저장된 토글을 건드리지 않는다."""
+    cm, dbc, sched, peer = setup_stack("t_toggle_untouched")
+    try:
+        sched.preset_signal("DriverCommand", {"TurnSignal": 2}, {"TurnSignal": 5})
+        sched.send_signal("DriverCommand", {"TurnSignal": 3})
+        assert sched._toggle_values["DriverCommand"] == {
+            "a": {"TurnSignal": 2}, "b": {"TurnSignal": 5},
+        }
+    finally:
+        teardown_stack(cm, sched, peer)
+
+
+def test_send_signal_once_sends_exactly_one_frame():
+    """Send(주기 미체크): Periodic/Event 상관없이 정확히 1프레임, auto 미지정."""
+    cm, dbc, sched, peer = setup_stack("t_once")
+    try:
+        sched.send_signal("EngineData", {"EngineSpeed": 1000}, once=True)
+        f1 = peer.recv(timeout=0.5)
+        assert f1 is not None and f1.arbitration_id == 0x100
+        assert int.from_bytes(f1.data[0:2], "little") == 4000
+        rest = [f for f in collect(peer, 0.2) if f.arbitration_id == 0x100]
+        assert rest == [], f"extra frames after once-send: {len(rest)}"
+        # auto-entry 미생성 확인
+        assert all(e["message_name"] != "EngineData" for e in sched.status()["auto_entries"])
+    finally:
+        teardown_stack(cm, sched, peer)
+
+
+def test_send_signal_once_event_keeps_invalid_followup():
+    """once여도 Event 30ms-invalid 후속은 나간다 (valid 1 + invalid 1)."""
+    cm, dbc, sched, peer = setup_stack("t_once_event")
+    try:
+        sched.send_signal("DriverCommand", {"TurnSignal": 2}, once=True)
+        frames = [f for f in collect(peer, 0.3) if f.arbitration_id == 0x300]
+        assert len(frames) == 2, f"expected valid+invalid, got {len(frames)}"
+        assert frames[0].data[0] & 0x0F == 0x02
+        assert frames[1].data[0] & 0x0F == 0x0F
+    finally:
+        teardown_stack(cm, sched, peer)
+
+
+def test_row_periodic_start_stop_toggle():
+    """행별 주기 시작/정지: 시작 즉시 1프레임 + 주기 tick, 정지 후 무음."""
+    cm, dbc, sched, peer = setup_stack("t_row_toggle")
+    try:
+        res = sched.row_periodic_start("row1", "EngineData", {"EngineSpeed": 1000}, None, 50)
+        assert res["started"] is True and res["period_ms"] == 50
+        f1 = peer.recv(timeout=0.5)
+        assert f1 is not None and f1.arbitration_id == 0x100
+        more = [f for f in collect(peer, 0.25) if f.arbitration_id == 0x100]
+        assert len(more) >= 2, "periodic ticks missing"
+        assert any(e["key"] == "row1" for e in sched.status()["auto_entries"])
+        sched.row_periodic_stop("row1")
+        while peer.recv(timeout=0) is not None:
+            pass
+        rest = [f for f in collect(peer, 0.25) if f.arbitration_id == 0x100]
+        assert rest == [], f"frames after row stop: {len(rest)}"
+    finally:
+        teardown_stack(cm, sched, peer)
+
+
+def test_row_periodic_same_message_independent_periods():
+    """같은 메세지 2행이 각자 주기로 독립 전송/정지."""
+    cm, dbc, sched, peer = setup_stack("t_row_two")
+    try:
+        sched.row_periodic_start("r1", "EngineData", {"EngineSpeed": 1000}, None, 50)
+        sched.row_periodic_start("r2", "EngineData", {"EngineTemp": 50}, None, 200)
+        keys = {e["key"] for e in sched.status()["auto_entries"]}
+        assert {"r1", "r2"} <= keys
+        sched.row_periodic_stop("r1")
+        keys = {e["key"] for e in sched.status()["auto_entries"]}
+        assert "r1" not in keys and "r2" in keys
+        sched.row_periodic_stop("r2")
+    finally:
+        teardown_stack(cm, sched, peer)
+
+
+def test_row_periodic_raw_row():
+    """raw 행도 행별 주기 전송/정지."""
+    cm, dbc, sched, peer = setup_stack("t_row_raw")
+    try:
+        res = sched.row_periodic_start("raw1", None, None, None, 50,
+                                       "01 02 03", 0x123, False, False, False)
+        assert res["started"] is True
+        f1 = peer.recv(timeout=0.5)
+        assert f1 is not None and f1.arbitration_id == 0x123
+        assert bytes(f1.data[:3]) == bytes([0x01, 0x02, 0x03])
+        sched.row_periodic_stop("raw1")
+    finally:
+        teardown_stack(cm, sched, peer)
+
+
+def test_row_periodic_toggle_alternation():
+    """행 시작 즉시 A, 이후 tick B,A,B..."""
+    import time
+
+    cm, dbc, sched, peer = setup_stack("t_row_alt")
+    try:
+        sched.row_periodic_start("ra", "EngineData", {"EngineSpeed": 1000}, {"EngineSpeed": 2000}, 1000)
+        f1 = peer.recv(timeout=0.5)
+        assert f1 is not None and int.from_bytes(f1.data[0:2], "little") == 4000
+        # tick 직접 구동으로 B, A 확인 (주기 대기 없이)
+        entry = sched._auto_entries["ra"]
+        job = sched._make_send_job(entry)
+        job()
+        job()
+        frames = []
+        deadline = time.perf_counter() + 1.0
+        while len(frames) < 2 and time.perf_counter() < deadline:
+            f = peer.recv(timeout=0.1)
+            if f is not None and f.arbitration_id == 0x100:
+                frames.append(f)
+        raws = [int.from_bytes(f.data[0:2], "little") for f in frames]
+        assert raws == [8000, 4000], f"expected B,A, got {raws}"
+        sched.row_periodic_stop("ra")
+    finally:
+        teardown_stack(cm, sched, peer)
+
+
+def test_event_multi_signal_send_emits_single_invalid_followup():
+    """Event 메세지 다중 신호 1회 전송 = valid 1 + invalid 1 (신호당 중복 없음).
+    회귀: TxBox가 전 신호 dict를 넘기면 N개 invalid가 연달아 나갔음."""
+    cm, dbc, sched, peer = setup_stack("t_single_followup")
+    try:
+        sched.send_signal(
+            "DriverCommand",
+            {"TurnSignal": 2, "HornRequest": 1, "WiperMode": 3},
+            once=True,
+        )
+        frames = [f for f in collect(peer, 0.3) if f.arbitration_id == 0x300]
+        assert len(frames) == 2, f"expected valid+invalid only, got {len(frames)}"
+        assert frames[0].data[0] & 0x0F == 0x02
+        assert frames[0].data[1] == 3
+        assert frames[1].data[0] & 0x0F == 0x0F
+        assert frames[1].data[1] == 0xFF
+    finally:
+        teardown_stack(cm, sched, peer)
+
+
+def test_row_tick_event_followup_single():
+    """행 주기 tick의 Event 후속도 tick당 1회."""
+    import time
+
+    cm, dbc, sched, peer = setup_stack("t_row_single_followup")
+    try:
+        sched.row_periodic_start(
+            "re", "DriverCommand",
+            {"TurnSignal": 2, "HornRequest": 1, "WiperMode": 3}, None, 1000,
+        )
+        time.sleep(0.1)  # let the immediate frame + its follow-up arrive
+        while peer.recv(timeout=0) is not None:
+            pass
+        entry = sched._auto_entries["re"]
+        job = sched._make_send_job(entry)
+        job()
+        sched.row_periodic_stop("re")
+        deadline = time.perf_counter() + 1.0
+        got = []
+        while time.perf_counter() < deadline:
+            f = peer.recv(timeout=0.1)
+            if f is not None and f.arbitration_id == 0x300:
+                got.append(f)
+        valids = [f for f in got if f.data[0] & 0x0F == 0x02]
+        invalids = [f for f in got if f.data[0] & 0x0F == 0x0F]
+        assert len(valids) == 1, f"expected 1 tick frame, got {len(valids)}"
+        assert len(invalids) == 1, f"expected 1 follow-up, got {len(invalids)}"
+    finally:
+        teardown_stack(cm, sched, peer)

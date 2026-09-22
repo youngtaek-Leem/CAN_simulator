@@ -249,11 +249,17 @@ class CanStore {
   // directly, so every CAN signal a widget sends passes through one place
   // for the activity log (see displays.tsx's TextDisplay).
 
-  async sendSignal(message: string, values: Record<string, number | string>) {
-    const result = await api.txSignal(message, values);
+  async sendSignal(message: string, values: Record<string, number | string>, valuesAlt?: Record<string, number | string>, once = false) {
+    const result = await api.txSignal(message, values, valuesAlt, once);
     for (const [signal, value] of Object.entries(values)) {
       const sig = this.findDbcSignal(message, signal);
       this.logSignalSend(message, signal, this.formatSignalValue(sig, value), sig?.send_type, 'valid');
+    }
+    if (valuesAlt) {
+      for (const [signal, value] of Object.entries(valuesAlt)) {
+        const sig = this.findDbcSignal(message, signal);
+        this.logSignalSend(message, signal, `${this.formatSignalValue(sig, value)} (토글)`, sig?.send_type, 'valid');
+      }
     }
     return result;
   }

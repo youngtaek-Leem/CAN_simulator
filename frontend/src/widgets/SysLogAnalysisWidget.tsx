@@ -296,7 +296,13 @@ export function SysLogAnalysisWidget({ config }: { config: WidgetConfig }) {
   const sortMode = (config.options.sortMode as 'name' | 'id' | undefined) ?? 'name';
   const setSortMode = (mode: 'name' | 'id') => updateWidget({ ...config, options: { ...config.options, sortMode: mode } });
 
-  const sortedIds = [...ids].sort((a, b) =>
+  // log ID 검색 (DB 업로드 후): ID 번호 + 이름 부분 일치. 빈 그룹은 자동 탈락.
+  const [search, setSearch] = useState('');
+  const searchLower = search.trim().toLowerCase();
+  const searchedIds = searchLower
+    ? ids.filter((info) => String(info.id).includes(searchLower) || info.name.toLowerCase().includes(searchLower))
+    : ids;
+  const sortedIds = [...searchedIds].sort((a, b) =>
     sortMode === 'id' ? a.id - b.id : a.name.localeCompare(b.name),
   );
   const idGroups = ID_GROUPS.map((g) => ({
@@ -502,6 +508,7 @@ export function SysLogAnalysisWidget({ config }: { config: WidgetConfig }) {
           📄 log 파일 업로드
           <input
             type="file"
+            accept=".bin,.txt"
             style={{ display: 'none' }}
             disabled={busy}
             onChange={(e) => {
@@ -623,8 +630,15 @@ export function SysLogAnalysisWidget({ config }: { config: WidgetConfig }) {
             </div>
           )}
           <div className="syslog-section-title">
-            log ID
-            <span className="spacer" />
+            <input
+              className="layout-input"
+              style={{ flex: 1, minWidth: 0 }}
+              placeholder="ID/이름 검색"
+              title={status?.db_filename ? 'log ID 번호 또는 이름으로 검색' : 'DB 업로드 후 검색 가능'}
+              disabled={!status?.db_filename}
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+            />
             <button
               className={`small-btn ${sortMode === 'name' ? 'primary' : ''}`}
               title="이름 알파벳순 정렬"
@@ -642,6 +656,7 @@ export function SysLogAnalysisWidget({ config }: { config: WidgetConfig }) {
           </div>
           <div className="syslog-id-list">
             {ids.length === 0 && <div className="hint">log/DB 파일을 업로드하세요.</div>}
+            {ids.length > 0 && idGroups.length === 0 && <div className="hint">일치하는 log ID 없음</div>}
             {idGroups.map((g) => (
               <div key={g.label} className="syslog-id-group">
                 <div className="syslog-id-group-header">

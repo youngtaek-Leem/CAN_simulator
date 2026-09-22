@@ -77,7 +77,7 @@ export interface BackendStatus {
       bitrate_switch: boolean;
       tx_count: number;
     }[];
-    auto_entries: { message_name: string; period_ms: number; tx_count: number }[];
+    auto_entries: { key: string; message_name: string | null; period_ms: number; tx_count: number }[];
   };
   replay: {
     loaded: boolean;
@@ -579,4 +579,8 @@ export interface TxRow {
   // (default_value, 없으면 Invalid)을 사용한다. 페이지 이동·레이아웃
   // 저장 후에도 유지되도록 행에 영속화한다.
   signalValues?: Record<string, string>;
+  // 신호값 토글 2번째 세트 입력 텍스트 + 토글 표시 상태 (신호별). 전송 시
+  // 두 값이 번갈아 나간다 (메세지 동기 전환). 역시 행에 영속화한다.
+  toggleValues?: Record<string, string>;
+  toggleOn?: Record<string, boolean>;
 }

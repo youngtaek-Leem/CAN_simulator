@@ -414,3 +414,79 @@ def test_build_series_paired_float_non_paired_unchanged():
     assert series[49]["points"][0]["value"] == 1
     assert series[49]["points"][1]["value"] == 2
     assert series[49]["points"][2]["value"] == 3
+
+
+# ---- ASCII hex-dump log support (RS4PE_Log_*.txt) ---------------------------
+
+
+def test_parse_ascii_log_sample_lines():
+    from syslog_service import parse_ascii_log
+
+    records = parse_ascii_log("0A B4 2A 94 05 E0 00 03\r\n0A B4 2D B4 05 E0 00 01\r\n")
+    assert len(records) == 2
+    assert (records[0].day, records[0].hour, records[0].minute, records[0].ms) == (1, 10, 52, 10900)
+    assert (records[0].log_id, records[0].value) == (0x05E0, 3)
+    assert (records[1].ms, records[1].value) == (0x2DB4, 1)
+    assert [r.seq for r in records] == [0, 1]
+
+
+def test_parse_ascii_log_tolerates_case_whitespace_blanks_bom():
+    from syslog_service import parse_ascii_log
+
+    text = "\ufeff0a b4 2a 94\t05 e0 00 03\n\n   \n0A B4 2D B4 05 E0 00 01\r\n"
+    records = parse_ascii_log(text)
+    assert len(records) == 2
+    assert (records[0].log_id, records[0].value) == (0x05E0, 3)
+
+
+def test_parse_ascii_log_bad_line_reports_lineno():
+    import pytest
+
+    from syslog_service import parse_ascii_log
+
+    with pytest.raises(ValueError, match="2번째 줄"):
+        parse_ascii_log("0A B4 2A 94 05 E0 00 03\n0A B4 ZZ\n0A B4 2D B4 05 E0 00 01\n")
+
+
+def test_ascii_roundtrip_matches_binary():
+    """syslog.bin -> hex 텍스트 -> ASCII 파싱이 바이너리 파싱과 동일."""
+    from syslog_service import parse_ascii_log
+
+    data = (REFERENCE_DIR / "syslog.bin").read_bytes()
+    text = "\n".join(" ".join(f"{b:02X}" for b in data[i : i + 8]) for i in range(0, len(data), 8))
+    assert parse_ascii_log(text) == parse_log(data)
+
+
+def test_sniff_ascii_branches():
+    from syslog_service import sniff_ascii
+
+    assert sniff_ascii(b"0A B4 2A 94 05 E0 00 03\r\n") is not None
+    assert sniff_ascii(b"\x0a\xb4*\x94\x05\xe0\x00\x03") is None  # binary
+    assert sniff_ascii(b"") is None
+    assert sniff_ascii("ID;NAME\n".encode("utf-8")) is None  # 텍스트지만 hex 아님
+
+
+def test_service_load_ascii_reference_file():
+    svc = SysLogService()
+    data = (REFERENCE_DIR / "RS4PE_Log_20250910_154054.txt").read_bytes()
+    result = svc.load_log(data, "RS4PE_Log_20250910_154054.txt")
+    assert result["record_count"] == 131072
+    assert svc.status()["log_filename"] == "RS4PE_Log_20250910_154054.txt"
+    # 다운스트림(시리즈)도 동일 파이프라인으로 동작
+    series = svc._ensure_series()
+    assert len(series) > 0
+
+
+def test_service_load_txt_garbage_raises_clear_error():
+    import pytest
+
+    svc = SysLogService()
+    with pytest.raises(ValueError, match="ASCII hex 형식"):
+        svc.load_log("hello world\n".encode("utf-8"), "garbage.txt")
+
+
+def test_service_load_txt_binary_content_falls_back_to_binary():
+    svc = SysLogService()
+    data = (REFERENCE_DIR / "syslog.bin").read_bytes()
+    result = svc.load_log(data, "oddname.txt")
+    assert result["record_count"] == len(data) // 8

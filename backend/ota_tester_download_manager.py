@@ -71,11 +71,24 @@ TESTER_PRESENT_INTERVAL_S = 2.0
 FUNCTIONAL_REQUEST_ID = 0x7DF
 
 # TransferData per-block retransmission (mirrors uds_download_manager.py's
-# CAN-SWDL behavior): on an NRC answer the identical block (same seq/data)
-# is resent up to this many times before the case fails. Transport errors
-# (UdsError with nrc == 0) are NOT retried.
+# CAN-SWDL behavior): on an NRC answer, or a response timeout (the DUT may
+# have lost tail frames of a fast CF burst), the identical block (same
+# seq/data) is resent up to this many times before the case fails.
+# Non-timeout transport errors (UdsError with nrc == 0 and no "시간 초과")
+# are NOT retried.
 TRANSFER_BLOCK_MAX_RETRIES = 3
 TRANSFER_BLOCK_RETRY_DELAY_S = 0.5
+
+# Minimum inter-CF gap (seconds) forced on TransferData multi-frame sends --
+# a zero-gap back-to-back CF burst intermittently loses tail frames on some
+# DUTs/PCAN setups; 200us costs ~7ms per 258-byte block. An explicit global
+# STmin override larger than this still wins (max()).
+TRANSFER_BLOCK_MIN_GAP_S = 0.0002
+
+
+def _is_timeout_error(exc: Exception) -> bool:
+    """isotp_service timeouts report via messages containing this phrase."""
+    return "시간 초과" in str(exc)
 
 # securityAccess sub-function levels used for this ECU's RequestSeed/SendKey
 # ([27 11]/[27 12], not build_security_access_*()'s ISO-default [27 01]/
@@ -511,6 +524,20 @@ class OtaTesterDownloadManager:
         with self._lock:
             self._progress.update(fields)
 
+    def _send_stats_suffix(self) -> str:
+        """One-line send telemetry for failure logs, e.g.
+        " (송신 37프레임/12.4ms)" -- lets a missing-tail incident read as
+        sender-short (fewer frames than the block needs) or ECU-silent."""
+        try:
+            stats = getattr(self, "_last_send_stats", None) or {}
+            frames = stats.get("frames_sent")
+            ms = stats.get("duration_ms")
+            if frames is None:
+                return ""
+            return f" (송신 {frames}프레임{'' if ms is None else f'/{ms}ms'})"
+        except Exception:
+            return ""
+
     # ---- Internal: run loop ------------------------------------------------
 
     def _run_all_cases(self) -> None:
@@ -681,8 +708,10 @@ class OtaTesterDownloadManager:
         with the shared "STmin" checkbox off, when unchecking it is
         supposed to go back to sending as fast as the ECU's own FC allows.
         Only the explicit global override should ever slow the send side
-        down."""
-        return decode_stmin(self._global_stmin_tx) if self._global_stmin_tx is not None else 0.0
+        down -- plus the small TRANSFER_BLOCK_MIN_GAP_S floor that keeps
+        fast CF bursts from intermittently losing tail frames."""
+        user_floor = decode_stmin(self._global_stmin_tx) if self._global_stmin_tx is not None else 0.0
+        return max(user_floor, TRANSFER_BLOCK_MIN_GAP_S)
 
     def _uds_request_with_retry(
         self, request: bytes, timeout_s: float, label: str = "",
@@ -736,12 +765,21 @@ class OtaTesterDownloadManager:
         self._can.notifier.add_listener(reader)
         try:
             try:
-                self._isotp_send(
+                send_stats = self._isotp_send(
                     self._can, self._request_id, self._response_id, request,
                     is_extended_id=is_ext, fc_timeout_s=timeout_s, reader=reader,
                     min_stmin_s=self._get_send_stmin_floor_s(),
                     stop_event=self._stop_event,
                 )
+                # Remember how many frames actually went out: on a later
+                # failure the transfer loop logs this, so a missing-tail
+                # incident reads as either sender-short or ECU-silent.
+                try:
+                    if isinstance(send_stats, dict):
+                        with self._lock:
+                            self._last_send_stats = dict(send_stats)
+                except Exception:
+                    pass
             except Exception as exc:
                 raise UdsError(f"ISO-TP 송신 실패 ({label}): {exc}")
 
@@ -1005,10 +1043,20 @@ class OtaTesterDownloadManager:
                 except UdsError as exc:
                     if self._stop_event.is_set():
                         raise UdsError("사용자에 의해 전송 중단됨")
-                    if exc.nrc == 0 or retry >= TRANSFER_BLOCK_MAX_RETRIES:
-                        self._log(level="ERROR", msg=f"TransferData 블록 {seq_num} 실패: {exc}")
+                    # Retryable: an NRC answer, or a response timeout (the
+                    # DUT may have lost tail frames of the CF burst -- the
+                    # identical block usually goes through on resend). Any
+                    # other transport error aborts immediately, as does an
+                    # exhausted retry budget.
+                    retryable = exc.nrc != 0 or _is_timeout_error(exc)
+                    if not retryable or retry >= TRANSFER_BLOCK_MAX_RETRIES:
+                        self._log(level="ERROR", msg=f"TransferData 블록 {seq_num} 실패: {exc}{self._send_stats_suffix()}")
                         raise
-                    self._log(level="WARN", msg=f"TransferData 블록 {seq_num} NRC=0x{exc.nrc:02X}, 재전송 {retry + 1}/{TRANSFER_BLOCK_MAX_RETRIES}")
+                    if exc.nrc != 0:
+                        reason = f"NRC=0x{exc.nrc:02X}"
+                    else:
+                        reason = "응답 시간초과"
+                    self._log(level="WARN", msg=f"TransferData 블록 {seq_num} {reason}, 재전송 {retry + 1}/{TRANSFER_BLOCK_MAX_RETRIES}{self._send_stats_suffix()}")
                     if self._stop_event.wait(timeout=TRANSFER_BLOCK_RETRY_DELAY_S):
                         raise UdsError("사용자에 의해 전송 중단됨")
             last_seq = seq_num

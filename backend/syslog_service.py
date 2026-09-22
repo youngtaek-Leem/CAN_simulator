@@ -37,8 +37,10 @@ x좌표를 실제 day/hour/min/ms로 역산해 축 눈금에 표시할 수 있�
 
 import bisect
 import math
+import re
 import struct
 from dataclasses import dataclass
+from pathlib import Path
 
 from syslog_script_generator import generate_can_test_script
 
@@ -93,6 +95,17 @@ class SysLogRecord:
     value: int
 
 
+def _decode_record(chunk: bytes, seq: int) -> SysLogRecord:
+    """8바이트 바이너리 레코드 1개를 디코딩한다 (바이너리/ASCII 공용)."""
+    time_word, log_id, value = struct.unpack(">IHH", chunk)
+    day = (time_word >> DAY_SHIFT) & DAY_MASK
+    hour = (time_word >> HOUR_SHIFT) & HOUR_MASK
+    minute = (time_word >> MIN_SHIFT) & MIN_MASK
+    ms = time_word & MS_MASK
+    abs_ms = day * MS_PER_DAY + hour * MS_PER_HOUR + minute * MS_PER_MIN + ms
+    return SysLogRecord(seq, day, hour, minute, ms, abs_ms, log_id, value)
+
+
 def parse_log(data: bytes) -> list[SysLogRecord]:
     """8바이트씩 빅엔디안으로 파싱한다. 끝에 8바이트 미만이 남으면(잘린
     파일) 그 나머지는 조용히 버린다 -- 파일 끝단의 자연스러운 경계 상황이지
@@ -101,14 +114,54 @@ def parse_log(data: bytes) -> list[SysLogRecord]:
     count = len(data) // RECORD_SIZE
     for i in range(count):
         chunk = data[i * RECORD_SIZE : i * RECORD_SIZE + RECORD_SIZE]
-        time_word, log_id, value = struct.unpack(">IHH", chunk)
-        day = (time_word >> DAY_SHIFT) & DAY_MASK
-        hour = (time_word >> HOUR_SHIFT) & HOUR_MASK
-        minute = (time_word >> MIN_SHIFT) & MIN_MASK
-        ms = time_word & MS_MASK
-        abs_ms = day * MS_PER_DAY + hour * MS_PER_HOUR + minute * MS_PER_MIN + ms
-        records.append(SysLogRecord(i, day, hour, minute, ms, abs_ms, log_id, value))
+        records.append(_decode_record(chunk, i))
     return records
+
+
+# ASCII hex-dump 한 줄: 8바이트 hex (대소문자 무관, 공백/탭 구분)
+_ASCII_LINE_RE = re.compile(r"^[0-9A-Fa-f]{2}(?:[ \t]+[0-9A-Fa-f]{2}){7}[ \t]*$")
+
+
+def parse_ascii_log(text: str) -> list[SysLogRecord]:
+    """ASCII hex-dump 텍스트를 파싱한다 (예: RS4PE_Log_*.txt -- 한 줄에
+    8바이트 hex).     빈 줄은 건너뛰고, 형식에 안 맞는 줄이 있으면 줄 번호와
+    함께 ValueError를 올린다. 레코드 번호(seq)는 유효 레코드 순서대로
+    0부터 매긴다."""
+    text = text.lstrip("\ufeff")
+    records = []
+    for lineno, line in enumerate(text.splitlines(), start=1):
+        if not line.strip():
+            continue
+        tokens = line.split()
+        if len(tokens) != RECORD_SIZE or not _ASCII_LINE_RE.match(line):
+            raise ValueError(f"{lineno}번째 줄 형식 오류: 8바이트 hex가 아닙니다")
+        try:
+            chunk = bytes(int(t, 16) for t in tokens)
+        except ValueError:
+            raise ValueError(f"{lineno}번째 줄 형식 오류: 8바이트 hex가 아닙니다")
+        records.append(_decode_record(chunk, len(records)))
+    return records
+
+
+def sniff_ascii(data: bytes) -> str | None:
+    """업로드 바이트가 ASCII hex-dump이면 디코딩된 텍스트를, 아니면 None을
+    돌려준다. 빈 줄을 제외한 모든 줄이 hex 패턴이고 1행 이상이어야 한다 --
+    빈 파일은 바이너리 경로(0건)로 간다."""
+    try:
+        text = data.decode("utf-8-sig")
+    except (UnicodeDecodeError, ValueError):
+        return None
+    lines = [line for line in text.splitlines() if line.strip()]
+    if not lines:
+        return None
+    if all(_ASCII_LINE_RE.match(line) for line in lines):
+        return text
+    return None
+
+
+# sniff에는 안 걸리지만 텍스트 파일 확장자인 경우: 바이너리 오판 대신 명확한
+# 400 에러를 내기 위한 힌트 (load_log에서 사용).
+_TEXT_SUFFIXES = {".txt", ".text", ".log", ".asc"}
 
 
 def parse_db(text: str) -> dict[int, str]:
@@ -247,7 +300,21 @@ class SysLogService:
         self._db_filename: str | None = None
 
     def load_log(self, data: bytes, filename: str) -> dict:
-        self._records = parse_log(data)
+        text = sniff_ascii(data)
+        if text is not None:
+            self._records = parse_ascii_log(text)
+        else:
+            suffix = Path(filename or "").suffix.lower()
+            if suffix in _TEXT_SUFFIXES:
+                try:
+                    data.decode("utf-8-sig")
+                except (UnicodeDecodeError, ValueError):
+                    pass
+                else:
+                    raise ValueError(
+                        "ASCII hex 형식(한 줄에 8바이트 hex)이 아닙니다"
+                    )
+            self._records = parse_log(data)
         self._log_filename = filename
         self._series_cache = None
         return {"filename": filename, "record_count": len(self._records)}

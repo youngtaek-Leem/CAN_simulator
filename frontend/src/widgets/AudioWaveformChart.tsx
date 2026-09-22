@@ -385,6 +385,22 @@ export function AudioWaveformChart({
     }
   };
 
+  // Header Y+/Y- buttons: center-anchored multiplicative zoom of this
+  // chart's own Y view (same ZOOM_STEP as wheel zoom). Materializes the
+  // currently drawn auto range first when no manual zoom is active yet.
+  const zoomYButton = (factor: number) => {
+    const yv = yViewRef.current;
+    const g = lastGeomRef.current;
+    const yMin = yv.yMin ?? g.yMin;
+    const yMax = yv.yMax ?? g.yMax;
+    if (!Number.isFinite(yMin) || !Number.isFinite(yMax) || yMax <= yMin) return;
+    const center = (yMin + yMax) / 2;
+    const half = Math.max(((yMax - yMin) / 2) * factor, 1e-6);
+    yv.yMin = center - half;
+    yv.yMax = center + half;
+    notifyChange();
+  };
+
   // keep the rolling window scrolling forward even between polls, while
   // live -- only for a standalone chart; a shared-X chart is kept ticking
   // by whatever else drives xVersion (e.g. a sibling CAN chart's own timer).
@@ -743,6 +759,12 @@ export function AudioWaveformChart({
         <span className="graph-swatch" style={{ background: color }} />
         <span className="graph-chart-title">CH{channelIndex + 1}</span>
         <span className="spacer" />
+        <button className="icon-btn" title="Y축 확대" onClick={() => zoomYButton(1 / ZOOM_STEP)}>
+          Y+
+        </button>
+        <button className="icon-btn" title="Y축 축소" onClick={() => zoomYButton(ZOOM_STEP)}>
+          Y−
+        </button>
         <button className="icon-btn" title={resetTitle} onClick={resetView}>
           ⟲
         </button>

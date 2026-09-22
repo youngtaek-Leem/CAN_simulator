@@ -58,11 +58,21 @@ _AUTO_TICK_S = 0.2
 
 
 class PowerSupplyService:
-    def __init__(self):
+    def __init__(self, is_busy=None):
         self.status = 0x3  # ACC+IGN On, matches AppTest.py's initial state
         self.initialized = False
         self.error: Optional[str] = None
         self._inst = None
+        # PyVISA 세션은 스레드-안전하지 않아 모든 I/O를 이 락으로 직렬화한다
+        # (자동루프 스레드 + 측정 폴링 + 사용자 명령이 동시에 들어올 수 있음).
+        self._visa_lock = threading.Lock()
+        # 고부하 작업(SWDL 등) 중 실시간 측정을 스킵하기 위한 콜백. True를
+        # 돌려주면 measure()는 측정 없이 마지막 값을 유지한다. main.py에서
+        # 주입하며, 없으면 항상 측정한다.
+        self._is_busy = is_busy
+        # 마지막 실측값 (미연결/실패 시 None 유지, 위젯이 "—" 표시)
+        self._measured_voltage: Optional[float] = None
+        self._measured_current: Optional[float] = None
 
         # Last commanded battery voltage/current -- there is no SCPI
         # read-back (measure) command in use here, so this is purely
@@ -100,15 +110,45 @@ class PowerSupplyService:
         """Runs a PyVISA call (write/query/close) with timing -- logs (rate-
         limited) if it takes longer than _SLOW_VISA_MS. VISA round-trips
         block the calling thread for however long the instrument/driver
-        takes to respond, with no timeout of their own."""
-        t0 = time.perf_counter()
-        result = fn(*args)
-        dur_ms = (time.perf_counter() - t0) * 1000.0
+        takes to respond, with no timeout of their own. Serialized by
+        _visa_lock: PyVISA sessions are not thread-safe."""
+        with self._visa_lock:
+            t0 = time.perf_counter()
+            result = fn(*args)
+            dur_ms = (time.perf_counter() - t0) * 1000.0
         if dur_ms > _SLOW_VISA_MS:
             n = diag_log.should_log(f"power.visa.{label}")
             if n >= 0:
                 logger.warning("%s took %.0fms%s", label, dur_ms, diag_log.suffix(n))
         return result
+
+    def measure(self) -> dict:
+        """실제 출력 전압/전류를 SCPI로 측정한다 (위젯 실시간 표시용).
+
+        고부하 작업 중(_is_busy 콜백)에는 측정 없이 마지막 값을 유지한다.
+        기기가 MEASure를 지원하지 않으면 에러를 기록하고 마지막 값을 유지한다
+        (graceful degradation -- 위젯이 "—" 또는 마지막값을 표시).
+        """
+        if not self.initialized or self._inst is None:
+            return {"ok": False, "reason": "not-connected",
+                    "voltage": self._measured_voltage, "current": self._measured_current}
+        if self._is_busy is not None:
+            try:
+                if self._is_busy():
+                    return {"ok": False, "reason": "busy",
+                            "voltage": self._measured_voltage, "current": self._measured_current}
+            except Exception:
+                pass
+        try:
+            voltage = float(self._query("MEASure:VOLTage?"))
+            current = float(self._query("MEASure:CURRent?"))
+        except Exception as exc:
+            self.error = f"측정 실패: {exc}"
+            return {"ok": False, "reason": str(exc),
+                    "voltage": self._measured_voltage, "current": self._measured_current}
+        self._measured_voltage = voltage
+        self._measured_current = current
+        return {"ok": True, "voltage": voltage, "current": current}
 
     def _write(self, cmd: str) -> None:
         self._timed_visa_call(f"write({cmd!r})", self._inst.write, cmd)

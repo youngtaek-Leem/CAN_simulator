@@ -997,7 +997,9 @@ def test_uds_request_with_retry_no_send_floor_when_stmin_checkbox_off():
 
     mgr._uds_request_with_retry(bytearray([0x36, 0x01, 0xAA]), 0.05, "TransferData(seq=1)")
 
-    assert sent_kwargs["min_stmin_s"] == 0.0
+    import ota_tester_download_manager as otdm
+
+    assert sent_kwargs["min_stmin_s"] == otdm.TRANSFER_BLOCK_MIN_GAP_S
 
 
 # ---- Standalone <delay> step execution -------------------------------------
@@ -1139,3 +1141,39 @@ def test_transfer_data_no_retry_on_transport_error(monkeypatch):
             {"seekAddress": "0x00000000", "writeSize": "0x00000002"},
         )
     assert len(calls) == 1
+
+
+def test_transfer_data_retries_timeout_then_succeeds(monkeypatch):
+    """A response timeout resends the identical block like an NRC does."""
+    from uds_core import UdsError
+
+    def timeout_err():
+        return UdsError("ISO-TP 수신 실패 (TransferData): 응답 프레임을 기다리다 시간 초과되었습니다")
+
+    mgr = _bare_ota_manager()
+    calls = _scripted_ota_transport(monkeypatch, mgr, [timeout_err(), None])
+    mgr._execute_transfer_data(
+        _ota_case(bytes([0xAA, 0xBB])),
+        {"seekAddress": "0x00000000", "writeSize": "0x00000002"},
+    )
+    assert len(calls) == 2
+    assert calls[0] == calls[1]
+
+
+def test_transfer_data_aborts_after_timeout_retries_exhausted(monkeypatch):
+    from uds_core import UdsError
+
+    def timeout_err():
+        return UdsError("ISO-TP 수신 실패 (TransferData): 응답 프레임을 기다리다 시간 초과되었습니다")
+
+    mgr = _bare_ota_manager()
+    mgr._last_send_stats = {"sent": True, "frames_sent": 37, "duration_ms": 9.1}
+    calls = _scripted_ota_transport(monkeypatch, mgr, [timeout_err()] * 4)
+    with pytest.raises(UdsError):
+        mgr._execute_transfer_data(
+            _ota_case(bytes([0xAA, 0xBB])),
+            {"seekAddress": "0x00000000", "writeSize": "0x00000002"},
+        )
+    assert len(calls) == 4  # initial + 3 retries
+    errors = [e for e in mgr._events if e.get("level") == "ERROR"]
+    assert errors and "(송신 37프레임/9.1ms)" in errors[-1]["msg"]

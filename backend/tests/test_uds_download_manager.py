@@ -536,10 +536,10 @@ def test_uds_request_with_retry_passes_configured_stmin_as_send_floor():
 
 def test_uds_request_with_retry_no_send_floor_when_stmin_checkbox_off():
     """Unchecking the "STmin" checkbox (no _global_stmin_tx override) must
-    go back to sending as fast as the ECU's own Flow Control allows -- the
-    XML's own stmin_tx default (used for our own FC when *receiving*) must
-    not leak into the send-side floor, or unchecking the box would no
-    longer restore the original (pre-floor) fastest-possible send speed."""
+    not leak the XML's own stmin_tx default (used for our own FC when
+    *receiving*) into the send-side floor -- only the small
+    TRANSFER_BLOCK_MIN_GAP_S anti-burst floor applies, or unchecking the
+    box would no longer restore the original fastest-possible send speed."""
     sent_kwargs = {}
 
     def fake_send(can, tx_id, rx_id, request, **kw):
@@ -559,7 +559,27 @@ def test_uds_request_with_retry_no_send_floor_when_stmin_checkbox_off():
 
     mgr._uds_request_with_retry(bytearray([0x36, 0x01, 0xAA]), 0.05, "TransferData(seq=1)")
 
-    assert sent_kwargs["min_stmin_s"] == 0.0
+    assert sent_kwargs["min_stmin_s"] == udm.TRANSFER_BLOCK_MIN_GAP_S
+
+
+def test_send_floor_prefers_larger_global_stmin_override():
+    """An explicit STmin override larger than the anti-burst gap still wins."""
+    sent_kwargs = {}
+
+    def fake_send(can, tx_id, rx_id, request, **kw):
+        sent_kwargs.update(kw)
+        return {"sent": True}
+
+    def fake_receive(can, rx_id, tx_id, **kw):
+        return bytes([0x76, 0x01])
+
+    can = type("FakeCan", (), {"notifier": _FakeNotifier()})()
+    mgr = _manager(fake_send, fake_receive)
+    mgr._global_stmin_tx = 0x05  # 5ms > 0.2ms gap
+
+    mgr._uds_request_with_retry(bytearray([0x36, 0x01, 0xAA]), 0.05, "TransferData(seq=1)")
+
+    assert sent_kwargs["min_stmin_s"] == pytest.approx(0.005)
 
 
 # ---- TransferData per-block NRC retransmission ------------------------------
@@ -628,3 +648,115 @@ def test_transfer_data_no_retry_on_transport_error(monkeypatch):
             "seekAddress": "0x00000000", "writeSize": "0x00000003",
         }))
     assert len(calls) == 1
+
+
+def test_transfer_data_retries_timeout_then_succeeds(monkeypatch):
+    """A response timeout (DUT silent, e.g. lost tail frames) resends the
+    identical block like an NRC does."""
+    from uds_core import UdsError
+
+    def timeout_err():
+        return UdsError("ISO-TP 수신 실패 (TransferData): 응답 프레임을 기다리다 시간 초과되었습니다")
+
+    mgr = _manager(lambda *a, **k: {"sent": True}, lambda *a, **k: b"")
+    mgr._binary_data = bytes([0x11, 0x22, 0x33])
+    calls = _scripted_transport(monkeypatch, mgr, [timeout_err(), timeout_err(), None])
+    mgr._execute_transfer_data(UdsStep(service="transferData", params={
+        "seekAddress": "0x00000000", "writeSize": "0x00000003",
+    }))
+    assert len(calls) == 3
+    assert calls[0] == calls[1] == calls[2]
+
+
+def test_transfer_data_aborts_after_timeout_retries_exhausted(monkeypatch):
+    from uds_core import UdsError
+
+    def timeout_err():
+        return UdsError("ISO-TP 수신 실패 (TransferData): 응답 프레임을 기다리다 시간 초과되었습니다")
+
+    mgr = _manager(lambda *a, **k: {"sent": True}, lambda *a, **k: b"")
+    mgr._binary_data = bytes([0x11, 0x22, 0x33])
+    mgr._last_send_stats = {"sent": True, "frames_sent": 37, "duration_ms": 12.4}
+    calls = _scripted_transport(monkeypatch, mgr, [timeout_err()] * 4)
+    with pytest.raises(UdsError):
+        mgr._execute_transfer_data(UdsStep(service="transferData", params={
+            "seekAddress": "0x00000000", "writeSize": "0x00000003",
+        }))
+    assert len(calls) == 4  # initial + 3 retries
+    errors = [e for e in mgr._events if e.get("level") == "ERROR"]
+    assert errors and "(송신 37프레임/12.4ms)" in errors[-1]["msg"]
+
+
+# ---- Multi-slot sequential start + stop_all cancellation --------------------
+
+
+class _StubSlot:
+    def __init__(self):
+        self.running = False
+        self.start_calls: list = []
+        self.stop_calls = 0
+        self.logs: list = []
+
+    def start(self, selected_steps=None, modified_params=None):
+        self.start_calls.append((selected_steps, modified_params))
+        self.running = True
+        return {"state": "RUNNING"}
+
+    def stop(self):
+        self.stop_calls += 1
+        self.running = False
+        return {"state": "IDLE"}
+
+    def _log(self, **fields):
+        self.logs.append(fields)
+
+
+def _stub_multi():
+    from uds_download_manager import MultiUdsDownloadManager
+
+    can = type("FakeCan", (), {"notifier": _FakeNotifier()})()
+    multi = MultiUdsDownloadManager(can, lambda *a, **k: None, lambda *a, **k: b"")
+    multi._managers = [_StubSlot() for _ in range(3)]
+    return multi
+
+
+def test_stop_all_cancels_queued_sequential_start():
+    import time
+
+    multi = _stub_multi()
+    multi._managers[0].running = True  # long-running first slot
+    results = multi.start_all([0, 1])
+    assert results[0]["success"] is True
+    time.sleep(0.05)  # let the orchestrator thread reach its wait loop
+    stopped = multi.stop_all([0, 1])
+    assert all(r["success"] is True for r in stopped)
+    time.sleep(0.3)  # orchestrator would have started slot 1 by now
+    assert multi._managers[0].start_calls and len(multi._managers[0].start_calls) == 1
+    assert multi._managers[1].start_calls == [], "queued slot must not start after stop_all"
+    assert multi._managers[0].stop_calls == 1 and multi._managers[1].stop_calls == 1
+
+
+def test_new_start_all_supersedes_previous_sequence():
+    import time
+
+    multi = _stub_multi()
+    multi._managers[0].running = True
+    multi.start_all([0, 1])
+    time.sleep(0.05)
+    multi.start_all([0])  # bumps the sequence token
+    time.sleep(0.3)
+    assert multi._managers[1].start_calls == [], "old sequence must not start slot 1"
+
+
+def test_start_all_without_stop_starts_queued_slot():
+    import time
+
+    multi = _stub_multi()
+    multi._managers[0].running = True
+    multi.start_all([0, 1])
+    time.sleep(0.05)
+    multi._managers[0].running = False  # first slot finishes naturally
+    deadline = time.time() + 2.0
+    while not multi._managers[1].start_calls and time.time() < deadline:
+        time.sleep(0.05)
+    assert len(multi._managers[1].start_calls) == 1, "queued slot must start when undisturbed"

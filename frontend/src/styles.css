@@ -525,6 +525,96 @@ td.empty {
   flex-wrap: wrap;
 }
 
+/* TxBox split view: message list (top) + selected message's signals (bottom) */
+.tx-box {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+.tx-split-top {
+  overflow: auto;
+  flex: none;
+  min-height: 80px;
+}
+.tx-split-bottom {
+  overflow: auto;
+  flex: 1 1 auto;
+  min-height: 60px;
+  border-top: 1px solid var(--border);
+  padding-top: 6px;
+  margin-top: 6px;
+}
+.tx-table tbody tr {
+  cursor: pointer;
+}
+.tx-table tr.tx-row-selected td {
+  background: rgba(59, 130, 246, 0.14);
+}
+.tx-detail-title {
+  font-weight: 600;
+  font-size: 12px;
+  margin-bottom: 4px;
+}
+.tx-signal-search {
+  position: relative;
+}
+.tx-search-results {
+  position: absolute;
+  z-index: 20;
+  min-width: 260px;
+  max-width: 340px;
+  max-height: 240px;
+  overflow: auto;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px;
+}
+.tx-search-hit {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  padding: 2px 6px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.tx-search-hit:hover {
+  background: rgba(59, 130, 246, 0.14);
+}
+
+/* TxBox VAL_ 콤보 (선택지 전체 표시 + 직접 입력) */
+.tx-combo {
+  position: relative;
+  display: inline-flex;
+  gap: 2px;
+  align-items: center;
+}
+.tx-combo-list {
+  position: absolute;
+  z-index: 20;
+  top: 100%;
+  left: 0;
+  min-width: 200px;
+  max-height: 220px;
+  overflow: auto;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px;
+}
+.tx-combo-hit {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  padding: 2px 6px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.tx-combo-hit:hover {
+  background: rgba(59, 130, 246, 0.14);
+}
+
 .msg-toolbar button {
   white-space: nowrap;
 }
@@ -712,12 +802,13 @@ td.empty {
 .tx-signal-row {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 5px;
 }
 
+/* 고정 폭: full name 표시 + 전 행의 값 입력칸을 같은 x에 정렬 */
 .tx-signal-name {
-  min-width: 90px;
-  max-width: 140px;
+  width: 250px;
+  flex: none;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -727,10 +818,35 @@ td.empty {
 .tx-signal-input {
   width: 90px;
   flex: none;
+  text-align: right;
 }
 
 select.tx-signal-input {
   width: 130px;
+}
+
+/* 토글 2번째 값 행: 살짝 들여쓰기 */
+.tx-toggle-row {
+  padding-left: 12px;
+}
+
+/* TxBox 상/하 분할 드래그 핸들 -- mousedown 후 window mousemove로 조절 */
+.tx-split-drag {
+  flex: none;
+  height: 9px;
+  display: flex;
+  align-items: center;
+  cursor: row-resize;
+}
+.tx-split-drag::after {
+  content: '';
+  height: 3px;
+  flex: 1;
+  background: var(--border);
+  border-radius: 2px;
+}
+.tx-split-drag:hover::after {
+  background: var(--accent);
 }
 
 .fd-controls {

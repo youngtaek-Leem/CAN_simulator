@@ -337,6 +337,17 @@ export default function UdsSwdlWidget({ config }: Props) {
     } catch { /* ignore */ }
   };
 
+  // Stop every slot (running ones stop, queued ones never start -- the
+  // backend sequence token is invalidated by stop_all). Polling observes
+  // the actual completion like it does for Start.
+  const stopAll = async () => {
+    try {
+      await api.udsStopAll([0, 1, 2]);
+      const all = await api.udsStatus();
+      setSlots(prev => prev.map((s, i) => ({ ...s, status: all[i] || s.status })));
+    } catch { /* ignore */ }
+  };
+
   const refresh = async () => {
     try {
       const all = await api.udsStatus();
@@ -353,6 +364,9 @@ export default function UdsSwdlWidget({ config }: Props) {
   // Running is driven by backend status (kept fresh by polling), not by a
   // local flag that flips to "done" the instant the start POST returns.
   const anyRunning = slots.some(s => s.status?.running) || starting;
+  // Start needs at least one fully loaded slot (matching startAll's own
+  // guard) -- not all three, so a partially loaded package is still usable.
+  const readyCount = slots.filter(s => s.status?.procedure_loaded && s.status?.binary_loaded).length;
   const allReady = slots.every(s => s.status?.procedure_loaded && s.status?.binary_loaded);
 
   return (
@@ -408,13 +422,19 @@ export default function UdsSwdlWidget({ config }: Props) {
                   if (!xmlFile) continue;
                   newSlots[slotIdx].xmlFile = xmlFile;
 
-                  // Read XML content to extract <information:romInfo>
+                  // Read XML content to extract the BIN filename: legacy
+                  // <information:romInfo>, falling back to <xfrm:rom> used by
+                  // H-OTA package XMLs (e.g. RG3HEV_*.xml) which carry no
+                  // romInfo -- without this no BIN is matched and Start
+                  // stays disabled (binary_loaded never becomes true).
                   const xmlText = await xmlFile.text();
                   const parser = new DOMParser();
                   const doc = parser.parseFromString(xmlText, 'text/xml');
                   const romInfoNodes = doc.getElementsByTagNameNS('http://gitauto.com/information/', 'romInfo');
-                  if (romInfoNodes.length > 0 && romInfoNodes[0].textContent) {
-                    const romPath = romInfoNodes[0].textContent.trim();
+                  const xfrmRomNodes = doc.getElementsByTagNameNS('http://gitauto.com/xfrm/', 'rom');
+                  const romNode = romInfoNodes.length > 0 ? romInfoNodes[0] : xfrmRomNodes.length > 0 ? xfrmRomNodes[0] : null;
+                  if (romNode && romNode.textContent) {
+                    const romPath = romNode.textContent.trim();
                     const binName = romPath.replace(/\\/g, '/').split('/').pop()!;
                     const binFile = files.find(ff => ff.name === binName);
                     if (binFile) {
@@ -699,11 +719,22 @@ export default function UdsSwdlWidget({ config }: Props) {
         ))}
       </div>
 
-      {/* Start All button */}
+      {/* Start / Stop buttons (mirrors the OTA Tester widget) */}
       <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-        <button onClick={startAll} disabled={!allReady || anyRunning}
-          style={{ padding: '4px 16px', backgroundColor: anyRunning ? '#d1d5db' : '#10b981', color: '#fff', border: 'none', borderRadius: '4px', cursor: anyRunning ? 'not-allowed' : 'pointer', fontSize: '12px', fontWeight: 600 }}>
-          ▶ 전체 시작
+        <button onClick={startAll} disabled={readyCount === 0 || anyRunning}
+          style={{
+            width: '80px', padding: 8, backgroundColor: '#10b981', color: '#fff', border: 'none', borderRadius: 4,
+            cursor: (readyCount === 0 || anyRunning) ? 'not-allowed' : 'pointer',
+            opacity: (readyCount === 0 || anyRunning) ? 0.5 : 1, fontWeight: 400,
+          }}>
+          ▶ Start
+        </button>
+        <button onClick={stopAll} disabled={!anyRunning}
+          style={{
+            width: '80px', padding: 8, backgroundColor: '#ef4444', color: '#fff', border: 'none', borderRadius: 4,
+            cursor: anyRunning ? 'pointer' : 'not-allowed', opacity: anyRunning ? 1 : 0.5, fontWeight: 400,
+          }}>
+          ⏹ Stop
         </button>
       </div>
     </div>

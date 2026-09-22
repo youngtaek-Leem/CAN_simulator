@@ -258,3 +258,96 @@ def test_disconnect_stops_both_auto_modes():
     svc.start_onoff_repeat(12.0, 5, 1, 0.0, 0, 1)
     svc.disconnect()
     assert svc.info()["onoff"]["enabled"] is False
+
+
+# ---- Realtime measurement (widget 200ms poll) -------------------------------
+
+
+class _MeasInst:
+    def __init__(self, voltage="14.402", current="9.876"):
+        self.voltage = voltage
+        self.current = current
+        self.queries: list[str] = []
+        self.writes: list[str] = []
+
+    def write(self, cmd):
+        self.writes.append(cmd)
+
+    def query(self, cmd):
+        self.queries.append(cmd)
+        if "VOLT" in cmd.upper():
+            return self.voltage
+        if "CURR" in cmd.upper():
+            return self.current
+        raise ValueError(f"unsupported: {cmd}")
+
+
+def _measured() -> PowerSupplyService:
+    svc = PowerSupplyService()
+    svc.initialized = True
+    svc._inst = _MeasInst()
+    return svc
+
+
+def test_measure_returns_voltage_current():
+    svc = _measured()
+    r = svc.measure()
+    assert r == {"ok": True, "voltage": 14.402, "current": 9.876}
+    assert svc._measured_voltage == 14.402 and svc._measured_current == 9.876
+
+
+def test_measure_not_connected():
+    svc = PowerSupplyService()
+    r = svc.measure()
+    assert r["ok"] is False and r["reason"] == "not-connected"
+    assert r["voltage"] is None and r["current"] is None
+
+
+def test_measure_skipped_when_busy():
+    svc = _measured()
+    svc._is_busy = lambda: True
+    r = svc.measure()
+    assert r["ok"] is False and r["reason"] == "busy"
+    assert svc._inst.queries == []  # no VISA traffic at all
+    # last values kept (None here -- never measured)
+    assert r["voltage"] is None
+
+
+def test_measure_unsupported_keeps_last_values():
+    svc = _measured()
+    assert svc.measure()["ok"] is True
+    svc._inst.query = lambda cmd: (_ for _ in ()).throw(RuntimeError("Undefined header"))
+    r = svc.measure()
+    assert r["ok"] is False
+    assert r["voltage"] == 14.402 and r["current"] == 9.876  # last good kept
+    assert svc.error  # surfaced for the widget hint
+
+
+def test_visa_calls_serialized_by_lock():
+    import threading
+    import time
+
+    active = {"n": 0, "max": 0}
+    lock = threading.Lock()
+
+    class SlowInst(_MeasInst):
+        def query(self, cmd):
+            with lock:
+                active["n"] += 1
+                active["max"] = max(active["max"], active["n"])
+            try:
+                time.sleep(0.01)
+                return super().query(cmd)
+            finally:
+                with lock:
+                    active["n"] -= 1
+
+    svc = PowerSupplyService()
+    svc.initialized = True
+    svc._inst = SlowInst()
+    threads = [threading.Thread(target=svc.measure) for _ in range(5)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert active["max"] == 1

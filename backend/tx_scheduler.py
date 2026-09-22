@@ -110,6 +110,19 @@ class TxScheduler:
         self._oneshots: list[tuple[float, int, Callable[[], None]]] = []
         # message_name -> signal_name -> generator producing a raw int value
         self._value_generators: dict[str, dict[str, Callable[[], int]]] = {}
+        # TxBox signal-value toggle ("토글"): message_name -> {"a": {...},
+        # "b": {...}} scaled value sets plus a flip phase. Each transmission
+        # of the message (one-shot or periodic tick) sends the current phase
+        # set for the toggled signals, then flips -- so the two values
+        # alternate. Only TxBox rows with per-signal toggle enabled populate
+        # this; every other caller behaves exactly as before.
+        self._toggle_values: dict[str, dict[str, dict[str, Any]]] = {}
+        self._toggle_phase: dict[str, bool] = {}
+        # Row keys with a TxBox periodic entry in _auto_entries (row-keyed,
+        # unlike message-keyed widget auto entries). Ticks for these rows
+        # follow one-shot event semantics (30ms-invalid follow-up per valid
+        # Event signal); other auto entries are untouched.
+        self._row_entry_keys: set[str] = set()
         # Signals with a RUNNING Random/Range transmission. Registration
         # alone (widget mount / config save) must NOT randomize a signal:
         # the periodic auto-resend tick only invokes generators in this
@@ -229,15 +242,86 @@ class TxScheduler:
             self._upsert_auto(message)
         return send_type
 
-    def send_signal(self, message_name: str, values: dict[str, Any]) -> dict:
-        """Send DBC signal values following the Event/Periodic rule."""
+    def _store_toggle(self, message_name: str, values: dict[str, Any],
+                        values_alt: Optional[dict[str, Any]],
+                        reset_phase: bool = False) -> None:
+        """(Re)configure the toggle sets for a message. values_alt=None
+        clears a previously stored toggle (TxBox apply() always reflects the
+        current UI toggle state). reset_phase=True restarts the alternation
+        at the A set (used by preset = fresh configuration)."""
+        with self._lock:
+            if values_alt is None:
+                self._toggle_values.pop(message_name, None)
+                self._toggle_phase.pop(message_name, None)
+            elif values_alt:
+                self._toggle_values[message_name] = {
+                    "a": dict(values),
+                    "b": dict(values_alt),
+                }
+                if reset_phase:
+                    self._toggle_phase[message_name] = False
+
+    def _take_toggle_explicit(self, message_name: str) -> dict[str, Any]:
+        """Current-phase toggle values for a message transmission, flipping
+        the phase. Empty when no toggle is configured."""
+        with self._lock:
+            stored = self._toggle_values.get(message_name)
+            if not stored:
+                return {}
+            phase = self._toggle_phase.get(message_name, False)
+            self._toggle_phase[message_name] = not phase
+            current = stored["b"] if phase else stored["a"]
+            return dict(current)
+
+    @staticmethod
+    def _scaled_to_raw(message, signal_name: str, phys: Any) -> int:
+        sig = next(s for s in message.signals if s.name == signal_name)
+        scale = float(sig.scale)
+        if scale == 0:
+            return int(phys)
+        return int(round((float(phys) - float(sig.offset)) / scale))
+
+    def send_signal(self, message_name: str, values: dict[str, Any],
+                    values_alt: Optional[dict[str, Any]] = None,
+                    once: bool = False) -> dict:
+        """Send DBC signal values following the Event/Periodic rule.
+
+        values_alt (optional): TxBox toggle second set. Stored (with values
+        as the first set) and this transmission uses the current phase set,
+        then flips -- so repeated sends alternate A/B/A/... Omitted entirely
+        (None) leaves any previously stored toggle untouched, so one-shot
+        sends from other widgets never disturb a TxBox toggle.
+
+        once=True: exactly one frame (plus the Event 30ms-invalid follow-up
+        for Event signals) -- no periodic auto-entry is armed, for Periodic
+        and Event alike. Used by the TxBox Send button."""
         message = self._dbc.get_message(message_name)
-        data = self._dbc.encode_with_values(message_name, values)
+        if values_alt is not None:
+            self._store_toggle(message_name, values, values_alt)
+            toggled = self._take_toggle_explicit(message_name)
+            send_values = {**values, **toggled}
+        else:
+            send_values = values
+        data = self._dbc.encode_with_values(message_name, send_values)
         self._send_frame(message, data)
 
         result: dict[str, Any] = {"sent": True, "signals": {}}
-        for signal_name in values:
-            result["signals"][signal_name] = self._dispatch_send_type(message, signal_name)
+        # At most ONE invalid follow-up per transmission: encode_invalid()
+        # produces the identical whole-frame-invalid bytes regardless of
+        # which signal triggers it, so per-signal scheduling only emitted
+        # duplicates (1 valid + N invalid for an N-signal Event message).
+        followup_scheduled = False
+        for signal_name in send_values:
+            send_type = self._dbc.signal_send_type(message.name, signal_name)
+            if send_type == "event":
+                if not followup_scheduled:
+                    self._schedule_invalid(message, signal_name)
+                    followup_scheduled = True
+            elif not once:
+                self._upsert_auto(message)
+            result["signals"][signal_name] = send_type
+        if values_alt:
+            result["toggled"] = True
         return result
 
     def send_signal_invalid_first(self, message_name: str, values: dict[str, Any]) -> dict:
@@ -336,13 +420,19 @@ class TxScheduler:
             result["signals"][signal_name] = "periodic"
         return result
 
-    def preset_signal(self, message_name: str, values: dict[str, Any]) -> dict:
+    def preset_signal(self, message_name: str, values: dict[str, Any],
+                      values_alt: Optional[dict[str, Any]] = None) -> dict:
         """Seed DBC signal state WITHOUT transmitting -- the TX box's signal
         editor stores per-row values here on apply, so the scheduler's later
         periodic resend (Start) and one-shot send_signal (Send) pick them up.
         Unlike send_signal this arms nothing: no immediate frame, no
-        auto-entry, no 30ms-invalid follow-up."""
+        auto-entry, no 30ms-invalid follow-up. values_alt stores the TxBox
+        toggle B set (alternation restarts at A); None clears a previously
+        stored toggle."""
         self._dbc.encode_with_values(message_name, values)
+        # Always reconciles the toggle store (None clears): apply() reflects
+        # the current UI toggle state, so a removed toggle must not linger.
+        self._store_toggle(message_name, values, values_alt, reset_phase=True)
         return {"preset": True, "message_name": message_name, "signals": sorted(values)}
 
     # ---- Random/Range value generators ("Random 버튼" widget) -------------
@@ -577,6 +667,91 @@ class TxScheduler:
             else:
                 entry.period_ms = period
 
+    def row_periodic_start(self, key: str, message_name: Optional[str] = None,
+                             values: Optional[dict[str, Any]] = None,
+                             values_alt: Optional[dict[str, Any]] = None,
+                             period_ms: float = 100.0,
+                             data_hex: Optional[str] = None,
+                             arbitration_id: Optional[int] = None,
+                             is_extended: bool = False,
+                             is_fd: bool = False,
+                             bitrate_switch: bool = False) -> dict:
+        """Start per-row periodic transmission (TxBox Send toggle on).
+        DBC rows persist the values (toggle alternation restarts at A) and
+        arm a row-keyed auto entry at the row's own period; raw rows arm the
+        same with a fixed payload. One frame goes out immediately. Other
+        rows and other widgets' auto entries are unaffected -- several rows
+        may even transmit the same message at different periods."""
+        period = max(1.0, float(period_ms))
+        if message_name:
+            message = self._dbc.get_message(message_name)
+            if not values:
+                raise ValueError("전송할 신호 값이 없습니다")
+            self._dbc.encode_with_values(message_name, values)
+            if values_alt is not None:
+                self._store_toggle(message_name, values, values_alt, reset_phase=True)
+            # Immediate frame uses the current toggle phase (A first), like a
+            # one-shot send, so the sequence starts A,B,A,... with no repeat
+            # -- including its single Event invalid follow-up when applicable.
+            toggled = self._take_toggle_explicit(message_name)
+            send_values = {**values, **toggled}
+            data = self._dbc.encode_with_values(message_name, send_values)
+            self._send_frame(message, data)
+            try:
+                sent_raw = self._dbc.decode_raw(message.frame_id, bytes(data))
+            except Exception:
+                sent_raw = None
+            if sent_raw:
+                for s in message.signals:
+                    if (
+                        s.name in send_values
+                        and self._dbc.signal_send_type(message.name, s.name) == "event"
+                        and sent_raw.get(s.name) != (1 << s.length) - 1
+                    ):
+                        self._schedule_invalid(message, s.name)
+                        break
+            entry = TxEntry(
+                key=key,
+                arbitration_id=message.frame_id,
+                period_ms=period,
+                is_extended=message.is_extended_frame,
+                message_name=message.name,
+                is_fd=message.is_fd,
+                bitrate_switch=message.is_fd,
+            )
+        else:
+            if data_hex is None or arbitration_id is None:
+                raise ValueError("raw 행은 data_hex와 arbitration_id가 필요합니다")
+            try:
+                raw = bytes.fromhex(str(data_hex).replace(" ", ""))
+            except ValueError:
+                raise ValueError("잘못된 hex 데이터입니다")
+            _validate_raw_payload(raw, is_fd)
+            self._can.send(int(arbitration_id), raw, is_extended,
+                           is_fd=is_fd, bitrate_switch=bitrate_switch)
+            entry = TxEntry(
+                key=key,
+                arbitration_id=int(arbitration_id),
+                period_ms=period,
+                is_extended=is_extended,
+                data=raw,
+                is_fd=is_fd,
+                bitrate_switch=bitrate_switch,
+            )
+        with self._lock:
+            entry.next_due = time.perf_counter() + period / 1000.0
+            self._auto_entries[key] = entry
+            self._row_entry_keys.add(key)
+        return {"started": True, "key": key, "period_ms": period}
+
+    def row_periodic_stop(self, key: str) -> dict:
+        """Stop one row-keyed periodic entry (TxBox Send toggle off). Only
+        that row stops -- nothing else is touched."""
+        with self._lock:
+            removed = self._auto_entries.pop(key, None)
+            self._row_entry_keys.discard(key)
+        return {"stopped": True, "key": key, "found": removed is not None}
+
     def enable_all_periodic(self, rx_node: str = "") -> dict:
         """"Enable Msg" button: arm auto-periodic resend for every
         Periodic-tagged message in the loaded DBC. Each is sent once
@@ -633,13 +808,24 @@ class TxScheduler:
                 self._enable_msg_armed.clear()
                 self._event_periodic.clear()
                 self._random_active.clear()
+                self._toggle_values.clear()
+                self._toggle_phase.clear()
+                self._row_entry_keys.clear()
             else:
-                self._auto_entries.pop(message_name, None)
+                # Row-keyed TxBox entries live in _auto_entries under row
+                # keys, so sweep by message as well (a plain pop by message
+                # name would miss them).
+                for key in [k for k, e in self._auto_entries.items()
+                            if e.message_name == message_name]:
+                    del self._auto_entries[key]
+                    self._row_entry_keys.discard(key)
                 self._enable_msg_armed.discard(message_name)
                 for key in [k for k in self._event_periodic if k[0] == message_name]:
                     del self._event_periodic[key]
                 for key in [k for k in self._random_active if k[0] == message_name]:
                     self._random_active.discard(key)
+                self._toggle_values.pop(message_name, None)
+                self._toggle_phase.pop(message_name, None)
         return self.status()
 
     # ---- scheduler loop ---------------------------------------------------
@@ -721,6 +907,9 @@ class TxScheduler:
 
     def _make_send_job(self, entry: TxEntry) -> Callable[[], None]:
         def send() -> None:
+            # At most one invalid follow-up per tick (whole-frame-invalid
+            # bytes are identical regardless of trigger signal).
+            row_followup: Optional[str] = None
             if entry.message_name:
                 # Snapshot under the lock -- set_value_generator()/send_invalid()
                 # mutate this same per-message dict (e.g. adding a new signal's
@@ -740,9 +929,35 @@ class TxScheduler:
                         if generators else []
                     )
                 raw_values = {signal_name: gen() for signal_name, gen in generators}
-                data = self._dbc.encode_with_raw_values(entry.message_name, raw_values)
+                # TxBox toggle: overlay the current phase set (scaled ->
+                # raw), then flip. Generator values win on conflict (a live
+                # Random transmission overrides the toggle for that tick).
                 message = self._dbc.get_message(entry.message_name)
+                toggled = self._take_toggle_explicit(entry.message_name)
+                for signal_name, phys in toggled.items():
+                    try:
+                        raw_values[signal_name] = self._scaled_to_raw(
+                            message, signal_name, phys)
+                    except (ValueError, StopIteration, TypeError):
+                        continue
+                data = self._dbc.encode_with_raw_values(entry.message_name, raw_values)
                 is_fd, brs = message.is_fd, message.is_fd
+                # TxBox row entries follow one-shot event semantics on every
+                # tick: each valid Event signal gets its 30ms-invalid
+                # follow-up, exactly as if Send had been pressed each period.
+                if entry.key in self._row_entry_keys:
+                    try:
+                        sent_raw = self._dbc.decode_raw(entry.arbitration_id, bytes(data))
+                    except Exception:
+                        sent_raw = None
+                    if sent_raw:
+                        for s in message.signals:
+                            if (
+                                self._dbc.signal_send_type(message.name, s.name) == "event"
+                                and sent_raw.get(s.name) != (1 << s.length) - 1
+                            ):
+                                row_followup = s.name
+                                break
             else:
                 data = entry.data or b""
                 is_fd, brs = entry.is_fd, entry.bitrate_switch
@@ -750,6 +965,8 @@ class TxScheduler:
                 entry.arbitration_id, data, entry.is_extended, is_fd=is_fd, bitrate_switch=brs
             )
             entry.tx_count += 1
+            if row_followup is not None:
+                self._schedule_invalid(message, row_followup)
 
         return send
 
@@ -779,6 +996,7 @@ class TxScheduler:
                 ],
                 "auto_entries": [
                     {
+                        "key": e.key,
                         "message_name": e.message_name,
                         "period_ms": e.period_ms,
                         "tx_count": e.tx_count,

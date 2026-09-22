@@ -187,6 +187,25 @@ ota_tester_manager = OtaTesterDownloadManager(
     log_dir=CAN_LOG_DIR,
 )
 
+
+def _power_measurement_busy() -> bool:
+    """CAN-SWDL/OTA Tester 실행 중에는 파워 실시간 측정을 스킵한다 (부하
+    경감). 락 보호 running 플래그만 읽는 가벼운 체크다."""
+    try:
+        if any(m.running for m in uds_download_manager._managers):
+            return True
+    except Exception:
+        pass
+    try:
+        if ota_tester_manager.running:
+            return True
+    except Exception:
+        pass
+    return False
+
+
+power_supply_service._is_busy = _power_measurement_busy
+
 settings = {"ws_flush_ms": 30}
 # global run gate: when stopped, no TX at all and the RX stream is discarded
 run_state = {"running": True}
@@ -627,6 +646,12 @@ def tx_send_once(req: TxSendOnceRequest):
 class SignalSendRequest(BaseModel):
     message_name: str
     values: dict[str, float | int | str]
+    # TxBox signal-value toggle second set (optional). Omitted entirely =
+    # legacy behavior (send_signal doesn't touch a stored toggle either).
+    values_alt: Optional[dict[str, float | int | str]] = None
+    # True: exactly one frame (Event 30ms-invalid follow-up kept), never
+    # arm a periodic auto-entry -- TxBox Send button.
+    once: bool = False
 
 
 @app.post("/api/tx/signal")
@@ -637,7 +662,55 @@ def tx_signal(req: SignalSendRequest):
     if not dbc_service.loaded:
         raise HTTPException(status_code=400, detail="no DBC loaded")
     try:
-        return tx_scheduler.send_signal(req.message_name, req.values)
+        return tx_scheduler.send_signal(req.message_name, req.values, req.values_alt, req.once)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+class TxRowPeriodicRequest(BaseModel):
+    key: str
+    message_name: Optional[str] = None
+    values: Optional[dict[str, float | int | str]] = None
+    values_alt: Optional[dict[str, float | int | str]] = None
+    period_ms: float = 100.0
+    # raw rows (no message_name)
+    data_hex: Optional[str] = None
+    arbitration_id: Optional[int] = None
+    is_extended: bool = False
+    is_fd: bool = False
+    bitrate_switch: bool = False
+
+
+@app.post("/api/tx/row/start")
+def tx_row_start(req: TxRowPeriodicRequest):
+    """TxBox per-row periodic transmission (Send toggle on): persist values
+    and arm a row-keyed auto entry at the row's period. One frame goes out
+    immediately. Only this row is affected."""
+    _require_running()
+    if not can_manager.connected:
+        raise HTTPException(status_code=400, detail="CAN bus is not connected")
+    if not dbc_service.loaded:
+        raise HTTPException(status_code=400, detail="no DBC loaded")
+    try:
+        return tx_scheduler.row_periodic_start(
+            req.key, req.message_name, req.values, req.values_alt, req.period_ms,
+            req.data_hex, req.arbitration_id, req.is_extended, req.is_fd,
+            req.bitrate_switch,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+class TxRowStopRequest(BaseModel):
+    key: str
+
+
+@app.post("/api/tx/row/stop")
+def tx_row_stop(req: TxRowStopRequest):
+    """Stop one TxBox row's periodic transmission (Send toggle off). Only
+    that row stops -- other rows and widgets are untouched."""
+    try:
+        return tx_scheduler.row_periodic_stop(req.key)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
@@ -682,7 +755,7 @@ def tx_signal_preset(req: SignalSendRequest):
     if not dbc_service.loaded:
         raise HTTPException(status_code=400, detail="DBC가 로드되지 않았습니다")
     try:
-        return tx_scheduler.preset_signal(req.message_name, req.values)
+        return tx_scheduler.preset_signal(req.message_name, req.values, req.values_alt)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
@@ -1245,6 +1318,20 @@ def udswdl_stop(slot_index: int = 0):
     return manager.stop()
 
 
+class UdsSwdlStopAllRequest(BaseModel):
+    slot_indices: list[int] = [0, 1, 2]
+
+
+@app.post("/api/udswdl/stop_all")
+def udswdl_stop_all(req: UdsSwdlStopAllRequest):
+    """Stop downloads on multiple slots and cancel any queued sequential
+    starts from an in-flight start_all()."""
+    try:
+        return uds_download_manager.stop_all(req.slot_indices)
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
 class UdsSwdlParamRequest(BaseModel):
     slot_index: int = 0
     step_service: str
@@ -1292,6 +1379,13 @@ def power_disconnect():
 @app.get("/api/power/status")
 def power_status():
     return power_supply_service.info()
+
+
+@app.get("/api/power/measure")
+def power_measure():
+    """실시간 출력 전압/전류 측정 (전원 위젯 200ms 폴링용). 고부하 작업
+    중에는 측정 없이 마지막 값을 돌려준다."""
+    return power_supply_service.measure()
 
 
 # ---- 서버 종료 (Ctrl+C가 막히는 환경을 위한 대안 종료 경로) -----------------------

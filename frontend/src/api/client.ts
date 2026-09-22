@@ -81,14 +81,27 @@ export const api = {
     bitrate_switch?: boolean;
     key?: string;
   }) => post('/api/tx/send_once', entry),
-  txSignal: (message_name: string, values: Record<string, number | string>) =>
-    post('/api/tx/signal', { message_name, values }),
+  txSignal: (message_name: string, values: Record<string, number | string>, valuesAlt?: Record<string, number | string>, once = false) =>
+    post('/api/tx/signal', { message_name, values, values_alt: valuesAlt, once }),
+  txRowStart: (entry: {
+    key: string;
+    message_name?: string | null;
+    values?: Record<string, number | string>;
+    values_alt?: Record<string, number | string>;
+    period_ms?: number;
+    data_hex?: string;
+    arbitration_id?: number;
+    is_extended?: boolean;
+    is_fd?: boolean;
+    bitrate_switch?: boolean;
+  }) => post('/api/tx/row/start', entry),
+  txRowStop: (key: string) => post('/api/tx/row/stop', { key }),
   txSignalInvalidFirst: (message_name: string, values: Record<string, number | string>) =>
     post('/api/tx/signal/invalid_first', { message_name, values }),
   txSignalZeroAfter: (message_name: string, values: Record<string, number | string>) =>
     post('/api/tx/signal/zero_after', { message_name, values }),
-  txSignalPreset: (message_name: string, values: Record<string, number | string>) =>
-    post('/api/tx/signal/preset', { message_name, values }),
+  txSignalPreset: (message_name: string, values: Record<string, number | string>, valuesAlt?: Record<string, number | string>) =>
+    post('/api/tx/signal/preset', { message_name, values, values_alt: valuesAlt }),
   txAutoStop: (message_name?: string) =>
     post('/api/tx/auto/stop', { message_name: message_name ?? null }),
   enableAllPeriodic: (rx_node: string) =>
@@ -197,6 +210,8 @@ export const api = {
     per_slot_modified_params: perSlotModifiedParams,
   }),
   udsStop: (slotIndex: number = 0) => post<import('../types').UdsDownloadStatus>('/api/udswdl/stop?slot_index=' + slotIndex),
+  udsStopAll: (slotIndices: number[] = [0, 1, 2]) =>
+    post<any[]>('/api/udswdl/stop_all', { slot_indices: slotIndices }),
   udsStatus: () => request<import('../types').UdsDownloadStatus[]>('/api/udswdl/status'),
   udsSteps: (slotIndex: number = 0) => request<import('../types').UdsStepInfo[]>('/api/udswdl/steps?slot_index=' + slotIndex),
   udsSetParams: (slotIndex: number, stepService: string, params: Record<string, string>) =>
@@ -237,6 +252,10 @@ export const api = {
   powerSweepStart: (low: number, high: number, current: number, legS: number) =>
     post<{ ok: boolean; reason?: string }>('/api/power/sweep/start', { low, high, current, leg_s: legS }),
   powerSweepStop: () => post<{ ok: boolean; reason?: string }>('/api/power/sweep/stop'),
+  powerMeasure: () =>
+    request<{ ok: boolean; reason?: string; voltage: number | null; current: number | null }>(
+      '/api/power/measure',
+    ),
   audioDevices: () => request<import('../types').AudioStatus>('/api/audio/devices'),
   audioSelectDevice: (index: number) =>
     post<import('../types').AudioStatus>('/api/audio/device', { index }),
