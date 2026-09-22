@@ -28,6 +28,9 @@ class CanLogService:
         self._series_cache: dict[str, dict] | None = None
         self._timeline_cache: dict | None = None
         self._t0: float = 0.0
+        # sorted plot-x index over _messages (see load_log)
+        self._frame_x_ms: list[int] = []
+        self._frame_order: list[int] = []
 
     def load_log(self, data: bytes, filename: str) -> dict:
         suffix = Path(filename).suffix.lower()
@@ -54,6 +57,14 @@ class CanLogService:
             self._t0 = msgs[0].timestamp
         else:
             self._t0 = 0.0
+        # plot-x (ms since t0) index for windowed frame queries -- messages
+        # are stored in file order, so keep the index sorted for bisect.
+        decorated = sorted(
+            ((int((m.timestamp - self._t0) * 1000), i) for i, m in enumerate(msgs)),
+            key=lambda t: (t[0], t[1]),
+        )
+        self._frame_x_ms = [x for x, _ in decorated]
+        self._frame_order = [i for _, i in decorated]
         return self.status()
 
     def status(self) -> dict:
@@ -185,6 +196,70 @@ class CanLogService:
         self._ensure_series()
         assert self._series_cache is not None
         return {k: self._series_cache[k] for k in keys if k in self._series_cache}
+
+    def get_frames(
+        self,
+        x_min_ms: float,
+        x_max_ms: float,
+        message_names: list[str] | None = None,
+        limit: int = 500,
+    ) -> dict:
+        """Raw CAN frames inside a plot-x window, for the message table that
+        sits under the graphs. Works without a loaded DBC (ID + data only);
+        with a DBC each row also carries decoded raw signal values.
+
+        message_names: None/empty = all messages, else only those names.
+        Frames whose ID has no DBC match carry message=None (shown when no
+        filter is active). Rows are time-ordered; at most `limit` rows are
+        returned with truncated=True when the window holds more.
+        """
+        limit = max(1, min(int(limit), 2000))
+        msgs = self._messages
+        if not msgs:
+            return {"frames": [], "total": 0, "truncated": False}
+        lo = bisect.bisect_left(self._frame_x_ms, int(x_min_ms))
+        hi = bisect.bisect_right(self._frame_x_ms, int(x_max_ms), lo=lo)
+        order = self._frame_order[lo:hi]
+
+        name_filter = set(message_names) if message_names else None
+        id_to_name: dict[tuple[int, bool], str] = {}
+        if self._dbc.loaded and self._dbc.db is not None:
+            try:
+                for m in self._dbc.db.messages:
+                    id_to_name.setdefault((m.frame_id, m.is_extended_frame), m.name)
+            except Exception:
+                id_to_name = {}
+
+        rows: list[dict] = []
+        total = 0
+        for idx in order:
+            msg = msgs[idx]
+            name = id_to_name.get((msg.arbitration_id, msg.is_extended_id))
+            if name_filter is not None and name not in name_filter:
+                continue
+            total += 1
+            if len(rows) >= limit:
+                continue
+            data = bytes(msg.data)
+            signals: dict[str, int] | None = None
+            if self._dbc.loaded:
+                try:
+                    raw = self._dbc.decode_raw(msg.arbitration_id, data)
+                    if raw is not None:
+                        signals = {k: int(v) for k, v in raw.items()}
+                except Exception:
+                    signals = None
+            rows.append({
+                "seq": idx,
+                "x_ms": int((msg.timestamp - self._t0) * 1000),
+                "frame_id": msg.arbitration_id,
+                "frame_id_hex": f"0x{msg.arbitration_id:X}",
+                "message": name,
+                "dlc": len(data),
+                "data_hex": data.hex(" ").upper(),
+                "signals": signals,
+            })
+        return {"frames": rows, "total": total, "truncated": total > len(rows)}
 
     def timeline(self) -> dict:
         self._ensure_series()

@@ -1577,6 +1577,17 @@ def canlog_messages():
     return can_log_service.list_messages()
 
 
+@app.get("/api/canlog/frames")
+def canlog_frames(x_min_ms: float = 0, x_max_ms: float = 0, messages: str = "", limit: int = 500):
+    """Raw CAN frames inside a plot-x window for the message table under
+    the graphs. Works without a loaded DBC (ID + data only)."""
+    try:
+        names = [m.strip() for m in messages.split(",") if m.strip()] or None
+    except ValueError:
+        raise HTTPException(status_code=400, detail="messages must be comma-separated message names")
+    return can_log_service.get_frames(x_min_ms, x_max_ms, names, limit)
+
+
 @app.get("/api/canlog/series")
 def canlog_series(keys: str = ""):
     try:

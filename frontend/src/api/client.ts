@@ -323,6 +323,10 @@ export const api = {
     request<Record<string, import('../types').CanLogSeries>>(
       `/api/canlog/series?keys=${keys.map(encodeURIComponent).join(',')}`,
     ),
+  canlogFrames: (xMinMs: number, xMaxMs: number, messages: string[], limit = 500) =>
+    request<import('../types').CanLogFramesResult>(
+      `/api/canlog/frames?x_min_ms=${xMinMs}&x_max_ms=${xMaxMs}&messages=${messages.map(encodeURIComponent).join(',')}&limit=${limit}`,
+    ),
   canlogGenerateScript: (range: { a_ms: number; b_ms: number } | null, rxNode?: string) =>
     post<import('../types').CanLogScriptResult>('/api/canlog/generate_script', { range, rx_node: rxNode ?? null }),
 };

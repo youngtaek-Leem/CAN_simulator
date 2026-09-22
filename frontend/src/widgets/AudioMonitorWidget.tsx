@@ -216,7 +216,15 @@ export function AudioMonitorWidget(_: { config: WidgetConfig }) {
   const canStop = owner === 'monitor' || owner === 'widget_record';
   const channels = level?.channels ?? [{ index: 0, peak: 0, rms: 0 }, { index: 1, peak: 0, rms: 0 }];
   const inputDevices = (audio?.devices ?? []).filter((d) => d.channels > 0);
-  const streamStartedAtMs = level?.stream_started_at != null ? level.stream_started_at * 1000 : null;
+  // Latched stream-start origin: the backend clears stream_started_at on
+  // Stop, but the frozen view's elapsed-time labels must keep the old
+  // origin (otherwise they fall back to xMax-relative and the numbers
+  // jump). A fresh Start delivers a new timestamp and re-latches.
+  const streamStartedRaw = level?.stream_started_at != null ? level.stream_started_at * 1000 : null;
+  const [streamStartedAtMs, setStreamStartedAtMs] = useState<number | null>(null);
+  useEffect(() => {
+    if (streamStartedRaw !== null) setStreamStartedAtMs(streamStartedRaw);
+  }, [streamStartedRaw]);
 
   // Start는 항상 Stop 상태에서만 호출되어야 하며, 버퍼 및 그래프를 모두 초기화 후 재시작
   const prevActiveRef = useRef(false);

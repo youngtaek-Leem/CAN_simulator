@@ -978,11 +978,10 @@ function SysLogChart({
     ctx.fillStyle = '#8b909c';
     ctx.font = '9px monospace';
     ctx.lineWidth = 1;
-    // 시간 축은 21군데(20 간격)로 촘촘히 눈금을 그린다 -- 라벨 텍스트는 맨 아래
-    // 차트(showXAxis)에만 그려서 차트마다 중복 표기하지 않는다. 21개 라벨은
-    // 폭이 좁으면 서로 겹칠 수 있는데(의도된 트레이드오프), 정확한 값은 마우스
-    // 호버 툴팁(아래)으로 확인한다.
-    const xTicks = niceTicks(xMin, xMax, 20);
+    // 시간 축은 11군데(10 간격)로 눈금을 그린다 -- 라벨 텍스트는 맨 아래
+    // 차트(showXAxis)에만 그려서 차트마다 중복 표기하지 않는다. 정확한 값은
+    // 마우스 호버 툴팁(아래)으로 확인한다.
+    const xTicks = niceTicks(xMin, xMax, 10);
     xTicks.forEach((t, i) => {
       const px = xToPx(t);
       ctx.beginPath();

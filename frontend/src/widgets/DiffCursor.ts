@@ -34,8 +34,9 @@ export const CURSOR_D_COLOR = '#f472b6';
 
 /** Draws whichever of cursor.a/b fall within [xMin, xMax] as a dashed
  * vertical line spanning the plot area, each labeled at the top with its
- * elapsed time since the view's left edge. No-op if cursor is undefined or
- * its mode is off. */
+ * elapsed time since `xLabelOriginMs` (the chart's X-axis time base -- pass
+ * the same origin the tick labels use; defaults to the view's left edge).
+ * No-op if cursor is undefined or its mode is off. */
 export function drawDiffCursors(
   ctx: CanvasRenderingContext2D,
   cursor: DiffCursorState | undefined,
@@ -44,8 +45,10 @@ export function drawDiffCursors(
   plotTop: number,
   plotH: number,
   xToPx: (ms: number) => number,
+  xLabelOriginMs: number | null = null,
 ): void {
   if (!cursor?.mode) return;
+  const origin = xLabelOriginMs ?? xMin;
   const drawLine = (tag: string, ms: number | null, color: string, labelDy: number) => {
     if (ms === null || ms < xMin || ms > xMax) return;
     const px = xToPx(ms);
@@ -58,7 +61,7 @@ export function drawDiffCursors(
     ctx.lineTo(px, plotTop + plotH);
     ctx.stroke();
     ctx.setLineDash([]);
-    const label = `${tag} +${fmtDelta(ms - xMin)}`;
+    const label = `${tag} +${fmtDelta(ms - origin)}`;
     ctx.font = '10px monospace';
     const tw = ctx.measureText(label).width;
     ctx.fillStyle = 'rgba(20, 22, 27, 0.85)';

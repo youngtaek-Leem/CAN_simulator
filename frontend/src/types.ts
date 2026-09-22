@@ -544,6 +544,23 @@ export interface CanLogScriptResult {
   matched_count: number;
 }
 
+export interface CanLogFrame {
+  seq: number;
+  x_ms: number;
+  frame_id: number;
+  frame_id_hex: string;
+  message: string | null;
+  dlc: number;
+  data_hex: string;
+  signals: Record<string, number> | null;
+}
+
+export interface CanLogFramesResult {
+  frames: CanLogFrame[];
+  total: number;
+  truncated: boolean;
+}
+
 export interface TxRow {
   key: string;
   idHex: string;

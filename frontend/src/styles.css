@@ -1209,6 +1209,40 @@ select.tx-signal-input {
   font-size: 10px;
 }
 
+/* CAN log message table under the graphs */
+.syslog-frames {
+  border-top: 1px solid var(--border);
+  padding: 4px 6px 2px;
+}
+.syslog-frames .syslog-section-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.syslog-frames-table-wrap {
+  max-height: 220px;
+  overflow-y: auto;
+  margin-top: 4px;
+}
+.syslog-frames-table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 11px;
+}
+.syslog-frames-table thead th {
+  position: sticky;
+  top: 0;
+  background: var(--panel-2);
+  text-align: left;
+  padding: 2px 8px 2px 0;
+  white-space: nowrap;
+}
+.syslog-frames-table tbody td {
+  padding: 1px 8px 1px 0;
+  white-space: nowrap;
+  border-top: 1px solid var(--border);
+}
+
 .syslog-chart-header-draggable {
   cursor: grab;
 }

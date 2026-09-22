@@ -24,7 +24,7 @@ import { api } from '../api/client';
 import { canStore, useCanVersion } from '../store/canStore';
 import { useApp } from '../store/appContext';
 import { SignalPicker } from './MessageOptions';
-import { AudioWaveformChart, niceTicks, orFallback, type AudioChartXView, type Geom } from './AudioWaveformChart';
+import { AudioWaveformChart, niceTicks, orFallback, useHoverDwell, type AudioChartXView, type Geom } from './AudioWaveformChart';
 import {
   drawDiffCursors,
   fmtDelta,
@@ -343,6 +343,18 @@ export function CanAudioLatencyWidget({ config }: { config: WidgetConfig }) {
   const owner = level?.owner ?? null;
   const canStop = owner === 'monitor' || owner === 'widget_record';
   const channels = level?.channels ?? [];
+  // Stream-start origin (epoch ms) for elapsed-time X labels: 0s at Start,
+  // keeps increasing. Latched: the backend clears stream_started_at on Stop,
+  // but the frozen view's labels must keep the old origin (otherwise the
+  // right-edge tick would jump from the frozen elapsed value back to the
+  // window span, e.g. 5s). A fresh Start delivers a new timestamp and
+  // re-latches. Null before the first Start -- charts fall back to
+  // view-left-relative.
+  const streamOriginRaw = level?.stream_started_at != null ? level.stream_started_at * 1000 : null;
+  const [streamOriginMs, setStreamOriginMs] = useState<number | null>(null);
+  useEffect(() => {
+    if (streamOriginRaw !== null) setStreamOriginMs(streamOriginRaw);
+  }, [streamOriginRaw]);
   const inputDevices = (canStore.status?.audio?.devices ?? []).filter((d) => d.channels > 0);
 
   const canConfig = canStore.status?.can?.config as Record<string, unknown> | undefined;
@@ -457,6 +469,7 @@ export function CanAudioLatencyWidget({ config }: { config: WidgetConfig }) {
             resetToken={resetToken}
             onResetAll={resetEverything}
             cursor={cursor}
+            streamOriginMs={streamOriginMs}
           />
         )}
         {channels.map((ch, i) => (
@@ -467,12 +480,12 @@ export function CanAudioLatencyWidget({ config }: { config: WidgetConfig }) {
             margin={MARGIN}
             waveformPollMs={WAVEFORM_POLL_MS}
             pollEnabled
-            streamStartedAtMs={null}
             shared={{ xViewRef: sharedXRef, xVersion: sharedVersion, notifyChange }}
             xWindowMs={xWindowMs}
             showXAxis
             nowAnchor={nowAnchor}
-            xTickMode="sinceWindowLeft"
+            streamStartedAtMs={streamOriginMs}
+            xTickMode={streamOriginMs !== null ? 'sinceStreamStart' : 'sinceWindowLeft'}
             xTickDecimals={1}
             wheelZoomSpanClamp={{ min: MIN_X_WINDOW_MS, max: MAX_X_WINDOW_MS }}
             resetToken={resetToken}
@@ -517,6 +530,7 @@ function CanSignalChart({
   resetToken,
   onResetAll,
   cursor,
+  streamOriginMs,
 }: {
   bindingKey: string;
   label: string;
@@ -529,6 +543,9 @@ function CanSignalChart({
   resetToken: number;
   onResetAll: () => void;
   cursor: DiffCursorState;
+  /** Stream-start origin (epoch ms) for elapsed-time X labels/tooltip, or
+   * null before the first Start (falls back to view-left-relative). */
+  streamOriginMs: number | null;
 }) {
   useCanVersion();
   const canvasRef = useRef<HTMLCanvasElement>(null);
@@ -560,15 +577,10 @@ function CanSignalChart({
     if (hoverTipRef.current) hoverTipRef.current.style.display = 'none';
   };
 
-  const updateHover = (px: number, py: number) => {
+  const locateHover = (px: number, py: number) => {
     const g = lastGeomRef.current;
-    const vEl = hoverVRef.current;
-    const hEl = hoverHRef.current;
-    const tipEl = hoverTipRef.current;
-    if (!vEl || !hEl || !tipEl) return;
     if (px < g.plotLeft || px > g.plotLeft + g.plotW || py < g.plotTop || py > g.plotTop + g.plotH) {
-      hideHover();
-      return;
+      return null;
     }
     const ms = g.xMin + ((px - g.plotLeft) / g.plotW) * (g.xMax - g.xMin);
     const points = canStore.signalHistory.get(bindingKey) ?? [];
@@ -581,20 +593,58 @@ function CanSignalChart({
         best = p;
       }
     }
-    if (!best) {
-      hideHover();
-      return;
-    }
+    if (!best) return null;
     const vPy = g.plotTop + g.plotH - ((best.value - g.yMin) / (g.yMax - g.yMin)) * g.plotH;
+    return { ms, value: best.value, vPy };
+  };
+  // Dotted crosshair: follows the pointer in real time (no dwell gate).
+  const moveCrosshair = (px: number, py: number): boolean => {
+    const vEl = hoverVRef.current;
+    const hEl = hoverHRef.current;
+    if (!vEl || !hEl) return false;
+    const loc = locateHover(px, py);
+    if (!loc) {
+      vEl.style.display = 'none';
+      hEl.style.display = 'none';
+      return false;
+    }
     vEl.style.display = 'block';
     vEl.style.left = `${px}px`;
     hEl.style.display = 'block';
-    hEl.style.top = `${vPy}px`;
+    hEl.style.top = `${loc.vPy}px`;
+    return true;
+  };
+  const hideTip = () => {
+    if (hoverTipRef.current) hoverTipRef.current.style.display = 'none';
+  };
+  // Coordinate values: only after a 1s dwell (see useHoverDwell).
+  const showTip = (px: number, py: number) => {
+    const tipEl = hoverTipRef.current;
+    if (!tipEl) return;
+    const g = lastGeomRef.current;
+    const loc = locateHover(px, py);
+    if (!loc) {
+      tipEl.style.display = 'none';
+      return;
+    }
     tipEl.style.display = 'block';
-    tipEl.textContent = `+${fmtXTick(ms - g.xMin)}  ${fmt(best.value)}`;
+    tipEl.textContent = `+${fmtXTick(loc.ms - (streamOriginMs ?? g.xMin))}  ${fmt(loc.value)}`;
     const tipW = 170;
     tipEl.style.left = px + 12 + tipW > g.plotLeft + g.plotW ? `${px - tipW - 8}px` : `${px + 12}px`;
-    tipEl.style.top = `${Math.max(g.plotTop, vPy - 12)}px`;
+    tipEl.style.top = `${Math.max(g.plotTop, loc.vPy - 12)}px`;
+  };
+  const { dwellRef, armDwell, cancelHover } = useHoverDwell(showTip);
+
+  const refreshDwell = () => {
+    const d = dwellRef.current;
+    if (!d.shown) return;
+    const g = lastGeomRef.current;
+    if (d.px >= g.plotLeft && d.px <= g.plotLeft + g.plotW && d.py >= g.plotTop && d.py <= g.plotTop + g.plotH) {
+      showTip(d.px, d.py);
+    } else {
+      cancelHover();
+      hideHover();
+    }
   };
 
   useEffect(() => {
@@ -700,7 +750,9 @@ function CanSignalChart({
       ctx.moveTo(px, plotTop);
       ctx.lineTo(px, plotTop + plotH);
       ctx.stroke();
-      if (showXAxis) ctx.fillText(fmtXTick(t - xMin!), px - 16, h - 6);
+      // Elapsed time since the stream start (0s origin, keeps increasing).
+      // Falls back to view-left-relative before the first Start.
+      if (showXAxis) ctx.fillText(fmtXTick(t - (streamOriginMs ?? xMin!)), px - 16, h - 6);
     }
     for (const t of niceTicks(yMin, yMax, 4)) {
       const py = yToPx(t);
@@ -760,14 +812,16 @@ function CanSignalChart({
       ctx.restore();
     }
 
-    drawDiffCursors(ctx, cursor, xMin, xMax, plotTop, plotH, xToPx);
+    drawDiffCursors(ctx, cursor, xMin, xMax, plotTop, plotH, xToPx, streamOriginMs);
 
     lastGeomRef.current = { xMin, xMax, yMin, yMax, plotLeft, plotTop, plotW, plotH };
+    refreshDwell();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [size, xWindowMs, xVersion, bindingKey]);
+  }, [size, xWindowMs, xVersion, bindingKey, streamOriginMs]);
 
   const onWheel = (e: React.WheelEvent<HTMLCanvasElement>) => {
     e.preventDefault();
+    cancelHover();
     hideHover();
     const rect = canvasRef.current!.getBoundingClientRect();
     const px = e.clientX - rect.left;
@@ -811,6 +865,7 @@ function CanSignalChart({
     const py = e.clientY - rect.top;
     if (px < g.plotLeft || px > g.plotLeft + g.plotW || py < g.plotTop || py > g.plotTop + g.plotH) return;
     (e.target as HTMLCanvasElement).setPointerCapture(e.pointerId);
+    cancelHover();
     hideHover();
     if (cursor.mode) {
       const msToPx = (ms: number) => g.plotLeft + ((ms - g.xMin) / (g.xMax - g.xMin)) * g.plotW;
@@ -853,11 +908,21 @@ function CanSignalChart({
       return;
     }
     const rect = canvasRef.current!.getBoundingClientRect();
-    updateHover(e.clientX - rect.left, e.clientY - rect.top);
+    const px = e.clientX - rect.left;
+    const py = e.clientY - rect.top;
+    const g = lastGeomRef.current;
+    if (px < g.plotLeft || px > g.plotLeft + g.plotW || py < g.plotTop || py > g.plotTop + g.plotH) {
+      cancelHover();
+      hideHover();
+      return;
+    }
+    moveCrosshair(px, py);
+    if (armDwell(px, py)) hideTip();
   };
   const onPointerUp = () => {
     dragRef.current = null;
     cursorDragRef.current = null;
+    cancelHover();
     hideHover();
   };
 

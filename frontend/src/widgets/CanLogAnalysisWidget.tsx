@@ -13,6 +13,7 @@ import {
   type DiffCursorState,
 } from './DiffCursor';
 import type {
+  CanLogFrame,
   CanLogMessageInfo,
   CanLogPoint,
   CanLogScriptResult,
@@ -22,6 +23,12 @@ import type {
   CanLogTimeline,
   WidgetConfig,
 } from '../types';
+
+const FRAMES_LIMIT = 500;
+const FRAMES_DEBOUNCE_MS = 400;
+// Message table window: 10s from the X view's start (all messages --
+// load-bounded by the window instead of by the signal selection).
+const FRAMES_WINDOW_MS = 10_000;
 
 const PALETTE = [
   '#3b82f6',
@@ -99,6 +106,49 @@ export function CanLogAnalysisWidget({ config }: { config: WidgetConfig }) {
   const [search, setSearch] = useState('');
   const viewMode = (config.options.viewMode as 'byMessage' | 'bySignal' | undefined) ?? 'byMessage';
   const setViewMode = (m: 'byMessage' | 'bySignal') => updateWidget({ ...config, options: { ...config.options, viewMode: m } });
+  // Message table under the graphs: follows the visible X view (debounced).
+  const showFrames = (config.options.showFrames as boolean | undefined) ?? true;
+  const setShowFrames = (v: boolean) => updateWidget({ ...config, options: { ...config.options, showFrames: v } });
+  const framesFollow = (config.options.framesFollow as boolean | undefined) ?? true;
+  const setFramesFollow = (v: boolean) => updateWidget({ ...config, options: { ...config.options, framesFollow: v } });
+  const [frames, setFrames] = useState<CanLogFrame[]>([]);
+  const [framesTotal, setFramesTotal] = useState(0);
+  const [framesTruncated, setFramesTruncated] = useState(false);
+  const [framesBusy, setFramesBusy] = useState(false);
+  const framesReqRef = useRef(0);
+  // Last effective query params -- identical re-queries (e.g. every graph
+  // hover pause bumps sharedVersion with an unchanged view) are skipped so
+  // the server sees no duplicate GETs and the table never needlessly
+  // re-renders (the flicker). Float view bounds are rounded for comparison.
+  const lastFramesParamsRef = useRef<string | null>(null);
+  const framesWrapRef = useRef<HTMLDivElement | null>(null);
+
+  const fetchFrames = async (xMin: number, xMax: number, msgNames: string[], force = false) => {
+    const key = `${Math.round(xMin)}|${Math.round(xMax)}|${msgNames.join(',')}|${FRAMES_LIMIT}`;
+    if (!force && lastFramesParamsRef.current === key) return; // unchanged view
+    const reqId = ++framesReqRef.current;
+    // Silent background refresh: spinner only on the very first load, so
+    // follow-up queries never flash the panel while hovering/panning.
+    const firstLoad = frames.length === 0;
+    if (firstLoad) setFramesBusy(true);
+    // Preserve scroll across the update in case React rebuilds rows.
+    const scrollTop = framesWrapRef.current?.scrollTop ?? 0;
+    try {
+      const res = await api.canlogFrames(xMin, xMax, msgNames, FRAMES_LIMIT);
+      if (framesReqRef.current !== reqId) return; // stale
+      lastFramesParamsRef.current = key; // mark only on success so failures retry
+      setFrames(res.frames);
+      setFramesTotal(res.total);
+      setFramesTruncated(res.truncated);
+      requestAnimationFrame(() => {
+        if (framesWrapRef.current) framesWrapRef.current.scrollTop = scrollTop;
+      });
+    } catch {
+      /* keep last good frame list */
+    } finally {
+      if (framesReqRef.current === reqId) setFramesBusy(false);
+    }
+  };
 
   const setSelectedKeys = (next: string[]) =>
     updateWidget({ ...config, options: { ...config.options, selectedKeys: next } });
@@ -141,6 +191,7 @@ export function CanLogAnalysisWidget({ config }: { config: WidgetConfig }) {
       await api.canlogUpload(file);
       await refresh();
       await fetchSeries(selectedKeys);
+      lastFramesParamsRef.current = null; // new log: force frames refetch
       resetEverything();
     } catch (e) { setError((e as Error).message); } finally { setBusy(false); }
   };
@@ -191,6 +242,21 @@ export function CanLogAnalysisWidget({ config }: { config: WidgetConfig }) {
     const center = (xMin + xMax) / 2; const halfWidth = ((xMax - xMin) / 2) * factor;
     v.xMin = center - halfWidth; v.xMax = center + halfWidth; notifyChange();
   };
+
+  // Message table: all messages, 10s from the X view's start (debounced).
+  const refreshFramesNow = (force = false) => {
+    if (!timeline) return;
+    const v = sharedXRef.current;
+    const xMin = v.xMin ?? plotXMin;
+    fetchFrames(xMin, xMin + FRAMES_WINDOW_MS, [], force).catch(() => {});
+  };
+
+  useEffect(() => {
+    if (!showFrames || !framesFollow || !timeline) return;
+    const timer = setTimeout(refreshFramesNow, FRAMES_DEBOUNCE_MS);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sharedVersion, selectedKeys.join(','), showFrames, framesFollow, timeline?.plot_x_max]);
 
   const [cursorMode, setCursorMode] = useState(false);
   const [cursorA, setCursorA] = useState<number | null>(null);
@@ -347,6 +413,59 @@ export function CanLogAnalysisWidget({ config }: { config: WidgetConfig }) {
           <VerticalScrollbar targetRef={graphsColRef} />
         </div>
       </div>
+      <div className="syslog-frames">
+        <div className="syslog-section-title">
+          <label style={{ display: 'inline-flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
+            <input type="checkbox" checked={showFrames} onChange={(e) => setShowFrames(e.target.checked)} />
+            <span>메세지</span>
+          </label>
+          {showFrames && (
+            <>
+              <span className="hint">
+                X 시작 기준 10초 · {framesTotal}건{framesTruncated ? ` (앞 ${FRAMES_LIMIT}건만 표시)` : ''}
+              </span>
+              <span className="spacer" />
+              <label style={{ display: 'inline-flex', alignItems: 'center', gap: 4, cursor: 'pointer' }}>
+                <input type="checkbox" checked={framesFollow} onChange={(e) => setFramesFollow(e.target.checked)} />
+                <span className="hint">X뷰 추적</span>
+              </label>
+              <button className="icon-btn" title="현재 X뷰 다시 조회" onClick={() => refreshFramesNow(true)}>⟲</button>
+              {framesBusy && <span className="spinner" title="불러오는 중" />}
+            </>
+          )}
+        </div>
+        {showFrames && (
+          frames.length === 0 ? (
+            <div className="hint">{timeline ? '해당 구간에 메세지 없음 (X뷰를 이동하거나 메세지를 선택하세요)' : 'CAN log 업로드 필요'}</div>
+          ) : (
+            <div className="syslog-frames-table-wrap" ref={framesWrapRef}>
+              <table className="syslog-frames-table mono">
+                <thead>
+                  <tr><th>시간(ms)</th><th>ID</th><th>메세지</th><th>DLC</th><th>Data</th><th>신호값</th></tr>
+                </thead>
+                <tbody>
+                  {frames.map((f) => {
+                    const sigEntries = f.signals ? Object.entries(f.signals) : [];
+                    const sigSummary = sigEntries.length === 0
+                      ? '—'
+                      : sigEntries.slice(0, 3).map(([k, v]) => `${k}=${v}`).join(' ') + (sigEntries.length > 3 ? ' …' : '');
+                    return (
+                      <tr key={f.seq}>
+                        <td>{f.x_ms}</td>
+                        <td>{f.frame_id_hex}</td>
+                        <td>{f.message ?? '(미매칭)'}</td>
+                        <td>{f.dlc}</td>
+                        <td>{f.data_hex}</td>
+                        <td title={sigEntries.map(([k, v]) => `${k}=${v}`).join(' ')}>{sigSummary}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )
+        )}
+      </div>
     </div>
   );
 }
@@ -400,7 +519,7 @@ function CanLogChart({ series, color, xViewRef, xVersion, notifyChange, defaultX
     const distinct=[...new Set(visible.map(p=>p.value))].sort((a,b)=>a-b);
     const yTickValues= distinct.length>0 && distinct.length<=12 ? distinct : niceTicks(yMin,yMax,4);
     ctx.strokeStyle='#363b47'; ctx.fillStyle='#8b909c'; ctx.font='9px monospace'; ctx.lineWidth=1;
-    const xTicks=niceTicks(xMin,xMax,20);
+    const xTicks=niceTicks(xMin,xMax,10);
     xTicks.forEach((t,i)=>{ const px=xToPx(t); ctx.beginPath(); ctx.moveTo(px,plotTop); ctx.lineTo(px,plotTop+plotH); ctx.stroke(); if(!showXAxis) return; const label=fmtTimeMs(t); const tw=ctx.measureText(label).width; let lx=px-tw/2; if(i===0) lx=Math.max(plotLeft,lx); if(i===xTicks.length-1) lx=Math.min(plotLeft+plotW-tw,lx); ctx.fillText(label,lx,h-6); });
     for(const t of yTickValues){ const py=yToPx(t); if(py<plotTop-0.5||py>plotTop+plotH+0.5) continue; ctx.beginPath(); ctx.moveTo(plotLeft,py); ctx.lineTo(plotLeft+plotW,py); ctx.stroke(); ctx.fillText(fmtValueRaw(t,valueMode,series.choices),2,py+3); }
     ctx.strokeStyle='#4b5160'; ctx.strokeRect(plotLeft,plotTop,plotW,plotH);

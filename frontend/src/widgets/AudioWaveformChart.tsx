@@ -73,6 +73,70 @@ export function orFallback(x: number | null, fallback: number): number {
   return x === null ? fallback : x;
 }
 
+// Absolute wall-clock X tick label (epoch ms -> HH:MM:SS.mmm) -- used where
+// the view scrolls or pans, so the numbers actually change instead of
+// staying pegged at 0 like view-relative labels do.
+export function fmtAbsTick(epochMs: number): string {
+  const d = new Date(epochMs);
+  const p2 = (n: number) => String(n).padStart(2, '0');
+  const p3 = (n: number) => String(n).padStart(3, '0');
+  return `${p2(d.getHours())}:${p2(d.getMinutes())}:${p2(d.getSeconds())}.${p3(d.getMilliseconds())}`;
+}
+
+// Hover dwell: the crosshair follows the pointer in real time, but the
+// coordinate-value tooltip only fires after the pointer has stayed within
+// HOVER_DWELL_RADIUS_PX for HOVER_DWELL_MS. Timer/anchor bookkeeping only --
+// the caller moves its own crosshair on every plain-hover pointermove,
+// calls armDwell (hiding just the tip when a fresh cycle starts), and calls
+// cancelHover on drag/wheel/leave/up. While dwellRef.shown the caller
+// re-fires from its draw effect so a live-scrolling view keeps showing
+// fresh numbers under the stationary pointer. All ref-based: no renders.
+export const HOVER_DWELL_MS = 1000;
+export const HOVER_DWELL_RADIUS_PX = 6;
+
+export interface HoverDwell {
+  shown: boolean;
+  px: number;
+  py: number;
+}
+
+export function useHoverDwell(fire: (px: number, py: number) => void) {
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const anchorRef = useRef<{ px: number; py: number } | null>(null);
+  const dwellRef = useRef<HoverDwell>({ shown: false, px: 0, py: 0 });
+
+  const cancelHover = () => {
+    if (timerRef.current) {
+      clearTimeout(timerRef.current);
+      timerRef.current = null;
+    }
+    anchorRef.current = null;
+    dwellRef.current.shown = false;
+  };
+
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  useEffect(() => () => cancelHover(), []);
+
+  // Returns true when a fresh dwell cycle started (caller hides the tip).
+  const armDwell = (px: number, py: number): boolean => {
+    const a = anchorRef.current;
+    if (!a || Math.hypot(px - a.px, py - a.py) > HOVER_DWELL_RADIUS_PX) {
+      if (timerRef.current) clearTimeout(timerRef.current);
+      anchorRef.current = { px, py };
+      dwellRef.current.shown = false;
+      timerRef.current = setTimeout(() => {
+        timerRef.current = null;
+        dwellRef.current = { shown: true, px, py };
+        fire(px, py);
+      }, HOVER_DWELL_MS);
+      return true;
+    }
+    return false;
+  };
+
+  return { dwellRef, armDwell, cancelHover };
+}
+
 export interface AudioWaveformChartProps {
   channelIndex: number;
   color: string;
@@ -96,8 +160,9 @@ export interface AudioWaveformChartProps {
   /** 'sinceStreamStart': ticks read as elapsed time since streamStartedAtMs
    * (climbs as the live window scrolls forward). 'sinceWindowLeft': ticks
    * read as elapsed time since the current view's own left edge (always
-   * starts at 0). */
-  xTickMode: 'sinceStreamStart' | 'sinceWindowLeft';
+   * starts at 0). 'absolute': wall-clock time of each tick -- changes as
+   * the view scrolls or pans. */
+  xTickMode: 'sinceStreamStart' | 'sinceWindowLeft' | 'absolute';
   /** Decimal places for the ">=1s" tick label form (e.g. 2 -> "1.23s"). */
   xTickDecimals: number;
   /** If provided, wheel-zoom clamps the resulting X span to [min, max] and
@@ -203,15 +268,10 @@ export function AudioWaveformChart({
     if (hoverTipRef.current) hoverTipRef.current.style.display = 'none';
   };
 
-  const updateHover = (px: number, py: number) => {
+  const locateHover = (px: number, py: number) => {
     const g = lastGeomRef.current;
-    const vEl = hoverVRef.current;
-    const hEl = hoverHRef.current;
-    const tipEl = hoverTipRef.current;
-    if (!vEl || !hEl || !tipEl) return;
     if (px < g.plotLeft || px > g.plotLeft + g.plotW || py < g.plotTop || py > g.plotTop + g.plotH) {
-      hideHover();
-      return;
+      return null;
     }
     const ms = g.xMin + ((px - g.plotLeft) / g.plotW) * (g.xMax - g.xMin);
     // nearest decimated column by display-time coordinate
@@ -224,22 +284,60 @@ export function AudioWaveformChart({
         best = p;
       }
     }
-    if (!best) {
-      hideHover();
-      return;
-    }
+    if (!best) return null;
     const peak = Math.abs(best.min) >= Math.abs(best.max) ? best.min : best.max;
     const peakPy = g.plotTop + g.plotH - ((peak - g.yMin) / (g.yMax - g.yMin)) * g.plotH;
+    return { ms, peak, peakPy };
+  };
+  // Dotted crosshair: follows the pointer in real time (no dwell gate).
+  const moveCrosshair = (px: number, py: number): boolean => {
+    const vEl = hoverVRef.current;
+    const hEl = hoverHRef.current;
+    if (!vEl || !hEl) return false;
+    const loc = locateHover(px, py);
+    if (!loc) {
+      vEl.style.display = 'none';
+      hEl.style.display = 'none';
+      return false;
+    }
     vEl.style.display = 'block';
     vEl.style.left = `${px}px`;
     hEl.style.display = 'block';
-    hEl.style.top = `${peakPy}px`;
+    hEl.style.top = `${loc.peakPy}px`;
+    return true;
+  };
+  const hideTip = () => {
+    if (hoverTipRef.current) hoverTipRef.current.style.display = 'none';
+  };
+  // Coordinate values: only after a 1s dwell (see useHoverDwell).
+  const showTip = (px: number, py: number) => {
+    const tipEl = hoverTipRef.current;
+    if (!tipEl) return;
+    const g = lastGeomRef.current;
+    const loc = locateHover(px, py);
+    if (!loc) {
+      tipEl.style.display = 'none';
+      return;
+    }
     tipEl.style.display = 'block';
-    tipEl.textContent = `+${fmtDelta(ms - g.xMin)}  ${fmtLevel(peak)}`;
+    tipEl.textContent = `+${fmtDelta(loc.ms - (streamStartedAtMs ?? g.xMin))}  ${fmtLevel(loc.peak)}`;
     // flip to the left of the cursor when too close to the right edge
     const tipW = 170;
     tipEl.style.left = px + 12 + tipW > g.plotLeft + g.plotW ? `${px - tipW - 8}px` : `${px + 12}px`;
-    tipEl.style.top = `${Math.max(g.plotTop, peakPy - 12)}px`;
+    tipEl.style.top = `${Math.max(g.plotTop, loc.peakPy - 12)}px`;
+  };
+  const { dwellRef, armDwell, cancelHover } = useHoverDwell(showTip);
+
+  const refreshDwell = () => {
+    const d = dwellRef.current;
+    if (!d.shown) return;
+    const g = lastGeomRef.current;
+    if (d.px >= g.plotLeft && d.px <= g.plotLeft + g.plotW && d.py >= g.plotTop && d.py <= g.plotTop + g.plotH) {
+      showTip(d.px, d.py);
+    } else {
+      cancelHover();
+      hideHover();
+    }
   };
   // Local version counter for a standalone chart's own redraws (wheel/pan/
   // poll all call notifyChange()) -- must be real state read in the draw
@@ -440,7 +538,10 @@ export function AudioWaveformChart({
       ctx.moveTo(px, plotTop);
       ctx.lineTo(px, plotTop + plotH);
       ctx.stroke();
-      if (showXAxis) ctx.fillText(fmtXTick(t - xTickRef, xTickDecimals), px - 16, h - 5);
+      if (showXAxis) {
+        const label = xTickMode === 'absolute' ? fmtAbsTick(t) : fmtXTick(t - xTickRef, xTickDecimals);
+        ctx.fillText(label, px - (xTickMode === 'absolute' ? 40 : 16), h - 5);
+      }
     }
     for (const t of niceTicks(yMin, yMax, 3)) {
       const py = yToPx(t);
@@ -474,22 +575,24 @@ export function AudioWaveformChart({
       ctx.restore();
     }
 
-    drawDiffCursors(ctx, cursor, xMin, xMax, plotTop, plotH, xToPx);
+    drawDiffCursors(ctx, cursor, xMin, xMax, plotTop, plotH, xToPx, streamStartedAtMs);
     drawLevelCursors(ctx, yCursor, plotLeft, plotW, plotTop, plotH, yToPx);
 
     lastGeomRef.current = { xMin, xMax, yMin, yMax, plotLeft, plotTop, plotW, plotH };
+    refreshDwell();
     reportView?.(lastGeomRef.current);
     // cursor primitives (not the objects) are deps: the parent re-renders on
     // every level poll, but object identity churn must not redraw -- only real
     // value changes do, alongside the existing triggers.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [size, xWindowMs, xVersion, xOffsetMs, cursor?.a, cursor?.b, cursor?.mode, yCursor?.c, yCursor?.d, yCursor?.mode]);
+  }, [size, xWindowMs, xVersion, xOffsetMs, xTickMode, streamStartedAtMs, cursor?.a, cursor?.b, cursor?.mode, yCursor?.c, yCursor?.d, yCursor?.mode]);
 
   // ---- interaction: wheel-zoom (per-axis) + drag-to-pan ---------------------
 
   const onWheel = (e: React.WheelEvent<HTMLCanvasElement>) => {
     if (!e.ctrlKey && !e.metaKey) return;
     e.preventDefault();
+    cancelHover();
     hideHover();
     const rect = canvasRef.current!.getBoundingClientRect();
     const px = e.clientX - rect.left;
@@ -540,6 +643,7 @@ export function AudioWaveformChart({
     const py = e.clientY - rect.top;
     if (px < g.plotLeft || px > g.plotLeft + g.plotW || py < g.plotTop || py > g.plotTop + g.plotH) return;
     (e.target as HTMLCanvasElement).setPointerCapture(e.pointerId);
+    cancelHover();
     hideHover();
     if (yCursor?.mode) {
       // X and Y lines compete: grab whichever placed line is pixel-nearest.
@@ -609,16 +713,27 @@ export function AudioWaveformChart({
       return;
     }
     const rect = canvasRef.current!.getBoundingClientRect();
-    updateHover(e.clientX - rect.left, e.clientY - rect.top);
+    const px = e.clientX - rect.left;
+    const py = e.clientY - rect.top;
+    const g = lastGeomRef.current;
+    if (px < g.plotLeft || px > g.plotLeft + g.plotW || py < g.plotTop || py > g.plotTop + g.plotH) {
+      cancelHover();
+      hideHover();
+      return;
+    }
+    moveCrosshair(px, py);
+    if (armDwell(px, py)) hideTip();
   };
   const onPointerUp = () => {
     dragRef.current = null;
     cursorDragRef.current = null;
+    cancelHover();
     hideHover();
   };
   const onPointerLeave = () => {
     dragRef.current = null;
     cursorDragRef.current = null;
+    cancelHover();
     hideHover();
   };
 
