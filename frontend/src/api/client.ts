@@ -96,6 +96,13 @@ export const api = {
     bitrate_switch?: boolean;
   }) => post('/api/tx/row/start', entry),
   txRowStop: (key: string) => post('/api/tx/row/stop', { key }),
+  txRowUpdate: (entry: {
+    key: string;
+    message_name?: string | null;
+    values?: Record<string, number | string>;
+    values_alt?: Record<string, number | string> | null;
+    period_ms?: number;
+  }) => post('/api/tx/row/update', entry),
   txSignalInvalidFirst: (message_name: string, values: Record<string, number | string>) =>
     post('/api/tx/signal/invalid_first', { message_name, values }),
   txSignalZeroAfter: (message_name: string, values: Record<string, number | string>) =>

@@ -196,6 +196,12 @@ function MessageDisplayCore({ config }: { config: WidgetConfig }) {
   const setPassFilterIds = (ids: number[]) =>
     updateWidget({ ...config, options: { ...config.options, passFilterIds: ids } });
 
+  // 스크롤 모드 Time 표시: 절대시각(abs) ↔ 이전 메시지와의 차이(delta) 토글.
+  // 고정 모드에는 적용하지 않는다. 레이아웃 저장/불러오기 후에도 유지.
+  const timeMode = (config.options.timeMode as 'abs' | 'delta' | undefined) ?? 'abs';
+  const setTimeMode = (m: 'abs' | 'delta') =>
+    updateWidget({ ...config, options: { ...config.options, timeMode: m } });
+
   // 고정 모드용 ID별 최신 테이블 소스 (전역 canStore.frames — 링과 독립)
   const frames = [...canStore.frames.values()]
     .filter((f) => !filterActive || filterSet.has(f.id))
@@ -321,7 +327,7 @@ function MessageDisplayCore({ config }: { config: WidgetConfig }) {
         </button>
       </div>
       {mode === 'trace' ? (
-        <TraceView rows={liveRingRows} live={!paused} />
+        <TraceView rows={liveRingRows} live={!paused} timeMode={timeMode} onToggleTimeMode={() => setTimeMode(timeMode === 'abs' ? 'delta' : 'abs')} />
       ) : (
         <FixedTable frames={frames} dbc={dbc} expanded={expanded} onToggle={toggleExpanded} />
       )}
@@ -429,10 +435,10 @@ function FixedTable({
           <th>Time(ms)</th>
           <th>ID</th>
           <th>Name</th>
-          <th>DLC</th>
-          <th>Data</th>
           <th>Cycle</th>
           <th>Cnt</th>
+          <th>DLC</th>
+          <th>Data</th>
         </tr>
       </thead>
       <tbody>
@@ -451,10 +457,10 @@ function FixedTable({
                   {fmtId(f.id)} <FdBadge fd={f.fd} brs={f.brs} />
                 </td>
                 <td>{f.decoded?.name ?? '-'}</td>
-                <td>{f.dlc}</td>
-                <td>{fmtData(f.data)}</td>
                 <td>{f.cycleMs !== null ? `${f.cycleMs.toFixed(0)}ms` : '-'}</td>
                 <td>{f.count}</td>
+                <td>{f.dlc}</td>
+                <td>{fmtData(f.data)}</td>
               </tr>
               {isOpen && (
                 <tr className="signal-detail-row">
@@ -516,7 +522,17 @@ function SignalDetail({ frame, dbc }: { frame: FrameEntry; dbc: DbcSummary }) {
 const ROW_H = 22;
 const OVERSCAN = 10;
 
-function TraceView({ rows, live }: { rows: RxFrame[]; live: boolean }) {
+function TraceView({
+  rows,
+  live,
+  timeMode,
+  onToggleTimeMode,
+}: {
+  rows: RxFrame[];
+  live: boolean;
+  timeMode: 'abs' | 'delta';
+  onToggleTimeMode: () => void;
+}) {
   const outerRef = useRef<HTMLDivElement>(null);
   const [scrollTop, setScrollTop] = useState(0);
   const [viewH, setViewH] = useState(200);
@@ -561,11 +577,21 @@ function TraceView({ rows, live }: { rows: RxFrame[]; live: boolean }) {
   const first = Math.max(0, Math.floor(scrollTop / ROW_H) - OVERSCAN);
   const last = Math.min(total, Math.ceil((scrollTop + viewH) / ROW_H) + OVERSCAN);
   const visible = rows.slice(first, last);
+  // Delta-T(ms): 링 순서상 바로 이전 메시지와의 수신시각 차이. 가상 윈도우로
+  // 잘려도 전체 rows 기준 인덱스로 계산하므로 경계에서 정확하다. 첫 행은 '-'.
+  const deltaAt = (idx: number): string =>
+    idx <= 0 ? '-' : ((rows[idx].ts - rows[idx - 1].ts) * 1000).toFixed(3);
 
   return (
     <div className="trace-view">
       <div className="trace-header">
-        <span className="t-time">Time(ms)</span>
+        <span
+          className="t-time trace-time-toggle"
+          onClick={onToggleTimeMode}
+          title={timeMode === 'abs' ? '클릭: 이전 메시지와의 차이(Delta-T)로 전환' : '클릭: 절대시각으로 전환'}
+        >
+          {timeMode === 'abs' ? 'Time(ms)' : 'ΔT(ms)'}
+        </span>
         <span className="t-id">ID</span>
         <span className="t-fd"></span>
         <span className="t-name">Name</span>
@@ -588,7 +614,7 @@ function TraceView({ rows, live }: { rows: RxFrame[]; live: boolean }) {
         <div style={{ height: first * ROW_H }} />
         {visible.map((f, i) => (
           <div className="trace-row" key={first + i}>
-            <span className="t-time">{fmtTime(f.ts)}</span>
+            <span className="t-time">{timeMode === 'abs' ? fmtTime(f.ts) : deltaAt(first + i)}</span>
             <span className="t-id">{fmtId(f.id)}</span>
             <span className="t-fd">
               <FdBadge fd={f.fd} brs={f.brs} />

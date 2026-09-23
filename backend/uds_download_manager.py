@@ -991,7 +991,16 @@ class UdsDownloadManager:
         """Execute SecurityAccess sequence: RequestSeed → GenerateKey → SendKey."""
         params = self._get_effective_params(step, modified_params)
         algorithm_str = params.get("algorithm", "0x00")
-        algorithm = int(algorithm_str, 16) if isinstance(algorithm_str, str) else algorithm_str
+
+        if (
+            isinstance(algorithm_str, str)
+            and algorithm_str.lower().startswith("0x")
+        ):
+            algorithm = int(algorithm_str, 16)
+        else:
+            algorithm = algorithm_str
+    
+        #algorithm = int(algorithm_str, 16) if isinstance(algorithm_str, str) else algorithm_str
 
         seed_step = find_step(step.sub_steps, "requestSeed")
         key_step = find_step(step.sub_steps, "sendKey")
@@ -1006,7 +1015,19 @@ class UdsDownloadManager:
         timeout_s = self._procedure.p2_can_server_max / 1000.0 if self._procedure else 0.05
 
         request = build_security_access_request_seed(access_mode_seed)
-        self._log(level="INFO", msg=f"Seed 요청 (algorithm=0x{algorithm:02X}, mode=0x{access_mode_seed:02X})")
+        
+        #self._log(level="INFO", msg=f"Seed 요청 (algorithm=0x{algorithm:02X}, mode=0x{access_mode_seed:02X})")
+        
+        algorithm_msg = (
+            f"0x{algorithm:02X}"
+            if isinstance(algorithm, int)
+            else str(algorithm)
+        )
+        self._log(
+            level="INFO",
+            msg=f"Seed 요청 (algorithm={algorithm_msg}, mode=0x{access_mode_seed:02X})"
+        )
+        
         result = self._uds_request_with_retry(request, timeout_s, "RequestSeed")
 
         # Positive response layout is SID(1) | securityAccessType(1) | seed(N) --

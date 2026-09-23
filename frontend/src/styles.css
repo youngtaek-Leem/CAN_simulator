@@ -706,9 +706,14 @@ td.empty {
 }
 
 .t-time {
-  width: 72px;
+  width: 80px;
   text-align: right;
   flex-shrink: 0;
+}
+
+.trace-time-toggle {
+  cursor: pointer;
+  text-decoration: underline dotted;
 }
 
 .t-id {

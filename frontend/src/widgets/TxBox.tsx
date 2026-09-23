@@ -298,6 +298,8 @@ export function TxBox({ config }: { config: WidgetConfig }) {
     }
     const msg = dbcMessageOf(name);
     patchRow(key, { messageName: name, rawOverride: false, isFd: busFd, bitrateSwitch: false });
+    // 전송 중 메시지 변경: 백엔드 행 엔트리도 새 메시지로 retarget
+    pushRowLiveFor({ ...row, messageName: name, rawOverride: false, isFd: busFd, bitrateSwitch: false });
 
     let initialHex: string | null = null;
     try {
@@ -498,6 +500,34 @@ export function TxBox({ config }: { config: WidgetConfig }) {
     return { values, alt, error: null };
   };
 
+  /** 전송 중인 행의 값/토글/주기 변경을 백엔드에 즉시 반영한다 (즉시
+   * 프레임 없이 다음 tick부터 적용, tx_count 유지). 전송 중이 아니거나
+   * 파싱 실패(입력 중 빈칸 등)면 스킵 -- Send 시점에 검증 에러가 표시되므로
+   * 여기서 UI를 건드리지 않고, 실패한 푸시는 다음 편집 때 재시도된다. */
+  const pushRowLiveFor = (r: TxRow) => {
+    if (!isRowTransmitting(r.key)) return;
+    if (!r.messageName || r.rawOverride) {
+      // raw 행: 주기만 live 반영 (데이터 편집은 기존대로 정지 후 재시작)
+      void api
+        .txRowUpdate({ key: r.key, period_ms: Math.max(1, r.periodMs) })
+        .catch(() => {});
+      return;
+    }
+    const msg = dbcMessageOf(r.messageName);
+    if (!msg) return;
+    const { values, alt, error } = parseRowValues(msg, r);
+    if (error) return;
+    void api
+      .txRowUpdate({
+        key: r.key,
+        message_name: msg.name,
+        values,
+        values_alt: alt ?? null,
+        period_ms: Math.max(1, r.periodMs),
+      })
+      .catch(() => {});
+  };
+
   // ---- split view: message list (top) + selected message's signals (bottom)
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const selectedRow = rows.find((r) => r.key === selectedKey) ?? rows[0] ?? null;
@@ -692,7 +722,11 @@ export function TxBox({ config }: { config: WidgetConfig }) {
                       min={1}
                       value={r.periodMs}
                       disabled={!r.periodic}
-                      onChange={(e) => patchRow(r.key, { periodMs: Number(e.target.value) })}
+                      onChange={(e) => {
+                        const periodMs = Number(e.target.value);
+                        patchRow(r.key, { periodMs });
+                        pushRowLiveFor({ ...r, periodMs });
+                      }}
                     />
                   </td>
                   <td>
@@ -793,16 +827,18 @@ export function TxBox({ config }: { config: WidgetConfig }) {
                     </div>
                     {msg.signals.map((s) => {
                       const text = r.signalValues?.[s.name] ?? defaultSignalText(s);
-                      const setSignalText = (v: string) =>
-                        patchRow(r.key, {
-                          signalValues: { ...(r.signalValues ?? {}), [s.name]: v },
-                        });
+                      const setSignalText = (v: string) => {
+                        const signalValues = { ...(r.signalValues ?? {}), [s.name]: v };
+                        patchRow(r.key, { signalValues });
+                        pushRowLiveFor({ ...r, signalValues });
+                      };
                       const toggled = r.toggleOn?.[s.name] ?? false;
                       const toggleText = r.toggleValues?.[s.name] ?? text;
-                      const setToggleText = (v: string) =>
-                        patchRow(r.key, {
-                          toggleValues: { ...(r.toggleValues ?? {}), [s.name]: v },
-                        });
+                      const setToggleText = (v: string) => {
+                        const toggleValues = { ...(r.toggleValues ?? {}), [s.name]: v };
+                        patchRow(r.key, { toggleValues });
+                        pushRowLiveFor({ ...r, toggleValues });
+                      };
                       const toggleEditor = (value: string, onChange: (v: string) => void, listSuffix: string) =>
                         s.choices ? (
                           <ChoiceComboInput
@@ -841,6 +877,7 @@ export function TxBox({ config }: { config: WidgetConfig }) {
                                   patch.toggleValues = { ...(r.toggleValues ?? {}), [s.name]: text };
                                 }
                                 patchRow(r.key, patch);
+                                pushRowLiveFor({ ...r, ...patch });
                               }}
                             >
                               ⇄

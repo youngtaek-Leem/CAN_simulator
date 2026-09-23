@@ -410,10 +410,10 @@ export function CanAudioLatencyWidget({ config }: { config: WidgetConfig }) {
         <span className="spacer" />
         <span className="graph-xwindow mono">{fmtWindow(xWindowMs)}</span>
         <button className="icon-btn" title="시간창 넓히기 (10%)" onClick={() => zoomXWindow(X_WINDOW_STEP_FACTOR)}>
-          −
+          X−
         </button>
         <button className="icon-btn" title="시간창 좁히기 (10%)" onClick={() => zoomXWindow(1 / X_WINDOW_STEP_FACTOR)}>
-          +
+          X+
         </button>
         <button className="icon-btn" title="두 차트 모두 X/Y 축 자동 맞춤으로 리셋" onClick={resetEverything}>
           ⟲

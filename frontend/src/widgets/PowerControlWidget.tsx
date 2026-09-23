@@ -151,13 +151,12 @@ export function PowerControlWidget({ config }: { config: WidgetConfig }) {
     let cancelled = false;
     const poll = async () => {
       if (cancelled) return;
-      // 고부하 작업 중에는 측정 폴링 일시정지 (추가 트래픽 0). CAN-SWDL/
-      // OTA는 백엔드 busy 콜백이 measure를 스킵한다.
+      // 부하 작업(CAN-SWDL 슬롯 실행 중 / OTA Tester 실행 중)에만 측정
+      // 폴링 일시정지. 상단 바 Start·테스트 실행기·Replay 중에는 계속 측정한다.
+      // SWDL/OTA 실행 중에는 백엔드 busy 콜백도 measure를 스킵한다.
       const heavy =
-        canStore.status?.run?.running === true ||
-        canStore.status?.test_runner?.running === true ||
-        canStore.status?.ota_tester?.running === true ||
-        canStore.status?.replay?.progress?.running === true;
+        (canStore.status?.uds?.some((s) => s.running) ?? false) ||
+        canStore.status?.ota_tester?.running === true;
       if (connected && !heavy) {
         try {
           const r = await api.powerMeasure();

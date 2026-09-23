@@ -977,6 +977,98 @@ def test_event_multi_signal_send_emits_single_invalid_followup():
         teardown_stack(cm, sched, peer)
 
 
+def test_row_periodic_update_clears_toggle_mid_transmission():
+    """전송 중 토글 OFF: 다음 tick부터 단일값만 전송, tx_count 유지."""
+    import time
+
+    cm, dbc, sched, peer = setup_stack("t_row_upd_clear")
+    try:
+        sched.row_periodic_start("ru", "EngineData", {"EngineSpeed": 1000}, {"EngineSpeed": 2000}, 1000)
+        f1 = peer.recv(timeout=0.5)
+        assert f1 is not None and int.from_bytes(f1.data[0:2], "little") == 4000
+        res = sched.row_periodic_update("ru", "EngineData", {"EngineSpeed": 1000}, None, 1000)
+        assert res["updated"] is True and res["found"] is True
+        entry = sched._auto_entries["ru"]
+        before = entry.tx_count
+        job = sched._make_send_job(entry)
+        job()
+        job()
+        frames = []
+        deadline = time.perf_counter() + 1.0
+        while len(frames) < 2 and time.perf_counter() < deadline:
+            f = peer.recv(timeout=0.1)
+            if f is not None and f.arbitration_id == 0x100:
+                frames.append(f)
+        raws = [int.from_bytes(f.data[0:2], "little") for f in frames]
+        assert raws == [4000, 4000], f"toggle not cleared, got {raws}"
+        assert entry.tx_count == before + 2
+        sched.row_periodic_stop("ru")
+    finally:
+        teardown_stack(cm, sched, peer)
+
+
+def test_row_periodic_update_applies_new_values_and_period():
+    """전송 중 값/주기 변경이 다음 tick에 반영 + 미등록 키는 found=False."""
+    cm, dbc, sched, peer = setup_stack("t_row_upd_vals")
+    try:
+        sched.row_periodic_start("rv", "EngineData", {"EngineSpeed": 1000}, None, 1000)
+        f1 = peer.recv(timeout=0.5)
+        assert f1 is not None and f1.arbitration_id == 0x100
+        res = sched.row_periodic_update("rv", "EngineData", {"EngineSpeed": 1500}, None, 50)
+        assert res["updated"] is True and res["period_ms"] == 50
+        assert sched._auto_entries["rv"].period_ms == 50
+        entry = sched._auto_entries["rv"]
+        job = sched._make_send_job(entry)
+        job()
+        f2 = peer.recv(timeout=0.5)
+        assert f2 is not None and f2.arbitration_id == 0x100
+        assert int.from_bytes(f2.data[0:2], "little") == 6000
+        res2 = sched.row_periodic_update("nope", "EngineData", {"EngineSpeed": 1000}, None, 100)
+        assert res2["updated"] is False and res2["found"] is False
+        sched.row_periodic_stop("rv")
+    finally:
+        teardown_stack(cm, sched, peer)
+
+
+def test_row_periodic_restart_without_alt_clears_stale_toggle():
+    """Send 시작 - 토글 ON - Send OFF - 토글 OFF - Send ON: 잔류 토글이
+    부활하지 않고 단일값만 전송 (회귀: 시작 경로가 토글 저장소를
+    reconcile하지 않아 stale a/b를 재사용했음)."""
+    import time
+
+    cm, dbc, sched, peer = setup_stack("t_row_restart_clear")
+    try:
+        sched.row_periodic_start("rs", "EngineData", {"EngineSpeed": 1000}, {"EngineSpeed": 2000}, 1000)
+        f1 = peer.recv(timeout=0.5)
+        assert f1 is not None and int.from_bytes(f1.data[0:2], "little") == 4000
+        # 토글 ON 상태에서 한 tick에 B가 나오는지 확인 후 정지
+        entry = sched._auto_entries["rs"]
+        job = sched._make_send_job(entry)
+        job()
+        fb = peer.recv(timeout=0.5)
+        assert fb is not None and int.from_bytes(fb.data[0:2], "little") == 8000
+        sched.row_periodic_stop("rs")
+        # 토글 OFF 후 토글 없이 재시작 (values_alt=None)
+        sched.row_periodic_start("rs", "EngineData", {"EngineSpeed": 1000}, None, 1000)
+        f2 = peer.recv(timeout=0.5)
+        assert f2 is not None and int.from_bytes(f2.data[0:2], "little") == 4000
+        entry = sched._auto_entries["rs"]
+        job = sched._make_send_job(entry)
+        job()
+        job()
+        frames = []
+        deadline = time.perf_counter() + 1.0
+        while len(frames) < 2 and time.perf_counter() < deadline:
+            f = peer.recv(timeout=0.1)
+            if f is not None and f.arbitration_id == 0x100:
+                frames.append(f)
+        raws = [int.from_bytes(f.data[0:2], "little") for f in frames]
+        assert raws == [4000, 4000], f"stale toggle resurrected, got {raws}"
+        sched.row_periodic_stop("rs")
+    finally:
+        teardown_stack(cm, sched, peer)
+
+
 def test_row_tick_event_followup_single():
     """행 주기 tick의 Event 후속도 tick당 1회."""
     import time

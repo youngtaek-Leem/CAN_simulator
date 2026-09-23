@@ -34,6 +34,20 @@ function splitLines(raw: string): string[] {
   return raw.split(/\r?\n/);
 }
 
+/** hex 문자열(공백 구분, 예 "62 F1 C1")을 ASCII 미리보기로 변환.
+ * 출력 가능 범위(0x20~0x7E)만 문자 그대로, 나머지는 '.'으로 치환한다.
+ * 파싱 실패 시 '' 반환. */
+function hexToAscii(hex: string): string {
+  const clean = hex.replace(/\s+/g, '');
+  if (clean.length === 0 || clean.length % 2 !== 0 || !/^[0-9a-fA-F]*$/.test(clean)) return '';
+  let out = '';
+  for (let i = 0; i < clean.length; i += 2) {
+    const b = parseInt(clean.slice(i, i + 2), 16);
+    out += b >= 0x20 && b <= 0x7e ? String.fromCharCode(b) : '.';
+  }
+  return out;
+}
+
 function getDataPart(line: string): string {
   // 인라인 주석 지원: # 또는 // 이후는 주석
   const hashIdx = line.indexOf('#');
@@ -293,7 +307,12 @@ export function IsoTpBox({ config }: { config: WidgetConfig }) {
       {result && <div className="isotp-result ok">{result}</div>}
       {response && (
         <div className="isotp-result ok">
-          응답: <span className="mono">{response}</span>
+          <div>
+            응답: <span className="mono">{response}</span>
+          </div>
+          <div>
+            ASCII: <span className="mono">{hexToAscii(response) || '-'}</span>
+          </div>
         </div>
       )}
       {error && <div className="error">{error}</div>}

@@ -715,6 +715,28 @@ def tx_row_stop(req: TxRowStopRequest):
         raise HTTPException(status_code=400, detail=str(exc))
 
 
+class TxRowUpdateRequest(BaseModel):
+    key: str
+    message_name: Optional[str] = None
+    values: Optional[dict[str, float | int | str]] = None
+    values_alt: Optional[dict[str, float | int | str]] = None
+    period_ms: Optional[float] = None
+
+
+@app.post("/api/tx/row/update")
+def tx_row_update(req: TxRowUpdateRequest):
+    """Update a transmitting TxBox row in place (signal/toggle/period edit
+    while Send toggle is on). No immediate frame, tx_count preserved.
+    values_alt=None clears a removed toggle. Unknown/stopped key returns
+    found=False instead of an error."""
+    try:
+        return tx_scheduler.row_periodic_update(
+            req.key, req.message_name, req.values, req.values_alt, req.period_ms,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
 @app.post("/api/tx/signal/invalid_first")
 def tx_signal_invalid_first(req: SignalSendRequest):
     """Periodic 신호 전용 반전 펄스 (버튼/입력박스/멀티버튼/멀티입력박스):

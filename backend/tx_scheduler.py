@@ -688,8 +688,11 @@ class TxScheduler:
             if not values:
                 raise ValueError("전송할 신호 값이 없습니다")
             self._dbc.encode_with_values(message_name, values)
-            if values_alt is not None:
-                self._store_toggle(message_name, values, values_alt, reset_phase=True)
+            # Always reconciles the toggle store (None clears): a row (re)start
+            # reflects the current UI toggle state, so a toggle removed while
+            # stopped must not resurrect stale alternation (preset_signal and
+            # row_periodic_update share this semantic).
+            self._store_toggle(message_name, values, values_alt, reset_phase=True)
             # Immediate frame uses the current toggle phase (A first), like a
             # one-shot send, so the sequence starts A,B,A,... with no repeat
             # -- including its single Event invalid follow-up when applicable.
@@ -751,6 +754,57 @@ class TxScheduler:
             removed = self._auto_entries.pop(key, None)
             self._row_entry_keys.discard(key)
         return {"stopped": True, "key": key, "found": removed is not None}
+
+    def row_periodic_update(self, key: str, message_name: Optional[str] = None,
+                             values: Optional[dict[str, Any]] = None,
+                             values_alt: Optional[dict[str, Any]] = None,
+                             period_ms: Optional[float] = None) -> dict:
+        """Update a transmitting row-keyed entry in place (TxBox signal /
+        toggle / period edit while Send toggle is on). No immediate frame,
+        tx_count and schedule are preserved. DBC rows reconcile the toggle
+        store (values_alt=None clears a removed toggle, like preset_signal)
+        and restart alternation at the A set. Unknown/stopped key returns
+        found=False so the caller can ignore it."""
+        with self._lock:
+            if key not in self._row_entry_keys or key not in self._auto_entries:
+                return {"updated": False, "key": key, "found": False}
+        # NOTE: _store_toggle() takes self._lock itself (plain Lock, not
+        # reentrant), so all DBC/toggle work happens outside the lock --
+        # same split as row_periodic_start().
+        message = None
+        if message_name:
+            message = self._dbc.get_message(message_name)
+            if not values:
+                raise ValueError("전송할 신호 값이 없습니다")
+            self._dbc.encode_with_values(message_name, values)
+            # Always reconciles (None clears): turning the TxBox toggle
+            # off mid-transmission must stop the alternation at once.
+            self._store_toggle(message_name, values, values_alt, reset_phase=True)
+        with self._lock:
+            entry = self._auto_entries.get(key)
+            if entry is None or key not in self._row_entry_keys:
+                stale = message_name is not None
+            else:
+                stale = False
+                if message is not None:
+                    # The row may have been switched to another DBC message
+                    # mid-transmission -- retarget the entry so ticks follow it.
+                    if message_name != entry.message_name:
+                        entry.message_name = message.name
+                        entry.arbitration_id = message.frame_id
+                        entry.is_extended = message.is_extended_frame
+                        entry.is_fd = message.is_fd
+                        entry.bitrate_switch = message.is_fd
+                        entry.data = None
+                if period_ms is not None:
+                    entry.period_ms = max(1.0, float(period_ms))
+                period = entry.period_ms
+        if stale:
+            # Stopped concurrently after the toggle store above -- roll it
+            # back (outside the lock) so no stale alternation lingers.
+            self._store_toggle(message_name, values or {}, None)
+            return {"updated": False, "key": key, "found": False}
+        return {"updated": True, "key": key, "found": True, "period_ms": period}
 
     def enable_all_periodic(self, rx_node: str = "") -> dict:
         """"Enable Msg" button: arm auto-periodic resend for every

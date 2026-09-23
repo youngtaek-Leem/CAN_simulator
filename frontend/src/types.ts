@@ -92,6 +92,7 @@ export interface BackendStatus {
   settings: { ws_flush_ms: number };
   run: { running: boolean };
   test_runner: TestRunnerSummary;
+  uds: UdsDownloadStatus[];
   ota_tester: OtaTesterStatus;
   power: PowerStatus;
   audio: AudioStatus;
