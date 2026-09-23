@@ -132,8 +132,9 @@ function parseSignalValues(
 
 /** VAL_ 선택지 + 직접 입력 콤보 (TxBox 신호 에디터 전용). 네이티브
  * datalist는 입력값 기준으로 제안을 필터링해서(기본값이 Invalid인 신호가
- * 많음) 전체 목록이 안 보이기 때문에 커스텀 드롭다운을 쓴다: ▼ 버튼이나
- * 입력 포커스 시 VAL_ 전체를 항상 표시하고, 타이핑하면 포함 필터가 걸린다.
+ * 많음) 전체 목록이 안 보이기 때문에 커스텀 드롭다운을 쓴다: 클릭/포커스·▼
+ * 버튼에서는 입력값과 무관하게 VAL_ 전체를 항상 표시하고(현재값 하이라이트),
+ * 타이핑할 때만 포함 필터가 걸린다. 입력값은 그대로 유지된다.
  * openKey는 호출자가 행·신호·칸까지 포함해 유일하게 만든다. */
 function ChoiceComboInput({
   openKey,
@@ -151,26 +152,41 @@ function ChoiceComboInput({
   onChange: (v: string) => void;
 }) {
   const open = openListKey === openKey;
-  const q = value.trim().toLowerCase();
+  // 목록 필터는 입력값(value)이 아니라 별도 query로 관리: null = 전체 표시.
+  // 포커스/▼ 클릭 시 null로 리셋해 현재 숫자와 무관하게 전체를 보여주고,
+  // 타이핑할 때만 query가 갱신되어 필터가 걸린다.
+  const [query, setQuery] = useState<string | null>(null);
+  const q = (query ?? '').trim().toLowerCase();
+  const current = value.trim();
   const items = Object.entries(choices)
     .map(([k, v]) => ({ k: Number(k), v }))
     .sort((a, b) => a.k - b.k)
-    .filter(({ k, v }) => q === '' || String(k).includes(q) || v.toLowerCase().includes(q));
+    .filter(({ k, v }) => query === null || q === '' || String(k).includes(q) || v.toLowerCase().includes(q));
   return (
     <div className="tx-combo">
       <input
         className="mono tx-signal-input"
         value={value}
         title="선택지에서 고르거나 직접 입력"
-        onChange={(e) => onChange(e.target.value)}
-        onFocus={() => setOpenListKey(openKey)}
+        onChange={(e) => {
+          onChange(e.target.value);
+          setQuery(e.target.value);
+        }}
+        onFocus={() => {
+          setQuery(null);
+          setOpenListKey(openKey);
+        }}
         onBlur={() => {
           // 항목 mousedown이 먼저 처리되도록 blur 닫힘을 한 tick 미룬다
-          setTimeout(() => setOpenListKey((cur) => (cur === openKey ? null : cur)), 120);
+          setTimeout(() => {
+            setOpenListKey((cur) => (cur === openKey ? null : cur));
+            setQuery(null);
+          }, 120);
         }}
         onKeyDown={(e) => {
           if (e.key === 'Escape') {
             setOpenListKey(null);
+            setQuery(null);
             (e.target as HTMLInputElement).blur();
           }
         }}
@@ -179,7 +195,10 @@ function ChoiceComboInput({
         className="small-btn"
         title="VAL_ 전체 목록 보기"
         onMouseDown={(e) => e.preventDefault()}
-        onClick={() => setOpenListKey(open ? null : openKey)}
+        onClick={() => {
+          setQuery(null);
+          setOpenListKey(open ? null : openKey);
+        }}
       >
         ▼
       </button>
@@ -191,11 +210,12 @@ function ChoiceComboInput({
             items.map(({ k, v }) => (
               <div
                 key={k}
-                className="tx-combo-hit"
+                className={`tx-combo-hit${String(k) === current ? ' active' : ''}`}
                 title={`${v} (${k}) 입력`}
                 onMouseDown={(e) => {
                   e.preventDefault();
                   onChange(String(k));
+                  setQuery(null);
                   setOpenListKey(null);
                 }}
               >
