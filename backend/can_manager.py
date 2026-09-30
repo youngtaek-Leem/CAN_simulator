@@ -45,6 +45,16 @@ FD_DATA_SJW = 8
 DEFAULT_FD_DATA_BITRATE = 2_000_000  # Vector takes a plain data_bitrate int, unlike PCAN's register timing above
 MAX_CLASSIC_DATA_LEN = 8
 
+# Minimum inter-CF gap (seconds) forced on multi-frame sends when the caller
+# asks for "as fast as the ECU allows" (STmin checkbox off). PCAN needs a
+# ~200us floor -- a zero-gap back-to-back CF burst intermittently loses tail
+# frames on some DUT/PCAN setups. Vector/virtual can go true back-to-back
+# (gap 0): with STmin=0 the only spacing left is the frame's own wire time
+# (~220-270us for a classic 8-byte frame on 500Kbps HS-CAN), which is exactly
+# the "200us-class" pacing under test. Callers (uds/ota download managers)
+# take max(user STmin override, this default) -- see default_tx_gap_s().
+PCAN_MIN_TX_GAP_S = 0.0002
+
 
 class _BufferListener(can.Listener):
     def __init__(self, buffer: deque, counter: dict):
@@ -194,6 +204,16 @@ class CanManager:
         with self._lock:
             self.bus.send(msg)
             self.counters["tx"] += 1
+
+    def default_tx_gap_s(self) -> float:
+        """Per-interface minimum inter-CF gap (seconds) for multi-frame sends
+        when no explicit user STmin override is set. PCAN keeps the 200us
+        tail-frame-loss guard; Vector/virtual return 0.0 for true
+        back-to-back (wire time ~220-270us/frame on 500Kbps HS-CAN is the
+        only spacing left). Unknown/disconnected -> 0.0 (fast)."""
+        if self.config.get("interface") == "pcan":
+            return PCAN_MIN_TX_GAP_S
+        return 0.0
 
     def add_listener(self, listener: can.Listener) -> None:
         """Attach an extra listener (e.g. a test-runner CANResp watcher) that

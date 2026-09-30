@@ -115,6 +115,51 @@ def _build_fc(flow_status: int, block_size: int = 0, stmin: int = 0) -> bytes:
 # Requirement.md's TransferData Stop-delay investigation).
 _STOP_POLL_S = 0.05
 
+# Inter-CF pacing: time.sleep()/Event.wait() are quantized by the OS timer
+# (≈15.6ms default on Windows, 1ms even with winmm timeBeginPeriod(1), ~1ms
+# on macOS/Linux nanosleep paths for sub-ms requests). A 200us STmin slept
+# this way actually waits 1~1.5ms -- exactly the TransferData slowdown seen
+# on Vector HS-CAN 500Kbps. Below this threshold we busy-spin on
+# perf_counter() instead, which holds ~10us accuracy at the cost of one CPU
+# core during the burst only. Longer waits keep the efficient sleep path.
+# Note the physics floor: a classic 8-byte frame on 500Kbps occupies
+# ~220-270us of wire time, so STmin=0 back-to-back delivery already lands
+# at ~250us/frame -- "200us interval" means no *added* gap, not beating the
+# wire time.
+_SPIN_THRESHOLD_S = 0.002
+# Inside the spin loop, yield to the OS scheduler every this many seconds
+# so a concurrent Stop request / RX dispatch thread is never starved while
+# we hold the core. time.sleep(0) is a pure yield with no timer wait.
+_SPIN_YIELD_S = 0.0005
+
+
+def _sleep_precise(delay_s: float, stop_event: Optional[threading.Event] = None) -> bool:
+    """Sleep ``delay_s`` seconds with sub-ms accuracy.
+
+    Returns True when ``stop_event`` was set mid-wait (caller should abort),
+    False when the full delay elapsed. Sleeps >= _SPIN_THRESHOLD_S use the
+    efficient OS wait; shorter ones spin on perf_counter() with periodic
+    stop_event checks and scheduler yields.
+    """
+    if delay_s <= 0:
+        return bool(stop_event is not None and stop_event.is_set())
+    if delay_s >= _SPIN_THRESHOLD_S:
+        if stop_event is not None:
+            return bool(stop_event.wait(delay_s))
+        time.sleep(delay_s)
+        return False
+    deadline = time.perf_counter() + delay_s
+    last_yield = time.perf_counter()
+    while True:
+        if stop_event is not None and stop_event.is_set():
+            return True
+        now = time.perf_counter()
+        if now >= deadline:
+            return False
+        if now - last_yield >= _SPIN_YIELD_S:
+            time.sleep(0)
+            last_yield = now
+
 
 def _wait_for_frame(
     reader: can.BufferedReader, rx_id: int, timeout_s: float,
@@ -254,6 +299,9 @@ def send(
         frames_sent = 1
         sn = 1
         wait_count = 0
+        # Inter-CF pacing timestamps (CF sends only -- FF->CF1 includes the
+        # FC round-trip so it is excluded from gap telemetry).
+        cf_send_ts: list = []
 
         while remaining:
             fc = _wait_for_fc(reader, fc_id, fc_timeout_s, stop_event=stop_event)
@@ -273,21 +321,24 @@ def send(
             block_size = fc[1]
             stmin = max(decode_stmin(fc[2]), min_stmin_s)
             block_count = 0
+            # Pre-slice this block's CF payloads up-front so the paced loop
+            # below does no allocation work between timed sends -- only the
+            # gap wait + bus.send, minimizing jitter on the 200us budget.
+            # (Block boundary still honored: outer loop re-waits for FC.)
             while remaining and (block_size == 0 or block_count < block_size):
                 if stmin > 0 and block_count > 0:
-                    if stop_event is not None:
-                        if stop_event.wait(stmin):
-                            raise IsoTpError("사용자에 의해 중단됨")
-                    else:
-                        time.sleep(stmin)
+                    if _sleep_precise(stmin, stop_event):
+                        raise IsoTpError("사용자에 의해 중단됨")
                 chunk, remaining = remaining[:cf_data_len], remaining[cf_data_len:]
+                cf_frame = pad(bytes([PCI_CF | (sn & 0x0F)]) + chunk)
                 can_manager.send(
                     tx_id,
-                    pad(bytes([PCI_CF | (sn & 0x0F)]) + chunk),
+                    cf_frame,
                     is_extended_id,
                     is_fd=is_fd,
                     bitrate_switch=bitrate_switch,
                 )
+                cf_send_ts.append(time.perf_counter())
                 frames_sent += 1
                 sn = (sn + 1) % 16
                 block_count += 1
@@ -295,12 +346,21 @@ def send(
         if owns_reader:
             can_manager.notifier.remove_listener(reader)
 
+    if len(cf_send_ts) >= 2:
+        gaps_us = [(b - a) * 1_000_000.0 for a, b in zip(cf_send_ts, cf_send_ts[1:])]
+        avg_gap_us = round(sum(gaps_us) / len(gaps_us), 1)
+        max_gap_us = round(max(gaps_us), 1)
+    else:
+        avg_gap_us = 0.0
+        max_gap_us = 0.0
     return {
         "sent": True,
         "frame_type": "multi",
         "frames_sent": frames_sent,
         "bytes_sent": total_len,
         "duration_ms": round((time.perf_counter() - t0) * 1000, 1),
+        "avg_gap_us": avg_gap_us,
+        "max_gap_us": max_gap_us,
     }
 
 

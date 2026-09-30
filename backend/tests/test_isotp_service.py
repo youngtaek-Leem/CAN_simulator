@@ -486,3 +486,66 @@ def test_receive_bs_zero_sends_only_the_initial_fc(stack):
 
     t.join(timeout=2)
     assert result["value"] == data
+
+
+def test_sleep_precise_holds_200us_without_os_timer_quantization():
+    """Regression for the TransferData 1~1.5ms pacing bug: time.sleep(0.0002)
+    is quantized by the OS timer (≈1ms even with winmm timeBeginPeriod(1)),
+    so _sleep_precise() must spin below _SPIN_THRESHOLD_S instead. A 200us
+    request must complete well under 1ms on any platform."""
+    t0 = time.perf_counter()
+    interrupted = isotp_service._sleep_precise(0.0002, None)
+    dt_ms = (time.perf_counter() - t0) * 1000.0
+    assert interrupted is False
+    assert dt_ms < 1.0
+    assert dt_ms >= 0.15  # actually waited, not skipped
+
+
+def test_sleep_precise_aborts_promptly_on_stop_event():
+    ev = threading.Event()
+    ev.set()
+    t0 = time.perf_counter()
+    assert isotp_service._sleep_precise(0.0002, ev) is True
+    assert (time.perf_counter() - t0) < 0.05
+    # long waits keep the efficient OS path but stay stop-aware
+    ev2 = threading.Event()
+    t0 = time.perf_counter()
+    assert isotp_service._sleep_precise(0.05, ev2) is False
+    assert (time.perf_counter() - t0) >= 0.04
+
+
+def test_200us_floor_holds_with_precise_pacing(stack):
+    """With a 200us floor (PCAN guard / explicit STmin), the measured
+    inter-CF gap must land at ~200us -- the old time.sleep() path delivered
+    ~1ms here, which was the reported Vector HS-CAN slowdown."""
+    cm, peer = stack
+    stop, t, _ = start_fc_responder(peer, fs=0x0, bs=0x00, stmin=0x00)
+    try:
+        data = bytes((i % 256) for i in range(6 + 7 * 10))  # FF + 10 CF
+        result = isotp_service.send(cm, TX_ID, FC_ID, data, fc_timeout_s=1.0, min_stmin_s=0.0002)
+    finally:
+        stop.set()
+        t.join(timeout=1)
+    assert result["frames_sent"] == 11
+    assert result["avg_gap_us"] == pytest.approx(200, abs=150)
+    assert result["max_gap_us"] < 1000
+
+
+def test_zero_floor_sends_back_to_back(stack):
+    """STmin checkbox off + ECU FC=0 (Vector/virtual default gap 0.0) must
+    not add any pacing at all -- on real 500Kbps HS-CAN the only spacing
+    left is the frame wire time (~220-270us), i.e. the requested
+    200us-class throughput. On virtual there is no wire time, so the whole
+    11-frame burst must complete in a few ms with gap telemetry present."""
+    cm, peer = stack
+    stop, t, _ = start_fc_responder(peer, fs=0x0, bs=0x00, stmin=0x00)
+    try:
+        data = bytes((i % 256) for i in range(6 + 7 * 10))  # FF + 10 CF
+        result = isotp_service.send(cm, TX_ID, FC_ID, data, fc_timeout_s=1.0, min_stmin_s=0.0)
+    finally:
+        stop.set()
+        t.join(timeout=1)
+    assert result["frames_sent"] == 11
+    assert result["duration_ms"] < 30
+    assert result["avg_gap_us"] < 1000
+    assert "max_gap_us" in result

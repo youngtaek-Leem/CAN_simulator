@@ -1,6 +1,7 @@
 import time
 
 import can
+import pytest
 
 import can_manager
 from can_manager import CanManager
@@ -128,3 +129,22 @@ def test_pcan_fd_timing_constants_resolve_to_intended_bitrates():
     assert timing.nom_sample_point == 80.0
     assert timing.data_bitrate == 1_000_000
     assert timing.data_sample_point == 75.0
+
+
+def test_default_tx_gap_is_zero_for_vector_and_virtual_but_guarded_for_pcan():
+    """TransferData pacing: Vector/virtual go true back-to-back (gap 0 --
+    wire time ~220-270us/frame on 500Kbps HS-CAN is the only spacing left),
+    while PCAN keeps the 200us tail-frame-loss guard."""
+    cm = CanManager()
+    cm.connect("virtual", "t_gap_virtual")
+    try:
+        assert cm.default_tx_gap_s() == 0.0
+    finally:
+        cm.disconnect()
+    cm2 = CanManager()
+    cm2.config = {"interface": "vector"}
+    assert cm2.default_tx_gap_s() == 0.0
+    cm3 = CanManager()
+    cm3.config = {"interface": "pcan"}
+    assert cm3.default_tx_gap_s() == pytest.approx(can_manager.PCAN_MIN_TX_GAP_S)
+    assert CanManager().default_tx_gap_s() == 0.0  # disconnected -> fast

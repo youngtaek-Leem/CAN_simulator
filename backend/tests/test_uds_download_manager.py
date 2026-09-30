@@ -364,7 +364,7 @@ def test_second_diagnostic_session_control_step_uses_its_own_session_choice():
 
     sent: list[str] = []
 
-    def fake_retry(self, request, timeout_s, label, retry_delay_s=0.1):
+    def fake_retry(self, request, timeout_s, label, retry_delay_s=0.1, **kw):
         sent.append(label)
         return {"data": bytearray([0x50, request[1]])}
 
@@ -499,7 +499,7 @@ def test_transfer_data_sends_tester_present_keepalive_periodically(monkeypatch):
     tp_calls = []
     mgr._send_tester_present = lambda: tp_calls.append(time.time())
 
-    def fake_retry(self, request, timeout_s, label, retry_delay_s=0.1):
+    def fake_retry(self, request, timeout_s, label, retry_delay_s=0.1, **kw):
         time.sleep(0.03)  # let real elapsed time cross the (shrunk) interval
         return {"data": bytearray([0x76, request[1]])}
 
@@ -560,6 +560,36 @@ def test_uds_request_with_retry_no_send_floor_when_stmin_checkbox_off():
     mgr._uds_request_with_retry(bytearray([0x36, 0x01, 0xAA]), 0.05, "TransferData(seq=1)")
 
     assert sent_kwargs["min_stmin_s"] == udm.TRANSFER_BLOCK_MIN_GAP_S
+
+
+def test_send_floor_is_zero_on_virtual_when_stmin_checkbox_off():
+    """STmin 체크 해제 + virtual/Vector 연결이면 송신측 floor가 0.0이어야
+    한다 -- 그래야 CF가 백투백으로 나가고, 500Kbps HS-CAN 실측에서 프레임당
+    wire time(~220-270us)만이 간격으로 남는다. PCAN이 아닌데 구 floor
+    0.2ms가 강제되면 매 프레임 1ms 양자화와 합쳐져 보고된 1~1.5ms가 된다."""
+    from can_manager import CanManager
+
+    cm = CanManager()
+    cm.connect("virtual", "t_floor_virtual")
+    try:
+        mgr = UdsDownloadManager(cm, lambda *a, **k: {"sent": True}, lambda *a, **k: b"")
+        mgr._procedure = UdsProcedure(request_id=0x783, response_id=0x78B)
+        assert mgr._global_stmin_tx is None  # checkbox off
+        assert mgr._get_send_stmin_floor_s() == 0.0
+    finally:
+        cm.disconnect()
+
+
+def test_send_floor_keeps_pcan_guard():
+    """PCAN 연결에서는 tail-frame 유실 방지용 200us 가드가 그대로 유지된다."""
+    from can_manager import CanManager
+
+    cm = CanManager()
+    cm.config = {"interface": "pcan"}
+    mgr = UdsDownloadManager(cm, lambda *a, **k: {"sent": True}, lambda *a, **k: b"")
+    mgr._procedure = UdsProcedure(request_id=0x783, response_id=0x78B)
+    assert mgr._global_stmin_tx is None
+    assert mgr._get_send_stmin_floor_s() == udm.TRANSFER_BLOCK_MIN_GAP_S
 
 
 def test_send_floor_prefers_larger_global_stmin_override():

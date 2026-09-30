@@ -82,11 +82,14 @@ TRANSFER_BLOCK_MAX_RETRIES = 3
 TRANSFER_BLOCK_RETRY_DELAY_S = 0.5
 
 # Minimum inter-CF gap (seconds) forced on TransferData multi-frame sends,
-# on top of whatever the ECU's Flow Control STmin asks for. A zero-gap
-# back-to-back CF burst intermittently loses tail frames on some DUTs/PCAN
-# setups (observed: last CF of a 36-frame burst missing -> response timeout);
-# 200us costs ~7ms per 258-byte block and is invisible next to P2* timeouts.
-# An explicit global STmin override larger than this still wins (max()).
+# on top of whatever the ECU's Flow Control STmin asks for. Kept as the PCAN
+# fallback -- CanManager.default_tx_gap_s() returns this for PCAN but 0.0
+# for Vector/virtual (true back-to-back: wire time ~220-270us/frame on
+# 500Kbps HS-CAN is the only spacing left, which is the "200us-class"
+# pacing under test). A zero-gap burst intermittently lost tail frames on
+# some DUTs/PCAN setups (observed: last CF of a 36-frame burst missing ->
+# response timeout), hence the PCAN guard. An explicit global STmin override
+# larger than the interface default still wins (max()).
 TRANSFER_BLOCK_MIN_GAP_S = 0.0002
 
 # States
@@ -500,12 +503,17 @@ class UdsDownloadManager:
         even with the "STmin" checkbox off, when unchecking it is supposed
         to go back to sending as fast as the ECU's own FC allows. Only an
         explicit user override should ever slow the send side down -- plus
-        the small TRANSFER_BLOCK_MIN_GAP_S floor that keeps fast CF bursts
-        from intermittently losing tail frames.
+        the per-interface guard (PCAN 200us against tail-frame loss,
+        Vector/virtual 0.0 for true back-to-back) from
+        CanManager.default_tx_gap_s().
         """
         global_override = getattr(self, '_global_stmin_tx', None)
         user_floor = decode_stmin(global_override) if global_override is not None else 0.0
-        return max(user_floor, TRANSFER_BLOCK_MIN_GAP_S)
+        try:
+            iface_gap = self._can.default_tx_gap_s()
+        except Exception:
+            iface_gap = TRANSFER_BLOCK_MIN_GAP_S
+        return max(user_floor, iface_gap)
 
     def _uds_request(self, request: bytes, timeout_s: float, label: str = "") -> dict:
         """Send a UDS request and receive the response."""
@@ -588,6 +596,8 @@ class UdsDownloadManager:
     def _uds_request_with_retry(
         self, request: bytes, timeout_s: float, label: str = "",
         max_retries: Optional[int] = None, retry_delay_s: float = 0.1,
+        reader: Optional[can.BufferedReader] = None,
+        min_stmin_s: Optional[float] = None,
     ) -> dict:
         """Send a UDS request once and receive the response, waiting again
         (without retransmitting) on NRC 0x78 (ResponsePending) -- per ISO
@@ -623,7 +633,14 @@ class UdsDownloadManager:
         Deliberately does not delegate to `_uds_request()` (which both
         sends and receives) -- that method is still used as-is by callers
         that want a single send+receive with no pending-retry handling
-        (e.g. ECUReset)."""
+        (e.g. ECUReset).
+
+        ``reader``: an already-registered BufferedReader to reuse instead of
+        creating one per call. _execute_transfer_data() passes a single
+        reader shared across all its blocks so block-to-block turnarounds
+        pay no add/remove_listener cost and never leave a gap where a fast
+        ECU response could be missed. ``min_stmin_s``: precomputed send
+        floor for the same reason (None = compute fresh)."""
         proc = self._procedure
         if proc is None:
             raise RuntimeError("No procedure loaded")
@@ -635,6 +652,8 @@ class UdsDownloadManager:
         if extended_id_attr is not None:
             is_ext = extended_id_attr
         fc_stmin = self._get_fc_stmin()
+        if min_stmin_s is None:
+            min_stmin_s = self._get_send_stmin_floor_s()
 
         req_hex = request.hex(" ").upper() if isinstance(request, (bytes, bytearray)) else str(request)
         self._log(level="INFO", service="CAN_TX", msg=f"Tx CAN_ID=0x{tx_id:03X} DATA=[{req_hex}] ({label})")
@@ -644,8 +663,10 @@ class UdsDownloadManager:
         # Registered *before* sending -- see _uds_request()'s matching
         # comment and isotp_service.send()'s docstring; the fast-ECU-
         # response race this fixes applies here identically.
-        reader = can.BufferedReader()
-        self._can.notifier.add_listener(reader)
+        owns_reader = reader is None
+        if owns_reader:
+            reader = can.BufferedReader()
+            self._can.notifier.add_listener(reader)
         try:
             try:
                 send_stats = self._isotp_send(
@@ -653,7 +674,7 @@ class UdsDownloadManager:
                     is_extended_id=is_ext,
                     fc_timeout_s=timeout_s,
                     reader=reader,
-                    min_stmin_s=self._get_send_stmin_floor_s(),
+                    min_stmin_s=min_stmin_s,
                     stop_event=self._stop_event,
                 )
                 # Remember how many frames actually went out: on a later
@@ -715,7 +736,8 @@ class UdsDownloadManager:
                     nrc=result["nrc"],
                 )
         finally:
-            self._can.notifier.remove_listener(reader)
+            if owns_reader:
+                self._can.notifier.remove_listener(reader)
 
     # ---- Internal: Main execution loop ---------------------------------------
 
@@ -1185,58 +1207,74 @@ class UdsDownloadManager:
         self._log(level="INFO", msg=f"TransferData 시작: seekAddress=0x{seek_addr:X}, writeSize=0x{write_size:X}, "
                       f"endOffset=0x{end_offset:X}, blockSize={block_size}, totalBlocks={total_blocks}")
 
-        while offset < end_offset:
-            if self._stop_event.is_set():
-                raise RuntimeError("사용자에 의해 전송 중단됨")
+        # One listener + one precomputed send floor shared across every block
+        # in this transfer: per-block add/remove_listener + STmin recompute
+        # used to add millisecond-scale jitter to every block turnaround on
+        # top of the CF pacing itself. Shared reader never leaves a gap
+        # where a fast ECU response could be missed between blocks.
+        if self._can.notifier is None:
+            raise RuntimeError("CAN 버스가 연결되어 있지 않습니다")
+        shared_reader = can.BufferedReader()
+        self._can.notifier.add_listener(shared_reader)
+        shared_floor_s = self._get_send_stmin_floor_s()
+        try:
+            while offset < end_offset:
+                if self._stop_event.is_set():
+                    raise RuntimeError("사용자에 의해 전송 중단됨")
 
-            now = time.time()
-            if now - last_tester_present_ts >= TESTER_PRESENT_INTERVAL_S:
-                self._send_tester_present()
-                last_tester_present_ts = now
+                now = time.time()
+                if now - last_tester_present_ts >= TESTER_PRESENT_INTERVAL_S:
+                    self._send_tester_present()
+                    last_tester_present_ts = now
 
-            chunk = binary[offset:min(offset + block_size, end_offset)]
-            request = build_transfer_data(seq_num & 0xFF, chunk)
-            label = f"TransferData(seq={seq_num}, offset=0x{offset:06X}, size={len(chunk)})"
+                chunk = binary[offset:min(offset + block_size, end_offset)]
+                request = build_transfer_data(seq_num & 0xFF, chunk)
+                label = f"TransferData(seq={seq_num}, offset=0x{offset:06X}, size={len(chunk)})"
 
-            for retry in range(TRANSFER_BLOCK_MAX_RETRIES + 1):
-                try:
-                    self._uds_request_with_retry(
-                        request, timeout_s, label,
-                        retry_delay_s=0.5,
-                    )
-                    break
-                except UdsError as exc:
-                    if self._stop_event.is_set():
-                        raise RuntimeError("사용자에 의해 전송 중단됨")
-                    # Retryable: an NRC answer, or a response timeout (the
-                    # DUT may have lost tail frames of the CF burst -- the
-                    # identical block usually goes through on resend). Any
-                    # other transport error aborts immediately, as does an
-                    # exhausted retry budget.
-                    retryable = exc.nrc != 0 or _is_timeout_error(exc)
-                    if not retryable or retry >= TRANSFER_BLOCK_MAX_RETRIES:
-                        self._log(level="ERROR", msg=f"TransferData 블록 {seq_num} 실패: {exc}{self._send_stats_suffix()}")
-                        raise
-                    if exc.nrc != 0:
-                        reason = f"NRC=0x{exc.nrc:02X}"
-                    else:
-                        reason = "응답 시간초과"
-                    self._log(level="WARN", msg=f"TransferData 블록 {seq_num} {reason}, 재전송 {retry + 1}/{TRANSFER_BLOCK_MAX_RETRIES}{self._send_stats_suffix()}")
-                    if self._stop_event.wait(TRANSFER_BLOCK_RETRY_DELAY_S):
-                        raise RuntimeError("사용자에 의해 전송 중단됨")
+                for retry in range(TRANSFER_BLOCK_MAX_RETRIES + 1):
+                    try:
+                        self._uds_request_with_retry(
+                            request, timeout_s, label,
+                            retry_delay_s=0.5,
+                            reader=shared_reader,
+                            min_stmin_s=shared_floor_s,
+                        )
+                        break
+                    except UdsError as exc:
+                        if self._stop_event.is_set():
+                            raise RuntimeError("사용자에 의해 전송 중단됨")
+                        # Retryable: an NRC answer, or a response timeout (the
+                        # DUT may have lost tail frames of the CF burst -- the
+                        # identical block usually goes through on resend). Any
+                        # other transport error aborts immediately, as does an
+                        # exhausted retry budget.
+                        retryable = exc.nrc != 0 or _is_timeout_error(exc)
+                        if not retryable or retry >= TRANSFER_BLOCK_MAX_RETRIES:
+                            self._log(level="ERROR", msg=f"TransferData 블록 {seq_num} 실패: {exc}{self._send_stats_suffix()}")
+                            raise
+                        if exc.nrc != 0:
+                            reason = f"NRC=0x{exc.nrc:02X}"
+                        else:
+                            reason = "응답 시간초과"
+                        self._log(level="WARN", msg=f"TransferData 블록 {seq_num} {reason}, 재전송 {retry + 1}/{TRANSFER_BLOCK_MAX_RETRIES}{self._send_stats_suffix()}")
+                        if self._stop_event.wait(TRANSFER_BLOCK_RETRY_DELAY_S):
+                            raise RuntimeError("사용자에 의해 전송 중단됨")
 
-            offset += len(chunk)
-            seq_num += 1
+                offset += len(chunk)
+                seq_num += 1
 
-            bytes_sent = offset - seek_addr
-            pct = min(100.0, (bytes_sent / total_size) * 100.0)
-            self._update_progress(
-                current_block=seq_num - 1,
-                percent=round(pct, 1),
-            )
+                bytes_sent = offset - seek_addr
+                pct = min(100.0, (bytes_sent / total_size) * 100.0)
+                self._update_progress(
+                    current_block=seq_num - 1,
+                    percent=round(pct, 1),
+                )
 
-            if seq_num % 50 == 0:
-                self._log(level="INFO", msg=f"전송 진도: 0x{offset:X}/0x{end_offset:X} bytes ({pct:.1f}%)")
+                if seq_num % 50 == 0:
+                    self._log(level="INFO", msg=f"전송 진도: 0x{offset:X}/0x{end_offset:X} bytes ({pct:.1f}%)")
+
+        finally:
+            self._can.notifier.remove_listener(shared_reader)
 
         self._log(level="INFO", msg=f"TransferData 완료: {total_blocks} blocks, {total_size} bytes (0x{seek_addr:X} → 0x{end_offset:X})")
 
