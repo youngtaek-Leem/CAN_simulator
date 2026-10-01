@@ -378,8 +378,40 @@ class TestRunnerService:
             if self._wait_if_paused():
                 return
             self._log(case=case.num, msg=f"케이스 {case.num} 반복 {c + 1}/{case.cycle} 시작")
+            with self._lock:
+                ev_start = len(self._events)
             ok = self._run_steps(case.steps, case.num)
-            self._add_result(case=case.num, cycle=c + 1, status="OK" if ok else "Fail")
+            fields: dict[str, Any] = {"case": case.num, "cycle": c + 1, "status": "OK" if ok else "Fail"}
+            if not ok:
+                reason = self._failure_reason_since(ev_start)
+                if reason:
+                    fields["reason"] = reason
+            self._add_result(**fields)
+
+    def _failure_reason_since(self, ev_start: int) -> str:
+        """Collect this case-cycle's failing step statuses (already logged
+        with a "실패"/"오류"/"Fail" prefix by each _run_* handler) into one
+        result-level reason string, joined with " / " when several steps
+        failed. Prefixes are stripped -- the result row already shows Fail."""
+        with self._lock:
+            entries = list(self._events[ev_start:])
+        reasons = []
+        for e in entries:
+            st = str(e.get("status", ""))
+            matched_prefix: Optional[str] = None
+            for prefix in ("실패: ", "실패:", "실패 ", "오류: ", "오류:", "오류 ", "Fail: ", "Fail:", "Fail "):
+                if st.startswith(prefix):
+                    matched_prefix = prefix
+                    break
+            if matched_prefix is None:
+                if st not in ("실패", "오류", "Fail"):
+                    continue
+                st = ""
+            else:
+                st = st[len(matched_prefix):].strip()
+            if st and st not in reasons:
+                reasons.append(st)
+        return " / ".join(reasons)
 
     def _run_steps(self, steps: list[Step], case_num: str) -> bool:
         ok = True
@@ -430,10 +462,17 @@ class TestRunnerService:
                 return True
             if t == "CANResp":
                 ok = self._check_response(b)
-                self._log(
-                    case=case_num, type=t, message=b.get("Message"), signal=b.get("Signal"),
-                    status="OK" if ok else "Fail",
-                )
+                if ok:
+                    self._log(
+                        case=case_num, type=t, message=b.get("Message"), signal=b.get("Signal"),
+                        status="OK",
+                    )
+                else:
+                    self._log(
+                        case=case_num, type=t, message=b.get("Message"), signal=b.get("Signal"),
+                        status=f"Fail: {b.get('Message')}.{b.get('Signal')} 응답 없음 "
+                               f"({float(b.get('timeout_s', 1.0))}s 초과)",
+                    )
                 return ok
             if t == "CANlogReplay":
                 return self._replay_log(b, case_num)
@@ -524,7 +563,7 @@ class TestRunnerService:
 
     def _run_power(self, block: dict, case_num: str) -> bool:
         if self._power is None:
-            self._log(case=case_num, type="Power", status="파워서플라이 서비스 없음")
+            self._log(case=case_num, type="Power", status="실패: 파워서플라이 서비스 없음")
             return False
         result = self._power.set_power(block)
         ok = bool(result.get("ok"))
@@ -538,7 +577,7 @@ class TestRunnerService:
 
     def _run_audio(self, block: dict, case_num: str) -> bool:
         if self._audio is None:
-            self._log(case=case_num, type="Audio", status="오디오 서비스 없음")
+            self._log(case=case_num, type="Audio", status="실패: 오디오 서비스 없음")
             return False
         cmd = block.get("command")
 
@@ -561,21 +600,21 @@ class TestRunnerService:
         if cmd == "compWAV":
             golden = block.get("golden")
             if not golden:
-                self._log(case=case_num, type="Audio", message=cmd, status="'golden' 필드 없음 -- 비교 생략")
+                self._log(case=case_num, type="Audio", message=cmd, status="실패: 'golden' 필드 없음 -- 비교 생략")
                 return False
             if not self._last_recording:
-                self._log(case=case_num, type="Audio", message=cmd, status="비교할 녹음 파일 없음")
+                self._log(case=case_num, type="Audio", message=cmd, status="실패: 비교할 녹음 파일 없음")
                 return False
             threshold = float(block.get("threshold", DEFAULT_COMPARE_THRESHOLD))
             result = self._audio.compare(self._last_recording, golden, threshold)
             ok = bool(result.get("ok"))
-            self._log(case=case_num, type="Audio", message=cmd, status="OK" if ok else f"실패: {result.get('reason', result.get('channels'))}")
+            self._log(case=case_num, type="Audio", message=cmd, status="OK" if ok else f"실패: {result.get('reason') or '비교 실패'}")
             return ok
 
         if cmd == "saveAsGolden":
             golden = block.get("golden")
             if not golden or not self._last_recording:
-                self._log(case=case_num, type="Audio", message=cmd, status="저장할 녹음 파일 또는 golden 이름 없음")
+                self._log(case=case_num, type="Audio", message=cmd, status="실패: 저장할 녹음 파일 또는 golden 이름 없음")
                 return False
             result = self._audio.save_as_golden(self._last_recording, golden)
             ok = bool(result.get("ok"))

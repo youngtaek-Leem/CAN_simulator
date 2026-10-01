@@ -318,6 +318,11 @@ export function TestRunnerBox({ config }: { config: WidgetConfig }) {
           {detail?.results.map((r, i) => (
             <div key={i} className={`testrunner-result ${r.status === 'OK' ? 'ok' : 'fail'}`}>
               케이스 {r.case} · 반복 {r.cycle} · {r.status === 'OK' ? '✅ OK' : '❌ Fail'}
+              {r.status !== 'OK' && r.reason && (
+                <div className="testrunner-result-reason" title={r.reason}>
+                  {r.reason}
+                </div>
+              )}
             </div>
           ))}
         </div>

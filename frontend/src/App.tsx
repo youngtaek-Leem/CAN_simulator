@@ -576,19 +576,53 @@ export default function App() {
     notify('새 편집 화면으로 초기화되었습니다');
   };
 
-  // auto-arrange: tile (바둑판) keeps sizes and packs rows left→right,
-  // cascade (계단식) staggers widgets diagonally
+  // auto-arrange: tile (바둑판) sorts by height ascending and packs rows
+  // left→right (wraps at 24 cols; next row starts at the previous row's
+  // max bottom via y += rowH), cascade (계단식) sorts by area ascending
+  // (smallest first) and staggers from the top-left by (right 2, down 1)
+  // overflowing the 24-col grid restarts a new run at the lowest bottom
+  // so far. Docked (minimized) items are excluded -- their stored positions
+  // are kept untouched so un-minimizing restores the pre-minimize spot.
+  // Z-order follows placement order: first-placed at the very back,
+  // last-placed at the very front (later siblings paint on top where
+  // widgets overlap).
   const arrange = (mode: 'tile' | 'cascade') => {
-    updateActivePage((p) => {
-      let newLayout: LayoutItem[];
+    const p = activePage;
+    const dockedIds = new Set(
+      p.widgets.filter((w) => w.options.minimized === true).map((w) => w.id),
+    );
+    const visible = p.layout.filter((it) => !dockedIds.has(it.i));
+    const docked = p.layout.filter((it) => dockedIds.has(it.i));
+    const byHeightAsc = (a: LayoutItem, b: LayoutItem) =>
+      a.h - b.h || a.w * a.h - b.w * b.h || a.w - b.w;
+    let arranged: LayoutItem[];
       if (mode === 'cascade') {
-        newLayout = p.layout.map((it, n) => ({ ...it, x: Math.min(n, Math.max(0, 12 - it.w)), y: n }));
+        const byAreaAsc = (a: LayoutItem, b: LayoutItem) =>
+          a.w * a.h - b.w * b.h || a.h - b.h || a.w - b.w;
+        let ox = 0;
+        let oy = 0;
+        let step = 0;
+        let lowest = 0;
+        arranged = [...visible].sort(byAreaAsc).map((it) => {
+          let x = ox + step * 2;
+          let y = oy + step;
+          if (x + it.w > GRID_COLS) {
+            ox = 0;
+            oy = lowest;
+            step = 0;
+            x = 0;
+            y = oy;
+          }
+          lowest = Math.max(lowest, y + it.h);
+          step += 1;
+          return { ...it, x, y };
+        });
       } else {
         let x = 0;
         let y = 0;
         let rowH = 0;
-        newLayout = p.layout.map((it) => {
-          if (x + it.w > 12) {
+        arranged = [...visible].sort(byHeightAsc).map((it) => {
+          if (x + it.w > 24) {
             x = 0;
             y += rowH;
             rowH = 0;
@@ -599,8 +633,30 @@ export default function App() {
           return placed;
         });
       }
-      return { ...p, layout: newLayout };
-    });
+      const newLayout = [...arranged, ...docked];
+      const placedIds = arranged.map((it) => it.i);
+      updateActivePage((cur) => (cur.id === p.id ? { ...cur, layout: newLayout } : cur));
+      // placement order → z-order: first-placed at the back, last-placed
+      // at the front. Ids unrelated to this arrange (other pages, docked
+      // widgets) keep their relative order below the placed ones, so
+      // page-switch front memory is preserved.
+      setZOrder((prev) => {
+        const placed = new Set(placedIds);
+        const rest = Object.entries(prev)
+          .filter(([id]) => !placed.has(id))
+          .sort((a, b) => a[1] - b[1]);
+        const next: Record<string, number> = {};
+        let z = 0;
+        for (const [id] of rest) {
+          z += 1;
+          next[id] = z;
+        }
+        for (const id of placedIds) {
+          z += 1;
+          next[id] = z;
+        }
+        return next;
+      });
   };
 
   // bring an existing widget to the front (same mechanism as clicking it)

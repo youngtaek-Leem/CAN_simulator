@@ -215,6 +215,9 @@ export interface TestRunnerResult {
   case: string;
   cycle: number;
   status: 'OK' | 'Fail';
+  // Fail 시 실패 이유 (성공 시 없음) -- 백엔드 _run_case가 실패 스텝들의
+  // 상태("실패: ..."/"Fail: ...")를 ' / '로 연결해 기록한다.
+  reason?: string;
 }
 
 export interface TestRunnerStatus extends TestRunnerSummary {

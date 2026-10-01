@@ -930,7 +930,15 @@ class AudioService:
                 channels[f"ch{ch}"] = metrics
                 if metrics["mfcc_dtw_similarity"] < threshold:
                     passed = False
-            return {"ok": passed, "threshold": threshold, "channels": channels}
+            if not passed:
+                lows = ", ".join(
+                    f"{name}={channels[name]['mfcc_dtw_similarity']:.3f}"
+                    for name in sorted(channels)
+                    if channels[name]["mfcc_dtw_similarity"] < threshold
+                )
+                reason = f"유사도 기준 미달(임계 {threshold}): {lows}"
+                return {"ok": False, "threshold": threshold, "channels": channels, "reason": reason}
+            return {"ok": True, "threshold": threshold, "channels": channels}
         except Exception as exc:
             return {"ok": False, "reason": str(exc)}
 

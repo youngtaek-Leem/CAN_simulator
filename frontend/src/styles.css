@@ -1890,6 +1890,13 @@ select.tx-signal-input {
   color: var(--bad);
 }
 
+.testrunner-result-reason {
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
 .testrunner-log-line {
   padding: 2px 0;
   font-size: 11px;

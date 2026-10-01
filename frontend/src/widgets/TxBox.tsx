@@ -55,6 +55,19 @@ function dataByteLen(dataHex: string): number {
   return Math.floor(dataHex.replace(/\s/g, '').length / 2);
 }
 
+/** DBC 메시지의 주기 행 기본값: comment 선행 [P]/[PE] 태그면 Periodic
+ * (백엔드 dbc_service._message_send_type과 동일 규칙), 나머지는 Event.
+ * Periodic이면 DBC cycle_time을 주기로 (없거나 0 이하면 100ms),
+ * Event면 주기 체크 해제 + 100ms(default). */
+function resolveRowPeriod(msg: DbcMessage): { periodic: boolean; periodMs: number } {
+  const tag = /^\[([A-Za-z]+)\]/.exec((msg.comment ?? '').trim())?.[1]?.toUpperCase();
+  if (tag === 'P' || tag === 'PE') {
+    const cycle = msg.cycle_time_ms ?? 0;
+    return { periodic: true, periodMs: cycle > 0 ? cycle : 100 };
+  }
+  return { periodic: false, periodMs: 100 };
+}
+
 /** raw 페이로드 검증 -- 어긋나면 한글 에러 문구, 정상이면 null.
  * FD 해제 시 초과분은 자동 절삭하지 않고 에러로 알려 수정하도록 유도한다. */
 function validateRawData(dataHex: string, isFd: boolean): string | null {
@@ -297,9 +310,22 @@ export function TxBox({ config }: { config: WidgetConfig }) {
       return;
     }
     const msg = dbcMessageOf(name);
-    patchRow(key, { messageName: name, rawOverride: false, isFd: busFd, bitrateSwitch: false });
+    // 메시지별 주기 자동 설정: Periodic이면 DBC 주기, Event면 체크 해제 + 100ms
+    const period = msg ? resolveRowPeriod(msg) : { periodic: row.periodic, periodMs: row.periodMs };
+    const next = { ...row, messageName: name, rawOverride: false, isFd: busFd, bitrateSwitch: false, ...period };
+    // Event 메시지로 바뀌면 주기 체크가 해제되므로, 전송 중이던 행은 정지한다
+    if (!period.periodic && isRowTransmitting(key)) {
+      try {
+        await api.txRowStop(key);
+        canStore.pushActivity(`${name} 주기 전송 정지 (Event 메시지)`);
+      } catch (e) {
+        setError((e as Error).message);
+        return;
+      }
+    }
+    patchRow(key, { messageName: name, rawOverride: false, isFd: busFd, bitrateSwitch: false, ...period });
     // 전송 중 메시지 변경: 백엔드 행 엔트리도 새 메시지로 retarget
-    pushRowLiveFor({ ...row, messageName: name, rawOverride: false, isFd: busFd, bitrateSwitch: false });
+    pushRowLiveFor(next);
 
     let initialHex: string | null = null;
     try {
@@ -564,16 +590,17 @@ export function TxBox({ config }: { config: WidgetConfig }) {
       return;
     }
     const key = `${Date.now()}-${rowsRef.current.length}`;
+    // 메시지별 주기 자동 설정: Periodic이면 DBC 주기, Event면 체크 해제 + 100ms
+    const period = resolveRowPeriod(msg);
     setRows([
       ...rowsRef.current,
       {
         key,
         idHex: msg.frame_id.toString(16).toUpperCase(),
-        periodMs: 100,
+        ...period,
         dataHex: '',
         messageName,
         enabled: true,
-        periodic: true,
         isFd: busFd,
         bitrateSwitch: false,
         rawOverride: false,

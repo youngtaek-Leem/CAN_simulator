@@ -179,7 +179,9 @@ def test_canresp_fails_on_timeout(stack):
     runner.start()
     time.sleep(0.6)
     status = runner.status()
-    assert status["results"] == [{"case": "1", "cycle": 1, "status": "Fail"}]
+    assert status["results"] == [
+        {"case": "1", "cycle": 1, "status": "Fail", "reason": "EngineData.EngineSpeed 응답 없음 (0.3s 초과)"}
+    ]
 
 
 # ---- Loop repeat count -------------------------------------------------------
@@ -390,7 +392,9 @@ def test_power_step_without_service_fails_gracefully(stack):
     runner.load(json.dumps(script), "t.json")
     runner.start()
     time.sleep(0.3)
-    assert runner.status()["results"] == [{"case": "1", "cycle": 1, "status": "Fail"}]
+    assert runner.status()["results"] == [
+        {"case": "1", "cycle": 1, "status": "Fail", "reason": "파워서플라이 서비스 없음"}
+    ]
 
 
 def test_audio_record_and_compare_sequence(runner_with_fakes):
@@ -423,7 +427,9 @@ def test_audio_compwav_without_golden_field_fails(runner_with_fakes):
     runner.start()
     time.sleep(0.3)
     assert audio.compared == []
-    assert runner.status()["results"] == [{"case": "1", "cycle": 1, "status": "Fail"}]
+    assert runner.status()["results"] == [
+        {"case": "1", "cycle": 1, "status": "Fail", "reason": "'golden' 필드 없음 -- 비교 생략"}
+    ]
 
 
 def test_audio_save_as_golden(runner_with_fakes):
@@ -438,6 +444,47 @@ def test_audio_save_as_golden(runner_with_fakes):
     runner.start()
     time.sleep(0.3)
     assert audio.saved_golden == [(audio.started[0], "case1_golden.wav")]
+
+
+def test_compwav_compare_failure_reason_reaches_result(runner_with_fakes, monkeypatch):
+    """CompWAV 유사도 미달 시 compare()의 reason 요약이 케이스 결과의
+    reason에 그대로 담겨야 한다 (테스트 결과 화면 표시용)."""
+    runner, power, audio = runner_with_fakes
+    monkeypatch.setattr(
+        audio, "compare",
+        lambda filename, golden, threshold: {
+            "ok": False, "threshold": threshold, "channels": {},
+            "reason": f"유사도 기준 미달(임계 {threshold}): ch0=0.500",
+        },
+    )
+    script = [
+        {"type": "ID", "num": "1", "Cycle": 1},
+        {"type": "Audio", "command": "StartREC", "recName": "log1"},
+        {"type": "Audio", "command": "StopREC"},
+        {"type": "Audio", "command": "compWAV", "golden": "case1_golden.wav", "threshold": 0.9},
+    ]
+    runner.load(json.dumps(script), "t.json")
+    runner.start()
+    time.sleep(0.3)
+    assert runner.status()["results"] == [
+        {"case": "1", "cycle": 1, "status": "Fail", "reason": "유사도 기준 미달(임계 0.9): ch0=0.500"}
+    ]
+
+
+def test_multiple_step_failures_joined_in_result_reason(stack):
+    """한 케이스에서 여러 스텝이 실패하면 모든 이유가 ' / '로 연결된다."""
+    cm, dbc, sched, replay, runner, peer, log_dir, result_dir = stack
+    script = [
+        {"type": "ID", "num": "1", "Cycle": 1},
+        {"type": "Power", "command": "ACC_IGN_On"},
+        {"type": "Audio", "command": "compWAV", "golden": "case1_golden.wav"},
+    ]
+    runner.load(json.dumps(script), "t.json")
+    runner.start()
+    time.sleep(0.3)
+    results = runner.status()["results"]
+    assert len(results) == 1 and results[0]["status"] == "Fail"
+    assert results[0]["reason"] == "파워서플라이 서비스 없음 / 오디오 서비스 없음"
 
 
 # ---- FUNC / Function Button (parsing + single-name execution) ----------------
