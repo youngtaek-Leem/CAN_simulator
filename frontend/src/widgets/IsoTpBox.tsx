@@ -82,7 +82,7 @@ export function IsoTpBox({ config }: { config: WidgetConfig }) {
   const opts = config.options as IsoTpOptions;
   const [sending, setSending] = useState(false);
   const [result, setResult] = useState<string | null>(null);
-  const [response, setResponse] = useState<string | null>(null);
+  const [responses, setResponses] = useState<string[] | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const txId = opts.txId ?? '783';
@@ -155,7 +155,7 @@ export function IsoTpBox({ config }: { config: WidgetConfig }) {
     setSending(true);
     setError(null);
     setResult(null);
-    setResponse(null);
+    setResponses(null);
     try {
       // 라인 단위 전송: 데이터 부분만 전송 (인라인 주석 제거)
       const payloadHex = activeDataPart.trim();
@@ -174,8 +174,10 @@ export function IsoTpBox({ config }: { config: WidgetConfig }) {
         `${safeCursorLine + 1}번째 줄 — ${r.frame_type === 'single' ? 'Single Frame' : 'Multi Frame'} 전송 완료 — ` +
           `${r.frames_sent}프레임, ${r.bytes_sent}바이트, ${r.duration_ms}ms`,
       );
-      if (r.response !== undefined) setResponse(r.response);
-      else if (r.response_error !== undefined) setError(`응답 수신 실패: ${r.response_error}`);
+      // NRC 0x78 pending 추적 시 전수 수집 -- responses 우선, 구 response 폴백
+      if (r.responses !== undefined) setResponses(r.responses);
+      else if (r.response !== undefined) setResponses([r.response]);
+      if (r.response_error !== undefined) setError(`응답 수신 실패: ${r.response_error}`);
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -305,14 +307,18 @@ export function IsoTpBox({ config }: { config: WidgetConfig }) {
         </button>
       </div>
       {result && <div className="isotp-result ok">{result}</div>}
-      {response && (
+      {responses && responses.length > 0 && (
         <div className="isotp-result ok">
-          <div>
-            응답: <span className="mono">{response}</span>
-          </div>
-          <div>
-            ASCII: <span className="mono">{hexToAscii(response) || '-'}</span>
-          </div>
+          {responses.map((resp, i) => (
+            <div key={i}>
+              <div>
+                응답{responses.length > 1 ? ` ${i + 1}` : ''}: <span className="mono">{resp}</span>
+              </div>
+              <div>
+                ASCII: <span className="mono">{hexToAscii(resp) || '-'}</span>
+              </div>
+            </div>
+          ))}
         </div>
       )}
       {error && <div className="error">{error}</div>}

@@ -172,6 +172,8 @@ export const api = {
       bytes_sent: number;
       duration_ms: number;
       response?: string;
+      // NRC 0x78 pending 추적 시 전수 수집 (첫 메시지는 response와 동일)
+      responses?: string[];
       response_error?: string;
     }>('/api/isotp/send', { tx_id, fc_id, data, ...opts }),
 

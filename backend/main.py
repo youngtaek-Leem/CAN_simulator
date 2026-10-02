@@ -943,6 +943,14 @@ class IsoTpSendRequest(BaseModel):
     resp_fc_stmin: int = 0x00
 
 
+def _is_nrc78(payload: bytes) -> bool:
+    """UDS Negative Response 0x78 (ResponsePending: "7F <SID> 78") 여부.
+    이 엔드포인트는 제네릭 ISO-TP 도구라 uds_core 파서 대신 바이트로만
+    판정한다 -- pending이면 ECU가 아직 처리 중이므로 최종 응답까지
+    수신을 이어가야 한다."""
+    return len(payload) >= 3 and payload[0] == 0x7F and payload[2] == 0x78
+
+
 @app.post("/api/isotp/send")
 def isotp_send(req: IsoTpSendRequest):
     # blocking (waits for Flow Control, and optionally the response) -- runs
@@ -998,19 +1006,40 @@ def isotp_send(req: IsoTpSendRequest):
             raise HTTPException(status_code=400, detail=str(exc))
 
         try:
-            response = isotp_service.receive(
-                can_manager,
-                req.resp_id,
-                req.tx_id,
-                timeout_s=req.resp_timeout_ms / 1000.0,
-                is_extended_id=req.is_extended_id,
-                fc_stmin=req.resp_fc_stmin,
-                fc_block_size=req.resp_fc_block_size,
-                reader=reader,
-            )
-            result["response"] = response.hex(" ").upper()
+            # 첫 응답 + NRC 0x78 pending 추적: ECU가 "7F xx 78"을 보내면 아직
+            # 처리 중이라는 뜻이므로 남은 타임아웃으로 수신을 반복해 최종
+            # 응답까지 전수 수집한다. 78이 아닌 첫 응답이면 1건으로 종료.
+            # result["response"]는 첫 메시지 (호환 유지),
+            # result["responses"]는 전수 hex 배열이다.
+            deadline = time.perf_counter() + req.resp_timeout_ms / 1000.0
+            responses: list[bytes] = []
+            for _ in range(100):  # pending 폭주 대비 안전 상한
+                remaining = deadline - time.perf_counter()
+                if remaining <= 0:
+                    break
+                response = isotp_service.receive(
+                    can_manager,
+                    req.resp_id,
+                    req.tx_id,
+                    timeout_s=remaining,
+                    is_extended_id=req.is_extended_id,
+                    fc_stmin=req.resp_fc_stmin,
+                    fc_block_size=req.resp_fc_block_size,
+                    reader=reader,
+                )
+                responses.append(response)
+                if not _is_nrc78(response):
+                    break
+            result["response"] = responses[0].hex(" ").upper()
+            result["responses"] = [r.hex(" ").upper() for r in responses]
         except isotp_service.IsoTpError as exc:
-            result["response_error"] = str(exc)
+            if "responses" not in result and not responses:
+                result["response_error"] = str(exc)
+            else:
+                # pending 도중 타임아웃 등: 받은 만큼은 반환하고 에러도 기록
+                result["response"] = responses[0].hex(" ").upper()
+                result["responses"] = [r.hex(" ").upper() for r in responses]
+                result["response_error"] = str(exc)
     finally:
         can_manager.notifier.remove_listener(reader)
 

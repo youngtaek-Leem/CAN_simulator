@@ -306,6 +306,95 @@ def test_isotp_send_with_response_wait_multi_frame_sends_flow_control():
             client.post("/api/disconnect")
 
 
+def test_isotp_send_collects_nrc78_pending_plus_final_response():
+    """NRC 0x78 (ResponsePending) 뒤에 최종 응답이 오면 둘 다 수집한다 --
+    기존에는 첫 메시지만 response에 담고 최종 응답은 버려졌다. response는
+    첫 메시지(호환), responses는 전수 배열이다."""
+    with make_client() as client:
+        client.post("/api/connect", json={"interface": "virtual", "channel": "t_api_isotp_resp4"})
+        peer = can.Bus(interface="virtual", channel="t_api_isotp_resp4")
+        try:
+            def responder():
+                m = peer.recv(timeout=1.0)
+                assert m is not None
+                peer.send(
+                    can.Message(
+                        arbitration_id=0x78B,
+                        data=bytes([0x03, 0x7F, 0x22, 0x78, 0, 0, 0, 0]),
+                        is_extended_id=False,
+                    )
+                )
+                time.sleep(0.05)
+                peer.send(
+                    can.Message(
+                        arbitration_id=0x78B,
+                        data=bytes([0x03, 0x62, 0xF1, 0xC1, 0, 0, 0, 0]),
+                        is_extended_id=False,
+                    )
+                )
+
+            t = threading.Thread(target=responder, daemon=True)
+            t.start()
+            r = client.post(
+                "/api/isotp/send",
+                json={
+                    "tx_id": 0x783,
+                    "fc_id": 0x78B,
+                    "data": "22 F1 C1",
+                    "resp_id": 0x78B,
+                    "resp_timeout_ms": 1000,
+                },
+            )
+            t.join(timeout=2)
+            assert r.status_code == 200
+            body = r.json()
+            assert body["response"] == "7F 22 78"
+            assert body["responses"] == ["7F 22 78", "62 F1 C1"]
+            assert "response_error" not in body
+        finally:
+            peer.shutdown()
+            client.post("/api/disconnect")
+
+
+def test_isotp_send_single_response_yields_single_element_responses():
+    """pending 없는 일반 응답은 responses가 1건 배열이다."""
+    with make_client() as client:
+        client.post("/api/connect", json={"interface": "virtual", "channel": "t_api_isotp_resp5"})
+        peer = can.Bus(interface="virtual", channel="t_api_isotp_resp5")
+        try:
+            def responder():
+                m = peer.recv(timeout=1.0)
+                assert m is not None
+                peer.send(
+                    can.Message(
+                        arbitration_id=0x78B,
+                        data=bytes([0x03, 0x62, 0xF1, 0xC1, 0, 0, 0, 0]),
+                        is_extended_id=False,
+                    )
+                )
+
+            t = threading.Thread(target=responder, daemon=True)
+            t.start()
+            r = client.post(
+                "/api/isotp/send",
+                json={
+                    "tx_id": 0x783,
+                    "fc_id": 0x78B,
+                    "data": "22 F1 C1",
+                    "resp_id": 0x78B,
+                    "resp_timeout_ms": 1000,
+                },
+            )
+            t.join(timeout=2)
+            assert r.status_code == 200
+            body = r.json()
+            assert body["response"] == "62 F1 C1"
+            assert body["responses"] == ["62 F1 C1"]
+        finally:
+            peer.shutdown()
+            client.post("/api/disconnect")
+
+
 def test_isotp_send_response_wait_timeout_reports_response_error():
     with make_client() as client:
         client.post("/api/connect", json={"interface": "virtual", "channel": "t_api_isotp_resp3"})
