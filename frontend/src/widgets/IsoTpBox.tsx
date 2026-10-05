@@ -6,6 +6,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { api } from '../api/client';
 import { useApp } from '../store/appContext';
+import { SeedKeyControls } from './UdsGlobalControls';
 import type { WidgetConfig } from '../types';
 
 const SF_MAX_LEN = 7;
@@ -34,9 +35,17 @@ function splitLines(raw: string): string[] {
   return raw.split(/\r?\n/);
 }
 
+/** UDS Negative Response (NRC) 여부: 재조립 페이로드 첫 바이트가 0x7F
+ * ("7F <SID> <NRC>"). Positive 응답 SID(0x40~0x7E)와 겹치지 않는다. */
+function isNrcResponse(hex: string): boolean {
+  const clean = hex.replace(/\s+/g, '');
+  if (clean.length < 2 || !/^[0-9a-fA-F]+$/.test(clean)) return false;
+  return parseInt(clean.slice(0, 2), 16) === 0x7f;
+}
+
 /** hex 문자열(공백 구분, 예 "62 F1 C1")을 ASCII 미리보기로 변환.
  * 출력 가능 범위(0x20~0x7E)만 문자 그대로, 나머지는 '.'으로 치환한다.
- * 파싱 실패 시 '' 반환. */
+ * 파싱 실패 시 '' 반환. NRC 응답에는 호출하지 않는다 (isNrcResponse). */
 function hexToAscii(hex: string): string {
   const clean = hex.replace(/\s+/g, '');
   if (clean.length === 0 || clean.length % 2 !== 0 || !/^[0-9a-fA-F]*$/.test(clean)) return '';
@@ -46,6 +55,40 @@ function hexToAscii(hex: string): string {
     out += b >= 0x20 && b <= 0x7e ? String.fromCharCode(b) : '.';
   }
   return out;
+}
+
+/** 순차 실행 한 줄의 분류: 메시지 전송 / delay 대기 / 27 11 자동 ASK. */
+type SeqLine =
+  | { kind: 'msg'; lineNo: number; payloadHex: string }
+  | { kind: 'delay'; lineNo: number; ms: number }
+  | { kind: 'secacc'; lineNo: number };
+
+/** 입력 전체를 순차 실행 대상으로 파싱. 주석/빈 줄은 제외한다. */
+function parseSeqLines(dataHex: string): { lines: SeqLine[]; error: string | null } {
+  const lines: SeqLine[] = [];
+  splitLines(dataHex).forEach((raw, idx) => {
+    const lineNo = idx + 1;
+    const part = getDataPart(raw).trim();
+    if (part === '' || isCommentLine(raw)) return;
+    const delayMatch = /^delay\s+(\d+)\s*$/i.exec(part);
+    if (delayMatch) {
+      lines.push({ kind: 'delay', lineNo, ms: Number(delayMatch[1]) });
+      return;
+    }
+    if (/^27\s+11(\s|$)/i.test(part)) {
+      lines.push({ kind: 'secacc', lineNo });
+      return;
+    }
+    lines.push({ kind: 'msg', lineNo, payloadHex: part });
+  });
+  return { lines, error: null };
+}
+
+interface SeqLogEntry {
+  lineNo: number | null;
+  text: string;
+  ascii?: string | null;
+  kind: 'info' | 'ok' | 'error';
 }
 
 function getDataPart(line: string): string {
@@ -185,6 +228,171 @@ export function IsoTpBox({ config }: { config: WidgetConfig }) {
     }
   };
 
+  // ---- 순차 실행 ---------------------------------------------------------
+  const [seqRunning, setSeqRunning] = useState(false);
+  const [seqLog, setSeqLog] = useState<SeqLogEntry[]>([]);
+  const seqStopRef = useRef(false);
+  const pushSeqLog = (entry: SeqLogEntry) => setSeqLog((prev) => [...prev.slice(-199), entry]);
+
+  const sleepStoppable = (ms: number) =>
+    new Promise<boolean>((resolve) => {
+      if (ms <= 0 || seqStopRef.current) {
+        resolve(!seqStopRef.current);
+        return;
+      }
+      const t0 = Date.now();
+      const iv = setInterval(() => {
+        if (seqStopRef.current || Date.now() - t0 >= ms) {
+          clearInterval(iv);
+          resolve(!seqStopRef.current);
+        }
+      }, 50);
+    });
+
+  const commonRespOpts = () =>
+    waitForResponse
+      ? { resp_id: respIdNum, resp_timeout_ms: respTimeoutMs, resp_fc_block_size: respFcBlockSize }
+      : {};
+
+  const runSequence = async () => {
+    if (seqRunning || sending) return;
+    if (!Number.isInteger(txIdNum) || txIdNum < 0) {
+      setError('TX ID(hex)를 입력하세요');
+      return;
+    }
+    if (waitForResponse && (!Number.isInteger(respIdNum) || respIdNum < 0)) {
+      setError('응답 ID(hex)를 입력하세요');
+      return;
+    }
+    const { lines } = parseSeqLines(dataHex);
+    if (lines.length === 0) {
+      setError('순차 실행할 줄이 없습니다');
+      return;
+    }
+    seqStopRef.current = false;
+    setSeqRunning(true);
+    setError(null);
+    setSeqLog([]);
+    pushSeqLog({ lineNo: null, text: `순차 실행 시작 (${lines.length}줄)`, kind: 'info' });
+    try {
+      for (const ln of lines) {
+        if (seqStopRef.current) {
+          pushSeqLog({ lineNo: null, text: '사용자 중지', kind: 'error' });
+          break;
+        }
+        if (ln.kind === 'delay') {
+          pushSeqLog({ lineNo: ln.lineNo, text: `delay ${ln.ms}ms`, kind: 'info' });
+          const done = await sleepStoppable(ln.ms);
+          if (!done) {
+            pushSeqLog({ lineNo: null, text: '사용자 중지', kind: 'error' });
+            break;
+          }
+          continue;
+        }
+        if (ln.kind === 'secacc') {
+          // 27 11 자동 ASK 인증 (Seed 수신 -> 키 생성 -> 27 12).
+          // 키(8B) 포함 시 멀티프레임이므로 FC ID가 유효해야 하고,
+          // Seed 수신이 필수라 응답 ID도 유효해야 한다.
+          if (!Number.isInteger(fcIdNum) || fcIdNum < 0) {
+            pushSeqLog({ lineNo: ln.lineNo, text: 'ASK 불가: FC ID(hex)를 입력하세요 (27 12+키는 멀티프레임)', kind: 'error' });
+            break;
+          }
+          if (!Number.isInteger(respIdNum) || respIdNum < 0) {
+            pushSeqLog({ lineNo: ln.lineNo, text: 'ASK 불가: 응답 ID(hex)를 입력하세요', kind: 'error' });
+            break;
+          }
+          pushSeqLog({ lineNo: ln.lineNo, text: '27 11 → ASK 인증 시작', kind: 'info' });
+          try {
+            const r = await api.securityAccess(txIdNum, fcIdNum, respIdNum, {
+              is_extended_id: isExtended,
+              fc_timeout_ms: fcTimeoutMs,
+              resp_timeout_ms: respTimeoutMs,
+              resp_fc_block_size: respFcBlockSize,
+            });
+            pushSeqLog({ lineNo: ln.lineNo, text: `Tx 27 11 → Seed [${r.seed_hex}] (${r.key_source})`, kind: 'info' });
+            pushSeqLog({ lineNo: ln.lineNo, text: `Tx 27 12 [${r.key_hex}]`, kind: 'info' });
+            for (const resp of r.key_responses) {
+              pushSeqLog({
+                lineNo: ln.lineNo,
+                text: `Rx ${resp}`,
+                ascii: isNrcResponse(resp) ? null : hexToAscii(resp) || null,
+                kind: isNrcResponse(resp) ? 'error' : 'ok',
+              });
+            }
+            if (r.response_error) {
+              pushSeqLog({ lineNo: ln.lineNo, text: `ASK 종료 (일부 수신): ${r.response_error}`, kind: 'error' });
+              break;
+            }
+          } catch (e) {
+            pushSeqLog({ lineNo: ln.lineNo, text: `ASK 실패: ${(e as Error).message}`, kind: 'error' });
+            break;
+          }
+          continue;
+        }
+        // 일반 메시지 줄
+        const bytes = parseHexBytes(ln.payloadHex);
+        if (!bytes || bytes.length === 0) {
+          pushSeqLog({ lineNo: ln.lineNo, text: `잘못된 hex 문자열입니다: ${ln.payloadHex}`, kind: 'error' });
+          break;
+        }
+        const lineNeedsFc = bytes.length > SF_MAX_LEN;
+        if (lineNeedsFc && (!Number.isInteger(fcIdNum) || fcIdNum < 0)) {
+          pushSeqLog({ lineNo: ln.lineNo, text: '멀티프레임인데 FC ID가 없습니다', kind: 'error' });
+          break;
+        }
+        pushSeqLog({ lineNo: ln.lineNo, text: `Tx ${ln.payloadHex}`, kind: 'info' });
+        try {
+          const r = await api.isotpSend(txIdNum, lineNeedsFc ? fcIdNum : 0, ln.payloadHex, {
+            is_extended_id: isExtended,
+            fc_timeout_ms: fcTimeoutMs,
+            ...commonRespOpts(),
+          });
+          const resps = r.responses ?? (r.response !== undefined ? [r.response] : []);
+          for (const resp of resps) {
+            pushSeqLog({
+              lineNo: ln.lineNo,
+              text: `Rx ${resp}`,
+              ascii: isNrcResponse(resp) ? null : hexToAscii(resp) || null,
+              kind: isNrcResponse(resp) ? 'error' : 'ok',
+            });
+          }
+          if (r.response_error) {
+            pushSeqLog({ lineNo: ln.lineNo, text: `수신 중단: ${r.response_error}`, kind: 'error' });
+            break;
+          }
+        } catch (e) {
+          pushSeqLog({ lineNo: ln.lineNo, text: `전송 실패: ${(e as Error).message}`, kind: 'error' });
+          break;
+        }
+      }
+    } finally {
+      setSeqRunning(false);
+      pushSeqLog({ lineNo: null, text: '순차 실행 종료', kind: 'info' });
+    }
+  };
+
+  const stopSequence = () => {
+    seqStopRef.current = true;
+  };
+
+  // ---- Tester Present 주기 전송 (2초) ---------------------------------------
+  const [tpOn, setTpOn] = useState(false);
+  useEffect(() => {
+    if (!tpOn) return;
+    if (!Number.isInteger(txIdNum) || txIdNum < 0) {
+      pushSeqLog({ lineNo: null, text: 'TP 시작 불가: TX ID(hex)를 입력하세요', kind: 'error' });
+      setTpOn(false);
+      return;
+    }
+    const id = setInterval(() => {
+      api
+        .isotpSend(txIdNum, 0, '3E 80', { is_extended_id: isExtended })
+        .catch((e) => pushSeqLog({ lineNo: null, text: `TP 전송 실패: ${(e as Error).message}`, kind: 'error' }));
+    }, 2000);
+    return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tpOn, txIdNum, isExtended]);
+
   // 힌트: 현재 라인 기준 미리보기
   let hintText: string;
   if (activeIsEmpty) hintText = '현재 라인: 비어 있음 — 전송 비활성화';
@@ -240,7 +448,7 @@ export function IsoTpBox({ config }: { config: WidgetConfig }) {
             ref={textareaRef}
             className="mono isotp-data-input"
             value={dataHex}
-            placeholder={'01 02 03\n# 주석은 전송 안 함\n02 10 01 // 인라인 주석도 가능'}
+            placeholder={'01 02 03\n# 주석은 전송 안 함\n02 10 01 // 인라인 주석도 가능\ndelay 100 // ex: 100ms delay 가능\n27 11 //ASK sequence 자동 실행'}
             onChange={(e) => {
               setOpt({ dataHex: e.target.value });
               requestAnimationFrame(updateCursorLine);
@@ -300,8 +508,30 @@ export function IsoTpBox({ config }: { config: WidgetConfig }) {
         )}
       </div>
       <div className="isotp-row">
+        <span className="hint" title="순차 실행 중 27 11 줄을 만나면 Seed 수신 → 키 생성 → 27 12 전송까지 자동 진행합니다">
+          ASK 인증용 SeedKey:
+        </span>
+        <SeedKeyControls />
+      </div>
+      <div className="isotp-row">
+        <label className="toggle" title="ON이면 2초마다 3E 80을 TX ID로 전송 (응답대기 없음)">
+          <input type="checkbox" checked={tpOn} onChange={(e) => setTpOn(e.target.checked)} />
+          Tester Present 2초 주기 전송
+        </label>
+        {tpOn && <span className="hint">TP 전송 중 (2초 간격)</span>}
+      </div>
+      <div className="isotp-row">
         <span className="hint">{hintText}</span>
         <span className="spacer" />
+        {seqRunning ? (
+          <button className="small-btn danger" onClick={stopSequence}>
+            ■ 순차 중지
+          </button>
+        ) : (
+          <button className="small-btn" disabled={sending} onClick={runSequence} title="입력창의 모든 줄을 위에서부터 순차 전송 (delay/NRC78 대기/27 11 자동 ASK 포함)">
+            ▶ 순차 실행
+          </button>
+        )}
         <button className="small-btn primary" disabled={!canSend} onClick={send}>
           {sending ? '전송 중…' : `▶ 전송 (${safeCursorLine + 1}번째 줄)`}
         </button>
@@ -315,13 +545,28 @@ export function IsoTpBox({ config }: { config: WidgetConfig }) {
                 응답{responses.length > 1 ? ` ${i + 1}` : ''}: <span className="mono">{resp}</span>
               </div>
               <div>
-                ASCII: <span className="mono">{hexToAscii(resp) || '-'}</span>
+                ASCII:{' '}
+                <span className="mono" title={isNrcResponse(resp) ? 'NRC 응답은 ASCII 디코딩하지 않음' : undefined}>
+                  {isNrcResponse(resp) ? '-' : hexToAscii(resp) || '-'}
+                </span>
               </div>
             </div>
           ))}
         </div>
       )}
       {error && <div className="error">{error}</div>}
+      {seqLog.length > 0 && (
+        <div className="isotp-seq-log">
+          <div className="hint">순차 실행 로그</div>
+          {seqLog.map((e, i) => (
+            <div key={i} className={`mono isotp-seq-line isotp-seq-${e.kind}`}>
+              {e.lineNo !== null && <span>[{e.lineNo}줄] </span>}
+              <span>{e.text}</span>
+              {e.ascii && <span> (ASCII: {e.ascii})</span>}
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

@@ -604,3 +604,60 @@ def test_running_case_tracks_active_function(stack):
     assert runner.summary()["running_case"] == "SlowFunc"
     runner.stop()
     assert runner.summary()["running_case"] is None
+
+
+# ---- CANStart / CANStop ------------------------------------------------------
+
+
+def test_canstart_arms_and_canstop_stops_only_those(stack):
+    cm, dbc, sched, replay, runner, peer, log_dir, result_dir = stack
+    # classic virtual bus: FdSensorData fails its initial send, the other
+    # three arm -- partial success still passes the step
+    assert runner._run_canstart({}, "1") is True
+    assert runner._canstart_armed == {"EngineData", "VehicleSpeed", "BodyStatus"}
+    # a TxBox row for the same message must survive CANStop
+    sched.row_periodic_start("row1", "EngineData", {"EngineSpeed": 1000}, None, 50)
+    assert runner._run_canstop("1") is True
+    assert runner._canstart_armed == set()
+    keys = {e["key"] for e in sched.status()["auto_entries"]}
+    assert "row1" in keys
+    assert not any("EngineData" in k for k in keys if k != "row1")
+    sched.row_periodic_stop("row1")
+
+
+def test_canstart_rxnode_exclusion(stack):
+    cm, dbc, sched, replay, runner, peer, log_dir, result_dir = stack
+    assert runner._run_canstart({"RxNode": "ECU_A"}, "1") is True
+    # ECU_A sends EngineData/VehicleSpeed/FdSensorData -- only ECU_B's
+    # BodyStatus remains (DriverCommand is event-tagged, never armed)
+    assert runner._canstart_armed == {"BodyStatus"}
+    assert runner._run_canstop("1") is True
+
+
+def test_canstart_all_failed_returns_false(monkeypatch, stack):
+    cm, dbc, sched, replay, runner, peer, log_dir, result_dir = stack
+    monkeypatch.setattr(
+        sched, "enable_all_periodic",
+        lambda rx_node="": {"armed": [], "failed": [{"message_name": "X", "reason": "boom"}]},
+    )
+    assert runner._run_canstart({}, "1") is False
+    assert runner._canstart_armed == set()
+
+
+def test_canstart_canstop_script_run(stack):
+    cm, dbc, sched, replay, runner, peer, log_dir, result_dir = stack
+    script = [
+        {"type": "ID", "num": "1", "Cycle": 1},
+        {"type": "CANStart"},
+        {"type": "delay", "ms": 150},
+        {"type": "CANStop"},
+    ]
+    runner.load(json.dumps(script), "t.json")
+    runner.start()
+    time.sleep(0.6)
+    status = runner.status()
+    assert status["results"] == [{"case": "1", "cycle": 1, "status": "OK"}]
+    kinds = [(e.get("type"), e.get("status")) for e in status["events"]]
+    assert any(k == "CANStart" and s.startswith("OK") for k, s in kinds)
+    assert any(k == "CANStop" and s.startswith("OK") for k, s in kinds)
+    assert runner._canstart_armed == set()

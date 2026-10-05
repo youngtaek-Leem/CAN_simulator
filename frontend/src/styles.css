@@ -1283,6 +1283,11 @@ select.tx-signal-input {
   font-size: 14px;
 }
 
+/* 메시지별 리스트의 메시지명 (시그널 행과 구분되도록 파랑) */
+.syslog-id-group-name {
+  color: #3b82f6;
+}
+
 /* 그래프 컬럼 + 오른쪽 커스텀 스크롤바를 한 줄에 나란히 놓는 래퍼. */
 .syslog-graphs-wrap {
   flex: 1;
@@ -1702,6 +1707,34 @@ select.tx-signal-input {
 
 .isotp-result.ok {
   color: var(--ok);
+}
+
+.isotp-seq-log {
+  margin-top: 4px;
+  max-height: 220px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 4px 8px;
+}
+
+.isotp-seq-line {
+  font-size: 11px;
+  padding: 1px 0;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.isotp-seq-ok {
+  color: var(--ok);
+}
+
+.isotp-seq-error {
+  color: var(--bad);
+}
+
+.isotp-seq-info {
+  color: var(--text-dim);
 }
 
 /* ---- modal ---- */

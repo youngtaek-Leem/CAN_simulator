@@ -587,4 +587,8 @@ export interface TxRow {
   // 두 값이 번갈아 나간다 (메세지 동기 전환). 역시 행에 영속화한다.
   toggleValues?: Record<string, string>;
   toggleOn?: Record<string, boolean>;
+  // 신호별 랜덤 전송 체크 상태. 체크된 신호는 전송 때마다 백엔드 생성기의
+  // fresh random값(bit 전체 범위)이 나간다 (주기행 tick·단발 모두).
+  // 토글(⇄)과는 상호 배타이다. 행에 영속화한다.
+  randomOn?: Record<string, boolean>;
 }

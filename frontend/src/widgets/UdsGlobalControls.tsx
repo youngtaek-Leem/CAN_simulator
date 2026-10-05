@@ -17,6 +17,49 @@ export function UdsGlobalControls() {
   const stminTxEnabled = canStore.getGlobalStminEnabled();
   const globalStminTx = canStore.getGlobalStminTx();
 
+  return (
+    <>
+      <span style={{ display: 'inline-flex', alignItems: 'center', gap: '3px', padding: '0', background: 'none', borderRadius: '0', border: 'none' }}>
+        <label style={{ display: 'flex', alignItems: 'center', gap: '3px', fontSize: '11px', whiteSpace: 'nowrap', color: 'inherit' }}>
+          <input type="checkbox" checked={stminTxEnabled}
+            onChange={e => canStore.setGlobalStminEnabled(e.target.checked)}
+            style={{ margin: 0, width: '14px', height: '14px' }} />
+          <span style={{ fontWeight: 500, fontSize: '13px', color: 'inherit' }}>STmin</span>
+        </label>
+        <input
+          value={globalStminTx}
+          onChange={e => canStore.setGlobalStminTx(e.target.value)}
+          disabled={!stminTxEnabled}
+          placeholder="0A"
+          style={{
+            width: '32px',
+            fontSize: '11px',
+            padding: '1px 3px',
+            border: '1px solid var(--border)',
+            borderRadius: '2px',
+            backgroundColor: stminTxEnabled ? 'var(--input-bg)' : 'var(--panel)',
+            color: 'inherit',
+            flexShrink: 0,
+          }}
+          title="Flow Control STmin (hex). 0x00~0x7F = 값ms (예: 0A = 10ms, 01 = 1ms), 0xF1~0xF9 = 100~900µs (예: F2 = 200µs), 예약값 = 0. 응답 수신 시 우리가 보내는 FC의 STmin이자, TransferData 등 송신 시 ECU가 요구하는 값보다 느리게(만) 강제하는 최소 간격으로도 쓰입니다."
+        />
+        <span style={{ fontSize: '9px', color: '#6b7280', whiteSpace: 'nowrap' }}>×1ms</span>
+        <span
+          style={{ fontSize: '9px', color: '#6b7280', whiteSpace: 'nowrap' }}
+          title="입력값의 실제 STmin 환산값 (ISO 15765-2)"
+        >
+          {decodeStminDisplay(globalStminTx)}
+        </span>
+      </span>
+      <SeedKeyControls />
+    </>
+  );
+}
+
+/** ASK(SeedKey DLL) 업로드/상태 -- STmin 없이 단독 사용 가능해 ISO-TP
+ * 위젯의 27 11 자동 인증용 메뉴로도 쓴다. 백엔드 SeedKey 서비스는 전역
+ * 공유라 어느 위젯에서 올려도 같은 DLL을 쓴다. */
+export function SeedKeyControls() {
   const [seedKeyFile, setSeedKeyFile] = useState<File | null>(null);
   const [seedKeyStatus, setSeedKeyStatus] = useState<SeedKeyStatus | null>(null);
   const [seedKeyUploading, setSeedKeyUploading] = useState(false);
@@ -46,32 +89,6 @@ export function UdsGlobalControls() {
 
   return (
     <>
-      <span style={{ display: 'inline-flex', alignItems: 'center', gap: '3px', padding: '0', background: 'none', borderRadius: '0', border: 'none' }}>
-        <label style={{ display: 'flex', alignItems: 'center', gap: '3px', fontSize: '11px', whiteSpace: 'nowrap', color: 'inherit' }}>
-          <input type="checkbox" checked={stminTxEnabled}
-            onChange={e => canStore.setGlobalStminEnabled(e.target.checked)}
-            style={{ margin: 0, width: '14px', height: '14px' }} />
-          <span style={{ fontWeight: 500, fontSize: '13px', color: 'inherit' }}>STmin</span>
-        </label>
-        <input
-          value={globalStminTx}
-          onChange={e => canStore.setGlobalStminTx(e.target.value)}
-          disabled={!stminTxEnabled}
-          placeholder="0A"
-          style={{
-            width: '32px',
-            fontSize: '11px',
-            padding: '1px 3px',
-            border: '1px solid var(--border)',
-            borderRadius: '2px',
-            backgroundColor: stminTxEnabled ? 'var(--input-bg)' : 'var(--panel)',
-            color: 'inherit',
-            flexShrink: 0,
-          }}
-          title="Flow Control STmin (hex), unit 0.1ms. 응답 수신 시 우리가 보내는 FC의 STmin이자, TransferData 등 송신 시 ECU가 요구하는 값보다 느리게(만) 강제하는 최소 간격으로도 쓰입니다."
-        />
-        <span style={{ fontSize: '9px', color: '#6b7280', whiteSpace: 'nowrap' }}>×0.1ms</span>
-      </span>
       <span style={{ display: 'inline-flex', alignItems: 'center', gap: '3px' }}>
         <label style={{
           padding: '2px 6px', fontSize: '10px', border: 'none', borderRadius: '3px',
@@ -110,9 +127,23 @@ export function UdsGlobalControls() {
   );
 }
 
+/** 백엔드 isotp_service.decode_stmin과 동일한 STmin 바이트 해석
+ * (ISO 15765-2: 0x00~0x7F = 값ms, 0xF1~0xF9 = 100~900µs, 예약값 = 0).
+ * 입력칸 옆 실시간 환산 표시용 -- 무효/입력 중이면 '= ?'. */
+function decodeStminDisplay(hex: string): string {
+  const n = parseInt(hex, 16);
+  if (!Number.isInteger(n) || n < 0 || n > 0xff) return '= ?';
+  if (n <= 0x7f) return `= ${n}ms`;
+  if (n >= 0xf1 && n <= 0xf9) return `= ${(n - 0xf0) * 100}µs`;
+  return '= 0 (예약값)';
+}
+
 /** STmin override to pass into a UDS start call: undefined when the shared
  * checkbox is off (each widget falls back to its own XML/default timing),
- * the parsed hex value when on. */
+ * the parsed hex value when on. NaN/empty (입력 중·무효값)은 undefined로 --
+ * 백엔드 Optional[int]가 None으로 받아 override 없이 동작한다. */
 export function getGlobalStminOverride(): number | undefined {
-  return canStore.getGlobalStminEnabled() ? parseInt(canStore.getGlobalStminTx(), 16) : undefined;
+  if (!canStore.getGlobalStminEnabled()) return undefined;
+  const n = parseInt(canStore.getGlobalStminTx(), 16);
+  return Number.isInteger(n) ? n : undefined;
 }

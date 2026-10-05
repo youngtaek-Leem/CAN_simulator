@@ -113,6 +113,21 @@ export const WIDGET_REGISTRY: Record<WidgetType, WidgetMeta> = {
     component: IsoTpBox,
     defaultSize: { w: 10, h: 12, minW: 1, minH: 2 },
   },
+  canMessageDisplay: {
+    label: 'CAN 메시지 표시창',
+    component: CanMessageDisplay,
+    defaultSize: { w: 12, h: 20, minW: 3, minH: 2 },
+  },
+  rxSignalDisplay: {
+    label: 'CAN 메시지 표시창[Valid Rx only]',
+    component: RxSignalDisplay,
+    defaultSize: { w: 10, h: 20, minW: 3, minH: 2 },
+  },
+  signalGraph: {
+    label: 'CAN 신호 그래프',
+    component: GraphWidget,
+    defaultSize: { w: 12, h: 20, minW: 1, minH: 2 },
+  },
   replayBox: {
     label: 'CAN 로그 Replay',
     component: ReplayBox,
@@ -122,26 +137,6 @@ export const WIDGET_REGISTRY: Record<WidgetType, WidgetMeta> = {
     label: '테스트 Sequence 실행기',
     component: TestRunnerBox,
     defaultSize: { w: 14, h: 12, minW: 4, minH: 3 },
-  },
-  signalGraph: {
-    label: 'CAN 신호 그래프',
-    component: GraphWidget,
-    defaultSize: { w: 12, h: 20, minW: 1, minH: 2 },
-  },
-  canMessageDisplay: {
-    label: 'CAN 메시지 표시창',
-    component: CanMessageDisplay,
-    defaultSize: { w: 12, h: 20, minW: 3, minH: 2 },
-  },
-  rxSignalDisplay: {
-    label: '수신 CAN 신호 표시창',
-    component: RxSignalDisplay,
-    defaultSize: { w: 10, h: 20, minW: 3, minH: 2 },
-  },
-  textDisplay: {
-    label: '텍스트 표시창',
-    component: TextDisplay,
-    defaultSize: { w: 10, h: 20, minW: 2, minH: 2 },
   },
   udsSwdl: {
     label: 'CAN-SWDL',
@@ -158,11 +153,6 @@ export const WIDGET_REGISTRY: Record<WidgetType, WidgetMeta> = {
     component: AudioMonitorWidget,
     defaultSize: { w: 11, h: 12, minW: 3, minH: 2 },
   },
-  powerControl: {
-    label: '전원 컨트롤',
-    component: PowerControlWidget,
-    defaultSize: { w: 6, h: 14, minW: 3, minH: 6 },
-  },
   canAudioLatency: {
     label: 'CAN-오디오 멀티뷰',
     component: CanAudioLatencyWidget,
@@ -178,4 +168,14 @@ export const WIDGET_REGISTRY: Record<WidgetType, WidgetMeta> = {
     component: CanLogAnalysisWidget,
     defaultSize: { w: 12, h: 14, minW: 4, minH: 3 },
   },
+  powerControl: {
+    label: '전원 컨트롤',
+    component: PowerControlWidget,
+    defaultSize: { w: 6, h: 14, minW: 3, minH: 6 },
+  },
+  textDisplay: {
+    label: '텍스트 표시창',
+    component: TextDisplay,
+    defaultSize: { w: 10, h: 20, minW: 2, minH: 2 },
+  },  
 };

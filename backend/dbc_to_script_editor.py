@@ -130,7 +130,7 @@ REF_FILL = PatternFill("solid", fgColor="E2EFDA")
 THIN = Side(style="thin", color="BFBFBF")
 BORDER = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
 
-STEP_TYPES = ["ID", "CANReq", "CANEv", "CANResp", "CANMsgS", "CANMsgE", "delay", "Audio", "Power", "loop", "]"]
+STEP_TYPES = ["ID", "CANReq", "CANEv", "CANResp", "CANMsgS", "CANMsgE", "delay", "Audio", "Power", "loop", "]", "CANStart", "CANStop"]
 POWER_CMDS = ["ACC_IGN_ON", "ACC_IGN_OFF", "ACC_ON", "IGN_ON", "ACC_OFF", "IGN_OFF"]
 AUDIO_CMDS = ["StartREC", "StopREC", "compWAV", "RMSmeasure"]
 N_ROWS = 200  # Script 시트에 미리 준비해 둘 작업 행 수
@@ -493,6 +493,8 @@ def build_workbook(sig_rows, val_entries, dbc_filename, out_path):
     r = add_line(r, "          (StartREC, StopREC, compWAV, RMSmeasure)")
     r = add_line(r, "CANEv   : CANReq와 동일한 방식으로 입력")
     r = add_line(r, "loop    : B열에 'loop' 선택 -> D열에 반복 횟수(cycle)를 직접 입력 -> F열에 '[' 자동 표시")
+    r = add_line(r, "CANStart: B열에 'CANStart' 선택 -> Periodic 전체 주기송신 시작 (D열 비우면 전체, 노드명 입력 시 해당 노드 제외)")
+    r = add_line(r, "CANStop : B열에 'CANStop' 선택 -> 이번 실행의 CANStart분만 정지 (입력 불필요)")
     r += 1
     r = add_line(r, "[CAN DB 참고값 (J열)]", 11, True)
     r = add_line(r, "CANReq/CANEv 행에서 F열에 신호명을 입력하면, 해당 신호에 DBC(VAL_)로 정의된 값들이")

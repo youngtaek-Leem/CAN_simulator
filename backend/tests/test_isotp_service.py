@@ -549,3 +549,19 @@ def test_zero_floor_sends_back_to_back(stack):
     assert result["duration_ms"] < 30
     assert result["avg_gap_us"] < 1000
     assert "max_gap_us" in result
+
+
+def test_decode_stmin_follows_iso15765_2():
+    """STmin 바이트 해석 회귀 (CAN-SWDL/OTA "×0.1ms" 오표기 조사에서 확정):
+    0x00~0x7F = 값ms (0x0A = 10ms, 1ms가 아님), 0xF1~0xF9 = 100~900µs
+    (200µs는 0xF2), 예약값 = 0. CAN-FD도 동일한 전송계층 값이라 같다."""
+    assert isotp_service.decode_stmin(0x00) == 0.0
+    assert isotp_service.decode_stmin(0x01) == pytest.approx(0.001)
+    assert isotp_service.decode_stmin(0x0A) == pytest.approx(0.010)
+    assert isotp_service.decode_stmin(0x7F) == pytest.approx(0.127)
+    assert isotp_service.decode_stmin(0xF1) == pytest.approx(0.0001)
+    assert isotp_service.decode_stmin(0xF2) == pytest.approx(0.0002)
+    assert isotp_service.decode_stmin(0xF9) == pytest.approx(0.0009)
+    assert isotp_service.decode_stmin(0x80) == 0.0
+    assert isotp_service.decode_stmin(0xF0) == 0.0
+    assert isotp_service.decode_stmin(0xFA) == 0.0

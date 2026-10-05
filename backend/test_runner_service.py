@@ -13,6 +13,11 @@ Step types (see Requirement.md "Automation 시나리오 러너 통합 계획"):
   "send invalid 30ms later" path for CANEv the way AppTest.py did.
 - delay: {"type": "delay", "ms": 1000}
 - CANResp: wait up to a timeout for a signal to reach an expected raw value.
+- CANStart: arm periodic resend for every Periodic-tagged DBC message (the
+  same call the "Enable Msg" button makes). Optional "RxNode" skips that
+  node's messages. {"type": "CANStart"} or {"type": "CANStart", "RxNode": "ECU"}
+- CANStop: stop exactly what this run's CANStart steps armed (TxBox rows
+  and other batches untouched). {"type": "CANStop"}
 - CANlogReplay: replay a .blf/.asc log (via replay_service), optionally
   excluding frames whose message is sent by given DBC node(s) -- this
   replaces AppTest.py's hardcoded hex ID exclude-list with a DBC-driven one.
@@ -185,6 +190,9 @@ class TestRunnerService:
         self._running_case: Optional[str] = None
         self._events: list[dict] = []
         self._results: list[dict] = []
+        # messages armed by this run's CANStart steps (stopped by CANStop
+        # -- run-scoped, unlike the global "Enable Msg" batch)
+        self._canstart_armed: set[str] = set()
 
     # ---- script loading ---------------------------------------------------
 
@@ -272,6 +280,7 @@ class TestRunnerService:
             self._run_queue = list(self._cases)
             self._events = []
             self._results = []
+            self._canstart_armed = set()
             self._running = True
         return self._launch_thread()
 
@@ -285,6 +294,7 @@ class TestRunnerService:
             self._run_queue = [case]
             self._events = []
             self._results = []
+            self._canstart_armed = set()
             self._running = True
         return self._launch_thread()
 
@@ -480,6 +490,10 @@ class TestRunnerService:
                 return self._run_power(b, case_num)
             if t == "Audio":
                 return self._run_audio(b, case_num)
+            if t == "CANStart":
+                return self._run_canstart(b, case_num)
+            if t == "CANStop":
+                return self._run_canstop(case_num)
             if t == "AP":
                 # ported as-is from AppTest.py's AP class, which itself only
                 # logs -- there was never a real analyzer integration to port.
@@ -558,6 +572,45 @@ class TestRunnerService:
         finally:
             self._can.remove_listener(listener)
         return matched.is_set()
+
+    # ---- CAN periodic batch (Enable All Msg in-scenario) -----------------------
+
+    def _run_canstart(self, block: dict, case_num: str) -> bool:
+        """Arm periodic resend for every Periodic-tagged DBC message -- the
+        same call the "Enable Msg" button makes. Armed names accumulate in
+        this run's _canstart_armed set for a later CANStop. Optional
+        "RxNode" skips that node's messages (the real DUT)."""
+        rx_node = str(block.get("RxNode", "") or "")
+        try:
+            result = self._tx.enable_all_periodic(rx_node)
+        except Exception as exc:
+            self._log(case=case_num, type="CANStart", status=f"실패: {exc}")
+            return False
+        armed = result.get("armed", [])
+        failed = result.get("failed", [])
+        with self._lock:
+            self._canstart_armed.update(armed)
+        if failed:
+            reasons = ", ".join(f"{f.get('message_name')}: {f.get('reason')}" for f in failed)
+            self._log(
+                case=case_num, type="CANStart",
+                status=f"OK (arm {len(armed)}건, 실패 {len(failed)}건: {reasons})",
+            )
+        else:
+            self._log(case=case_num, type="CANStart", status=f"OK (arm {len(armed)}건)")
+        if not armed and failed:
+            return False
+        return True
+
+    def _run_canstop(self, case_num: str) -> bool:
+        """Stop exactly what this run's CANStart steps armed -- TxBox rows,
+        Random transmissions and other batches are untouched."""
+        with self._lock:
+            names = sorted(self._canstart_armed)
+            self._canstart_armed = set()
+        self._tx.stop_started(names)
+        self._log(case=case_num, type="CANStop", status=f"OK ({len(names)}건 정지)")
+        return True
 
     # ---- power supply -----------------------------------------------------------
 

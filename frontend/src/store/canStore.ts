@@ -127,7 +127,8 @@ class CanStore {
     this.fps = saved >= 10 && saved <= 60 ? saved : 30;
     this.rxNode = localStorage.getItem(RX_NODE_KEY) ?? '';
     this.stminEnabled = localStorage.getItem(STMIN_ENABLED_KEY) === '1';
-    this.stminValue = localStorage.getItem(STMIN_VALUE_KEY) ?? '0A';
+    const savedStmin = localStorage.getItem(STMIN_VALUE_KEY) ?? '0A';
+    this.stminValue = /^[0-9a-fA-F]{1,2}$/.test(savedStmin) ? savedStmin.toUpperCase() : '0A';
     requestAnimationFrame(this.tick);
     setInterval(this.pollTestRunnerEvents, TESTRUNNER_POLL_MS);
   }
@@ -175,8 +176,18 @@ class CanStore {
   }
 
   setGlobalStminTx(value: string) {
-    this.stminValue = value;
-    localStorage.setItem(STMIN_VALUE_KEY, value);
+    const v = value.trim();
+    // 입력 중인 빈 문자열은 메모리에만 반영 (표시 "= ?"), 유효한 16진
+    // 1~2자리가 들어오면 정규화(대문자)해 영속화한다. 그 외 무효 입력은
+    // 무시해 이전 유효값을 유지 -- NaN이 백엔드로 가는 경로를 차단한다.
+    if (v === '') {
+      this.stminValue = '';
+      this.markDirty();
+      return;
+    }
+    if (!/^[0-9a-fA-F]{1,2}$/.test(v)) return;
+    this.stminValue = v.toUpperCase();
+    localStorage.setItem(STMIN_VALUE_KEY, v.toUpperCase());
     this.markDirty();
   }
 
@@ -249,11 +260,14 @@ class CanStore {
   // directly, so every CAN signal a widget sends passes through one place
   // for the activity log (see displays.tsx's TextDisplay).
 
-  async sendSignal(message: string, values: Record<string, number | string>, valuesAlt?: Record<string, number | string>, once = false) {
-    const result = await api.txSignal(message, values, valuesAlt, once);
+  async sendSignal(message: string, values: Record<string, number | string>, valuesAlt?: Record<string, number | string>, once = false, randomSignals?: string[]) {
+    const result = await api.txSignal(message, values, valuesAlt, once, randomSignals);
+    const actuals = (result as { random_values?: Record<string, number> })?.random_values ?? {};
     for (const [signal, value] of Object.entries(values)) {
       const sig = this.findDbcSignal(message, signal);
-      this.logSignalSend(message, signal, this.formatSignalValue(sig, value), sig?.send_type, 'valid');
+      const shown = signal in actuals ? actuals[signal] : value;
+      const suffix = signal in actuals ? ' (랜덤)' : '';
+      this.logSignalSend(message, signal, `${this.formatSignalValue(sig, shown)}${suffix}`, sig?.send_type, 'valid');
     }
     if (valuesAlt) {
       for (const [signal, value] of Object.entries(valuesAlt)) {

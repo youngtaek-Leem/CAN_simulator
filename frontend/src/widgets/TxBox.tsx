@@ -156,6 +156,7 @@ function ChoiceComboInput({
   choices,
   value,
   onChange,
+  disabled,
 }: {
   openKey: string;
   openListKey: string | null;
@@ -163,6 +164,7 @@ function ChoiceComboInput({
   choices: Record<string, string>;
   value: string;
   onChange: (v: string) => void;
+  disabled?: boolean;
 }) {
   const open = openListKey === openKey;
   // 목록 필터는 입력값(value)이 아니라 별도 query로 관리: null = 전체 표시.
@@ -180,7 +182,8 @@ function ChoiceComboInput({
       <input
         className="mono tx-signal-input"
         value={value}
-        title="선택지에서 고르거나 직접 입력"
+        disabled={disabled}
+        title={disabled ? '랜덤 체크 중 — 전송 시 매번 랜덤값' : '선택지에서 고르거나 직접 입력'}
         onChange={(e) => {
           onChange(e.target.value);
           setQuery(e.target.value);
@@ -207,6 +210,7 @@ function ChoiceComboInput({
       <button
         className="small-btn"
         title="VAL_ 전체 목록 보기"
+        disabled={disabled}
         onMouseDown={(e) => e.preventDefault()}
         onClick={() => {
           setQuery(null);
@@ -257,6 +261,9 @@ export function TxBox({ config }: { config: WidgetConfig }) {
   const rowsRef = useRef(rows);
   rowsRef.current = rows;
 
+  // 마운트/DBC 로드 시 별도 arm 불필요 -- 행 스코프 방식이라 랜덤 목록은
+  // 행 시작/업데이트 때마다 백엔드 엔트리로 전달된다.
+
   const setRows = (next: TxRow[] | ((prev: TxRow[]) => TxRow[])) => {
     updateWidget({
       ...config,
@@ -294,6 +301,29 @@ export function TxBox({ config }: { config: WidgetConfig }) {
   const patchRow = (key: string, patch: Partial<TxRow>) =>
     setRows(rows.map((r) => (r.key === key ? { ...r, ...patch } : r)));
 
+  /** 신호별 랜덤 체크 상태. 행 스코프 방식이라 체크 자체는 백엔드 호출
+   * 없이 행 설정에만 반영되고, 전송 중이면 live update로 다음 tick부터
+   * 적용된다. 해제 시 현재 설정값으로 백엔드 상태를 복원한다 (전송 없음 --
+   * 다음 전송부터 설정값으로 복귀). 파싱 실패 시 상태 복원은 생략.
+   * 토글(⇄)과는 상호 배타이다. */
+  const setRandom = (r: TxRow, signalName: string, on: boolean) => {
+    if (!r.messageName) return;
+    const patch: Partial<TxRow> = {
+      randomOn: { ...(r.randomOn ?? {}), [signalName]: on },
+    };
+    if (on) patch.toggleOn = { ...(r.toggleOn ?? {}), [signalName]: false };
+    patchRow(r.key, patch);
+    pushRowLiveFor({ ...r, ...patch });
+    if (on) return;
+    const msg = dbcMessageOf(r.messageName);
+    let values: Record<string, number> | undefined;
+    if (msg) {
+      const parsed = parseSignalValues(msg, r.signalValues);
+      if (!parsed.error) values = parsed.values;
+    }
+    api.randomStop(r.messageName, signalName, values).catch(() => {});
+  };
+
   /** DBC 메시지 조회 (길이/FD 표시 및 frame_id 고정용) */
   const dbcMessageOf = (name: string | null) =>
     name ? (dbc.messages?.find((m) => m.name === name) ?? null) : null;
@@ -306,13 +336,15 @@ export function TxBox({ config }: { config: WidgetConfig }) {
     const row = rowsRef.current.find((r) => r.key === key);
     if (!row) return;
     if (!name) {
-      patchRow(key, { messageName: null, rawOverride: false });
+      patchRow(key, { messageName: null, rawOverride: false, randomOn: {} });
       return;
     }
     const msg = dbcMessageOf(name);
+    // 메시지 교체: randomOn 초기화 (구 메시지 상태의 랜덤 잔류값은 다음
+    // 명시적 전송 때 설정값으로 자가 치유된다)
     // 메시지별 주기 자동 설정: Periodic이면 DBC 주기, Event면 체크 해제 + 100ms
     const period = msg ? resolveRowPeriod(msg) : { periodic: row.periodic, periodMs: row.periodMs };
-    const next = { ...row, messageName: name, rawOverride: false, isFd: busFd, bitrateSwitch: false, ...period };
+    const next = { ...row, messageName: name, rawOverride: false, isFd: busFd, bitrateSwitch: false, ...period, randomOn: {} };
     // Event 메시지로 바뀌면 주기 체크가 해제되므로, 전송 중이던 행은 정지한다
     if (!period.periodic && isRowTransmitting(key)) {
       try {
@@ -323,7 +355,7 @@ export function TxBox({ config }: { config: WidgetConfig }) {
         return;
       }
     }
-    patchRow(key, { messageName: name, rawOverride: false, isFd: busFd, bitrateSwitch: false, ...period });
+    patchRow(key, { messageName: name, rawOverride: false, isFd: busFd, bitrateSwitch: false, ...period, randomOn: {} });
     // 전송 중 메시지 변경: 백엔드 행 엔트리도 새 메시지로 retarget
     pushRowLiveFor(next);
 
@@ -358,8 +390,9 @@ export function TxBox({ config }: { config: WidgetConfig }) {
   /** 행별 Send 버튼 동작:
    * - 주기 미체크: Periodic/Event 상관없이 정확히 1번만 출력.
    * - 주기 체크: 설정 주기로 전송 시작 (Send 적색 표시), 다시 누르면 정지.
-   * 수동 오버라이드 행은 DBC의 frame_id로 고정해 전송한다. */
-  const sendOnce = async (r: TxRow) => {
+   * 수동 오버라이드 행은 DBC의 frame_id로 고정해 전송한다.
+   * 성공 시 true (전체 전송 카운트용). */
+  const sendOnce = async (r: TxRow): Promise<boolean> => {
     const rawMode = !r.messageName || r.rawOverride;
     // 주기 전송 중 재클릭: 해당 행만 정지
     if (r.periodic && isRowTransmitting(r.key)) {
@@ -369,21 +402,25 @@ export function TxBox({ config }: { config: WidgetConfig }) {
         setError(null);
       } catch (e) {
         setError((e as Error).message);
+        return false;
       }
-      return;
+      return true;
     }
     if (!rawMode) {
       const msg = dbcMessageOf(r.messageName);
       if (!msg) {
         setError(`"${rowLabel(r)}": DBC에 메시지가 없습니다`);
-        return;
+        return false;
       }
       const { values, alt, error } = parseRowValues(msg, r);
       if (error) {
         setError(`"${rowLabel(r)}": ${error}`);
-        return;
+        return false;
       }
       try {
+        // 랜덤 체크 신호는 이번 전송(첫 프레임 포함)에 한해 fresh random값으로
+        // 대입된다 (주기행 이후 tick은 백엔드 재생성)
+        const randomSignals = Object.keys(r.randomOn ?? {}).filter((k) => r.randomOn?.[k]);
         if (r.periodic) {
           await api.txRowStart({
             key: r.key,
@@ -391,26 +428,31 @@ export function TxBox({ config }: { config: WidgetConfig }) {
             values,
             values_alt: alt,
             period_ms: Math.max(1, r.periodMs),
+            random_signals: randomSignals,
           });
-          canStore.pushActivity(`${rowLabel(r)} 주기 전송 시작 (${Math.max(1, r.periodMs)}ms)`);
+          canStore.pushActivity(
+            `${rowLabel(r)} 주기 전송 시작 (${Math.max(1, r.periodMs)}ms)` +
+            (randomSignals.length > 0 ? ` [랜덤: ${randomSignals.join(', ')}]` : ''),
+          );
         } else {
           // once: Periodic/Event 상관없이 정확히 1번만 출력 (auto 미지정)
-          await canStore.sendSignal(msg.name, values, alt, true);
+          await canStore.sendSignal(msg.name, values, alt, true, randomSignals);
         }
         setError(null);
       } catch (e) {
         setError((e as Error).message);
+        return false;
       }
-      return;
+      return true;
     }
     const err = validateRawData(r.dataHex, r.isFd);
     if (err) {
       setError(`"${rowLabel(r)}": ${err}`);
-      return;
+      return false;
     }
     if (!r.messageName && !/^[0-9a-fA-Fa-f]+$/.test(r.idHex.trim())) {
       setError(`"${rowLabel(r)}": ID(hex)를 입력하세요`);
-      return;
+      return false;
     }
     const msg = dbcMessageOf(r.messageName);
     try {
@@ -437,7 +479,37 @@ export function TxBox({ config }: { config: WidgetConfig }) {
       setError(null);
     } catch (e) {
       setError((e as Error).message);
+      return false;
     }
+    return true;
+  };
+
+  /** 전체 전송/정지 토글: enabled + 주기 체크 행만 대상 (이미 전송 중인 행은
+   * 건너뜀). 개별 행의 정지/재전송은 각 Send 버튼으로 독립 동작한다. */
+  const anyTransmitting = rows.some((r) => r.periodic && isRowTransmitting(r.key));
+  const sendAll = async () => {
+    if (anyTransmitting) {
+      const targets = rowsRef.current.filter((r) => r.periodic && isRowTransmitting(r.key));
+      let stopped = 0;
+      for (const r of targets) {
+        try {
+          await api.txRowStop(r.key);
+          stopped += 1;
+        } catch (e) {
+          setError((e as Error).message);
+        }
+      }
+      canStore.pushActivity(`전체 정지: ${stopped}행 정지`);
+      return;
+    }
+    const targets = rowsRef.current.filter((r) => r.enabled && r.periodic && !isRowTransmitting(r.key));
+    const skipped = rowsRef.current.length - targets.length;
+    let started = 0;
+    for (const r of targets) {
+      const cur = rowsRef.current.find((x) => x.key === r.key) ?? r;
+      if (await sendOnce(cur)) started += 1;
+    }
+    canStore.pushActivity(`전체 전송: ${started}행 시작${skipped > 0 ? ` (스킵 ${skipped}행: 미체크·비활성·전송 중)` : ''}`);
   };
 
   const handleDataInputChange = (r: TxRow, e: React.ChangeEvent<HTMLTextAreaElement>) => {
@@ -473,6 +545,7 @@ export function TxBox({ config }: { config: WidgetConfig }) {
       signalValues: src.signalValues ? { ...src.signalValues } : undefined,
       toggleValues: src.toggleValues ? { ...src.toggleValues } : undefined,
       toggleOn: src.toggleOn ? { ...src.toggleOn } : undefined,
+      randomOn: src.randomOn ? { ...src.randomOn } : undefined,
     };
     const next = [...rowsRef.current];
     next.splice(idx + 1, 0, copy);
@@ -526,7 +599,7 @@ export function TxBox({ config }: { config: WidgetConfig }) {
     return { values, alt, error: null };
   };
 
-  /** 전송 중인 행의 값/토글/주기 변경을 백엔드에 즉시 반영한다 (즉시
+  /** 전송 중인 행의 값/토글/주기/랜덤 변경을 백엔드에 즉시 반영한다 (즉시
    * 프레임 없이 다음 tick부터 적용, tx_count 유지). 전송 중이 아니거나
    * 파싱 실패(입력 중 빈칸 등)면 스킵 -- Send 시점에 검증 에러가 표시되므로
    * 여기서 UI를 건드리지 않고, 실패한 푸시는 다음 편집 때 재시도된다. */
@@ -550,6 +623,7 @@ export function TxBox({ config }: { config: WidgetConfig }) {
         values,
         values_alt: alt ?? null,
         period_ms: Math.max(1, r.periodMs),
+        random_signals: Object.keys(r.randomOn ?? {}).filter((k) => r.randomOn?.[k]),
       })
       .catch(() => {});
   };
@@ -633,10 +707,19 @@ export function TxBox({ config }: { config: WidgetConfig }) {
         <button className="small-btn" onClick={addRow} disabled={rows.length >= MAX_ROWS}>
           + 메시지 추가 ({rows.length}/{MAX_ROWS})
         </button>
+        <button
+          className={`small-btn${anyTransmitting ? ' danger' : ' primary'}`}
+          onClick={sendAll}
+          disabled={rows.length === 0}
+          title={anyTransmitting ? '전송 중인 모든 행 정지 (개별 행은 각 Send 버튼으로 정지/재전송 가능)' : '활성화+주기 체크된 모든 행의 주기 전송 시작 (미체크·비활성 행은 스킵)'}
+        >
+          {anyTransmitting ? '■ 전체 정지' : '▶ 전체 전송'}
+        </button>
         <MessageFilter value={msgFilter} onChange={setMsgFilter} />
         <div className="tx-signal-search">
           <input
             className="layout-input mono"
+            style={{ width: 170 }}
             placeholder="signal 검색 (DBC 전체)"
             title="신호 이름으로 검색 -- 선택하면 해당 메시지가 추가됩니다"
             value={sigSearch}
@@ -761,8 +844,21 @@ export function TxBox({ config }: { config: WidgetConfig }) {
                       className="hint"
                       title={
                         signalMode && msg
-                          ? `${msg.name} (${msg.length}B · ${msg.is_fd ? 'FD' : 'Classic'})`
+                          ? `${msg.name} (${msg.length}B · ${msg.is_fd ? 'FD' : 'Classic'}) — 클릭하면 아래에 신호 리스트 표시`
                           : 'hex 직접 입력 모드'
+                      }
+                      style={
+                        signalMode
+                          ? {
+                              color: '#3b82f6',
+                              border: '1px solid #3b82f6',
+                              borderRadius: '3px',
+                              background: '#3b82f622',
+                              padding: '1px 6px',
+                              whiteSpace: 'nowrap',
+                              cursor: 'pointer',
+                            }
+                          : undefined
                       }
                     >
                       {signalMode ? `신호 ${msg?.signals.length ?? 0}개` : 'raw'}
@@ -800,7 +896,14 @@ export function TxBox({ config }: { config: WidgetConfig }) {
                 </button>
                 <button
                   className="icon-btn"
-                  onClick={() => setRows(rows.filter((x) => x.key !== r.key))}
+                  title="행 삭제 (전송 중이면 해당 행의 주기 전송도 정지)"
+                  onClick={() => {
+                    if (isRowTransmitting(r.key)) {
+                      api.txRowStop(r.key).catch(() => {});
+                      canStore.pushActivity(`${rowLabel(r)} 주기 전송 정지 (행 삭제)`);
+                    }
+                    setRows(rowsRef.current.filter((x) => x.key !== r.key));
+                  }}
                 >
                   ✕
                 </button>
@@ -860,13 +963,14 @@ export function TxBox({ config }: { config: WidgetConfig }) {
                         pushRowLiveFor({ ...r, signalValues });
                       };
                       const toggled = r.toggleOn?.[s.name] ?? false;
+                      const randomChecked = r.randomOn?.[s.name] ?? false;
                       const toggleText = r.toggleValues?.[s.name] ?? text;
                       const setToggleText = (v: string) => {
                         const toggleValues = { ...(r.toggleValues ?? {}), [s.name]: v };
                         patchRow(r.key, { toggleValues });
                         pushRowLiveFor({ ...r, toggleValues });
                       };
-                      const toggleEditor = (value: string, onChange: (v: string) => void, listSuffix: string) =>
+                      const toggleEditor = (value: string, onChange: (v: string) => void, listSuffix: string, disabled = false) =>
                         s.choices ? (
                           <ChoiceComboInput
                             openKey={`${r.key}.${s.name}.${listSuffix}`}
@@ -875,11 +979,14 @@ export function TxBox({ config }: { config: WidgetConfig }) {
                             choices={s.choices}
                             value={value}
                             onChange={onChange}
+                            disabled={disabled}
                           />
                         ) : (
                           <input
                             className="mono tx-signal-input"
                             value={value}
+                            disabled={disabled}
+                            title={disabled ? '랜덤 체크 중 — 전송 시 매번 랜덤값' : undefined}
                             onChange={(e) => onChange(e.target.value)}
                           />
                         );
@@ -891,15 +998,27 @@ export function TxBox({ config }: { config: WidgetConfig }) {
                             title={`${s.name} (${s.length}bit${s.is_signed ? ', signed' : ''}, ${s.send_type}) 범위 ${min} ~ ${max}`}
                           >
                             <span className="tx-signal-name mono">{s.name}</span>
-                            {toggleEditor(text, setSignalText, 'a')}
+                            {toggleEditor(text, setSignalText, 'a', randomChecked)}
                             <button
                               className={`small-btn${toggled ? ' primary' : ''}`}
-                              title="값 토글: 이 신호의 두 값을 번갈아 전송 (2번째 값 입력칸 표시)"
+                              title="값 토글: 이 신호의 두 값을 번갈아 전송 (2번째 값 입력칸 표시, 랜덤과 상호 배타)"
                               onClick={() => {
                                 const on = !(r.toggleOn?.[s.name] ?? false);
                                 const patch: Partial<TxRow> = {
                                   toggleOn: { ...(r.toggleOn ?? {}), [s.name]: on },
                                 };
+                                if (on) {
+                                  // 상호 배타: 토글 ON이면 랜덤 해제 (행 스코프
+                                  // 목록에서 제거 + 설정값으로 상태 복원)
+                                  patch.randomOn = { ...(r.randomOn ?? {}), [s.name]: false };
+                                  if (r.messageName && r.randomOn?.[s.name]) {
+                                    const num = Number(text);
+                                    api.randomStop(
+                                      r.messageName, s.name,
+                                      Number.isFinite(num) ? { [s.name]: num } : undefined,
+                                    ).catch(() => {});
+                                  }
+                                }
                                 if (on && r.toggleValues?.[s.name] === undefined) {
                                   patch.toggleValues = { ...(r.toggleValues ?? {}), [s.name]: text };
                                 }
@@ -909,6 +1028,18 @@ export function TxBox({ config }: { config: WidgetConfig }) {
                             >
                               ⇄
                             </button>
+                            <label
+                              className="hint"
+                              style={{ display: 'inline-flex', alignItems: 'center', gap: 2, cursor: 'pointer' }}
+                              title="체크하면 전송할 때마다 이 신호에 랜덤값(bit 전체 범위)을 전송 (토글과 상호 배타)"
+                            >
+                              <input
+                                type="checkbox"
+                                checked={randomChecked}
+                                onChange={(e) => setRandom(r, s.name, e.target.checked)}
+                              />
+                              랜덤
+                            </label>
                             <span className="hint">{s.unit ?? ''}</span>
                           </label>
                           {toggled && (

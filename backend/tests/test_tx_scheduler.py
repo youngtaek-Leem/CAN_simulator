@@ -209,6 +209,24 @@ def test_stop_auto_single_message_only_clears_that_name_from_enable_msg_set():
         teardown_stack(cm, sched, peer)
 
 
+def test_stop_started_only_stops_named_entries():
+    """CANStop용: 지정한 메시지의 auto 엔트리만 제거하고 TxBox 행·다른
+    배치는 그대로 둔다. unknown 이름은 무시."""
+    cm, dbc, sched, peer = setup_stack("t_stop_started", fd=True)
+    try:
+        result = sched.enable_all_periodic()
+        assert set(result["armed"]) == {"EngineData", "VehicleSpeed", "BodyStatus", "FdSensorData"}
+        sched.row_periodic_start("row1", "EngineData", {"EngineSpeed": 1000}, None, 50)
+        sched.stop_started(["EngineData", "NoSuchMessage"])
+        keys = {e["key"] for e in sched.status()["auto_entries"]}
+        assert "row1" in keys  # TxBox 행은 유지
+        assert not any(k == "auto:EngineData" or k == "EngineData" for k in keys)
+        for name in ("VehicleSpeed", "BodyStatus", "FdSensorData"):
+            assert any(name in k for k in keys)
+    finally:
+        teardown_stack(cm, sched, peer)
+
+
 def test_fd_signal_sends_32_byte_fd_frame():
     cm, dbc, sched, peer = setup_stack("t_fd_signal", fd=True)
     try:
@@ -274,6 +292,155 @@ def test_generator_range_clamps_to_bit_bounds():
         for _ in range(20):
             sched.send_generated("DriverCommand", "TurnSignal")
             assert 0 <= dbc._signal_state["DriverCommand"]["TurnSignal"] <= 15
+    finally:
+        teardown_stack(cm, sched, peer)
+
+
+def test_row_random_without_prior_registration():
+    """행 스코프 방식: 별도 arm 없이 행 시작만으로 tick 재생성된다."""
+    cm, dbc, sched, peer = setup_stack("t_rnd_lazy")
+    try:
+        assert ("EngineData", "EngineSpeed") not in sched._random_active
+        sched.row_periodic_start(
+            "rl", "EngineData", {"EngineSpeed": 1000}, None, 1000,
+            random_signals=["EngineSpeed"],
+        )
+        assert peer.recv(timeout=0.5) is not None
+        entry = sched._auto_entries["rl"]
+        job = sched._make_send_job(entry)
+        for _ in range(10):
+            job()
+        frames = []
+        while True:
+            m = peer.recv(timeout=0)
+            if m is None:
+                break
+            if m.arbitration_id == 0x100:
+                frames.append(m)
+        raws = {int.from_bytes(f.data[0:2], "little") for f in frames}
+        assert len(raws) > 1, "ticks should regenerate without any prior arm"
+        sched.row_periodic_stop("rl")
+    finally:
+        teardown_stack(cm, sched, peer)
+
+
+def test_random_stop_without_values_keeps_state():
+    """values 생략 시 상태 그대로 (복원 없음) -- 멱등 disarm."""
+    cm, dbc, sched, peer = setup_stack("t_rnd_noval")
+    try:
+        res = sched.random_stop("EngineData", "EngineSpeed")
+        assert res["stopped"] is True
+    finally:
+        teardown_stack(cm, sched, peer)
+
+
+def test_send_signal_random_signals_one_shot():
+    """단발 전송 random_signals: 1프레임에 fresh random 대입, 호출자 dict
+    불변, 미등록 생성기는 자동 등록된다."""
+    cm, dbc, sched, peer = setup_stack("t_rnd_once")
+    try:
+        sig = next(s for s in dbc.get_message("EngineData").signals if s.name == "EngineSpeed")
+        scale = float(sig.scale)
+        values = {"EngineSpeed": 1000}
+        raws = set()
+        for _ in range(20):
+            res = sched.send_signal("EngineData", dict(values), None, True, ["EngineSpeed"])
+            assert values == {"EngineSpeed": 1000}  # caller dict untouched
+            phys = res["random_values"]["EngineSpeed"]
+            raw = round(phys / scale)
+            assert 0 <= raw <= 65535
+            raws.add(raw)
+            f = peer.recv(timeout=0.5)
+            assert f is not None and f.arbitration_id == 0x100
+            assert int.from_bytes(f.data[0:2], "little") == raw
+        assert len(raws) > 1, "expected varying random draws"
+    finally:
+        teardown_stack(cm, sched, peer)
+
+
+def test_row_random_immediate_and_tick_regeneration_then_stop():
+    """행 시작 첫 프레임부터 random, 이후 tick마다 재생성, 해제 후 설정값 복귀."""
+    cm, dbc, sched, peer = setup_stack("t_rnd_row")
+    try:
+        sched.row_periodic_start(
+            "rk", "EngineData", {"EngineSpeed": 1000}, None, 1000,
+            random_signals=["EngineSpeed"],
+        )
+        f1 = peer.recv(timeout=0.5)
+        assert f1 is not None and f1.arbitration_id == 0x100
+        first_raw = int.from_bytes(f1.data[0:2], "little")
+        assert 0 <= first_raw <= 65535
+        entry = sched._auto_entries["rk"]
+        job = sched._make_send_job(entry)
+        for _ in range(10):
+            job()
+        frames = []
+        while True:
+            m = peer.recv(timeout=0)
+            if m is None:
+                break
+            if m.arbitration_id == 0x100:
+                frames.append(m)
+        raws = {int.from_bytes(f.data[0:2], "little") for f in frames}
+        assert len(raws) > 1, "periodic ticks should regenerate random values"
+        # 해제 = 엔트리 목록 제거 + 설정값 상태 복원 (프론트 uncheck 순서)
+        sched.row_periodic_update("rk", random_signals=[])
+        sched.random_stop("EngineData", "EngineSpeed", {"EngineSpeed": 1000})
+        job()
+        f2 = peer.recv(timeout=0.5)
+        assert f2 is not None and int.from_bytes(f2.data[0:2], "little") == 4000
+        sched.row_periodic_stop("rk")
+    finally:
+        teardown_stack(cm, sched, peer)
+
+
+def test_send_signal_random_does_not_pollute_state():
+    """단발 random 전송 후 일반 전송은 설정값 그대로 (상태 복원 확인)."""
+    cm, dbc, sched, peer = setup_stack("t_rnd_clean")
+    try:
+        sched.send_signal("EngineData", {"EngineSpeed": 1000}, None, True, ["EngineSpeed"])
+        res = sched.send_signal("EngineData", {"EngineSpeed": 1000}, None, True)
+        assert "random_values" not in res
+        got = []
+        for _ in range(2):
+            f = peer.recv(timeout=0.5)
+            assert f is not None
+            got.append(int.from_bytes(f.data[0:2], "little"))
+        assert got[1] == 4000, f"plain send after random one-shot must use configured value, got {got}"
+    finally:
+        teardown_stack(cm, sched, peer)
+
+
+def test_row_update_toggles_random_list_mid_transmission():
+    """전송 중 체크 ON/OFF가 다음 tick부터 반영된다 (프론트 live update 경로)."""
+    cm, dbc, sched, peer = setup_stack("t_rnd_update")
+    try:
+        sched.row_periodic_start("ru2", "EngineData", {"EngineSpeed": 1000}, None, 1000)
+        entry = sched._auto_entries["ru2"]
+        job = sched._make_send_job(entry)
+        job()
+        f = peer.recv(timeout=0.5)
+        assert f is not None and int.from_bytes(f.data[0:2], "little") == 4000
+        # 체크 ON -> 다음 tick부터 랜덤
+        res = sched.row_periodic_update("ru2", random_signals=["EngineSpeed"])
+        assert res["updated"] is True
+        for _ in range(10):
+            job()
+        frames = []
+        while True:
+            m = peer.recv(timeout=0)
+            if m is None:
+                break
+            if m.arbitration_id == 0x100:
+                frames.append(m)
+        assert len({int.from_bytes(f.data[0:2], "little") for f in frames}) > 1
+        # 체크 OFF (목록 제거 + 상태 복원) -> 다음 tick부터 설정값
+        sched.row_periodic_update("ru2", random_signals=[])
+        sched.random_stop("EngineData", "EngineSpeed", {"EngineSpeed": 1000})
+        job()
+        f2 = peer.recv(timeout=0.5)
+        assert f2 is not None and int.from_bytes(f2.data[0:2], "little") == 4000
+        sched.row_periodic_stop("ru2")
     finally:
         teardown_stack(cm, sched, peer)
 

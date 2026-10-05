@@ -91,6 +91,10 @@ class TxEntry:
     bitrate_switch: bool = False
     next_due: float = 0.0
     tx_count: int = 0
+    # TxBox per-signal "랜덤" checkbox: these signals are drawn fresh from
+    # their generator on every tick of THIS entry (row-scoped -- immune to
+    # global arm timing; missing generators are auto-registered full-range).
+    random_signals: list[str] | None = None
 
 
 class TxScheduler:
@@ -283,7 +287,8 @@ class TxScheduler:
 
     def send_signal(self, message_name: str, values: dict[str, Any],
                     values_alt: Optional[dict[str, Any]] = None,
-                    once: bool = False) -> dict:
+                    once: bool = False,
+                    random_signals: Optional[list[str]] = None) -> dict:
         """Send DBC signal values following the Event/Periodic rule.
 
         values_alt (optional): TxBox toggle second set. Stored (with values
@@ -291,6 +296,17 @@ class TxScheduler:
         then flips -- so repeated sends alternate A/B/A/... Omitted entirely
         (None) leaves any previously stored toggle untouched, so one-shot
         sends from other widgets never disturb a TxBox toggle.
+
+        random_signals (optional): signal names whose value is replaced, for
+        this send only, with a fresh draw from their registered value
+        generator (TxBox per-signal "랜덤" checkbox). Missing generators are
+        auto-registered full-range, so the checkbox state is the source of
+        truth with no arm-timing failure mode. Generator wins over
+        configured/toggle values, the same precedence _make_send_job uses
+        on periodic ticks. No auto-entry is armed and _random_active is
+        untouched, so other widgets' sends are unaffected. Persisted signal
+        state is restored afterwards, so a later plain send still uses the
+        configured values.
 
         once=True: exactly one frame (plus the Event 30ms-invalid follow-up
         for Event signals) -- no periodic auto-entry is armed, for Periodic
@@ -302,8 +318,21 @@ class TxScheduler:
             send_values = {**values, **toggled}
         else:
             send_values = values
+        send_values = self._substitute_random(message_name, send_values, random_signals)
+        # One-shot random draws must not leak into persisted state (a later
+        # plain send or another entry's tick would otherwise keep replaying
+        # the random value) -- snapshot and restore around the transmit.
+        # The window is microseconds; bus.send itself is never done under
+        # the DBC lock.
+        state_saved = None
+        if random_signals:
+            with self._dbc._lock:
+                state_saved = dict(self._dbc._signal_state[message_name])
         data = self._dbc.encode_with_values(message_name, send_values)
         self._send_frame(message, data)
+        if state_saved is not None:
+            with self._dbc._lock:
+                self._dbc._signal_state[message_name].update(state_saved)
 
         result: dict[str, Any] = {"sent": True, "signals": {}}
         # At most ONE invalid follow-up per transmission: encode_invalid()
@@ -322,6 +351,8 @@ class TxScheduler:
             result["signals"][signal_name] = send_type
         if values_alt:
             result["toggled"] = True
+        if random_signals:
+            result["random_values"] = {s: send_values[s] for s in random_signals}
         return result
 
     def send_signal_invalid_first(self, message_name: str, values: dict[str, Any]) -> dict:
@@ -490,6 +521,40 @@ class TxScheduler:
         with self._lock:
             self._value_generators.setdefault(message_name, {})[signal_name] = generator
 
+    def _substitute_random(
+        self, message_name: str, send_values: dict[str, Any],
+        random_signals: Optional[list[str]],
+    ) -> dict[str, Any]:
+        """Return a copy of send_values with fresh generator draws for the
+        listed signals (raw -> physical). Shared by send_signal()'s
+        random_signals param and row_periodic_start()'s immediate frame, so
+        a TxBox "랜덤" checkbox covers the very first frame too, not just
+        subsequent periodic ticks (those go through _make_send_job's own
+        regeneration). Missing generators are auto-registered full-range --
+        the checkbox state (persisted per row) is the source of truth, so
+        there is no arm-timing failure mode."""
+        if not random_signals:
+            return send_values
+        message = self._dbc.get_message(message_name)
+        draws: dict[str, int] = {}
+        with self._lock:
+            gens = self._value_generators.setdefault(message_name, {})
+            for s in random_signals:
+                if s in gens:
+                    draws[s] = gens[s]()
+        for s in random_signals:
+            if s not in draws:
+                # auto-register the full-range default outside the lock
+                # (set_value_generator locks internally)
+                self.set_value_generator(message_name, s, "random")
+                with self._lock:
+                    draws[s] = self._value_generators[message_name][s]()
+        out = dict(send_values)
+        for signal_name, raw_value in draws.items():
+            signal = next(s for s in message.signals if s.name == signal_name)
+            out[signal_name] = raw_value * float(signal.scale) + float(signal.offset)
+        return out
+
     def send_generated(self, message_name: str, signal_name: str) -> dict:
         """One-shot trigger for a registered generator -- the "Random 버튼"
         widget's click handler. Computes one fresh raw value, applies it, and
@@ -619,6 +684,23 @@ class TxScheduler:
         self._upsert_auto(message)
         return {"stopped": True, "raw_value": 0}
 
+    def random_stop(self, message_name: str, signal_name: str,
+                    values: Optional[dict[str, Any]] = None) -> dict:
+        """Disarm a TxBox "랜덤" checkbox: drop the signal from the active
+        set only (generator registration is kept, merely inactive -- like
+        stop_event_periodic). No frame is sent. Idempotent.
+
+        values (optional): configured values to re-persist -- random ticks
+        persist their draws into signal state (see encode_with_raw_values),
+        so without this the next tick would keep replaying the last random
+        value instead of the configured one. The TxBox passes its current
+        editor values on uncheck; omitted = leave state as-is."""
+        with self._lock:
+            self._random_active.discard((message_name, signal_name))
+        if values:
+            self._dbc.encode_with_values(message_name, values)
+        return {"stopped": True, "message_name": message_name, "signal_name": signal_name}
+
     def _make_event_periodic_job(self, message_name: str, signal_name: str) -> Callable[[], None]:
         def send() -> None:
             with self._lock:
@@ -675,13 +757,17 @@ class TxScheduler:
                              arbitration_id: Optional[int] = None,
                              is_extended: bool = False,
                              is_fd: bool = False,
-                             bitrate_switch: bool = False) -> dict:
+                             bitrate_switch: bool = False,
+                             random_signals: Optional[list[str]] = None) -> dict:
         """Start per-row periodic transmission (TxBox Send toggle on).
         DBC rows persist the values (toggle alternation restarts at A) and
         arm a row-keyed auto entry at the row's own period; raw rows arm the
         same with a fixed payload. One frame goes out immediately. Other
         rows and other widgets' auto entries are unaffected -- several rows
-        may even transmit the same message at different periods."""
+        may even transmit the same message at different periods.
+
+        random_signals: TxBox "랜덤" checkbox -- the immediate frame already
+        carries fresh draws (later ticks regenerate via _make_send_job)."""
         period = max(1.0, float(period_ms))
         if message_name:
             message = self._dbc.get_message(message_name)
@@ -698,6 +784,7 @@ class TxScheduler:
             # -- including its single Event invalid follow-up when applicable.
             toggled = self._take_toggle_explicit(message_name)
             send_values = {**values, **toggled}
+            send_values = self._substitute_random(message_name, send_values, random_signals)
             data = self._dbc.encode_with_values(message_name, send_values)
             self._send_frame(message, data)
             try:
@@ -721,6 +808,7 @@ class TxScheduler:
                 message_name=message.name,
                 is_fd=message.is_fd,
                 bitrate_switch=message.is_fd,
+                random_signals=list(random_signals or []),
             )
         else:
             if data_hex is None or arbitration_id is None:
@@ -758,13 +846,16 @@ class TxScheduler:
     def row_periodic_update(self, key: str, message_name: Optional[str] = None,
                              values: Optional[dict[str, Any]] = None,
                              values_alt: Optional[dict[str, Any]] = None,
-                             period_ms: Optional[float] = None) -> dict:
+                             period_ms: Optional[float] = None,
+                             random_signals: Optional[list[str]] = None) -> dict:
         """Update a transmitting row-keyed entry in place (TxBox signal /
         toggle / period edit while Send toggle is on). No immediate frame,
         tx_count and schedule are preserved. DBC rows reconcile the toggle
         store (values_alt=None clears a removed toggle, like preset_signal)
-        and restart alternation at the A set. Unknown/stopped key returns
-        found=False so the caller can ignore it."""
+        and restart alternation at the A set. random_signals (None = keep)
+        replaces the entry's TxBox-"랜덤" list so checkbox toggles apply
+        from the next tick. Unknown/stopped key returns found=False so the
+        caller can ignore it."""
         with self._lock:
             if key not in self._row_entry_keys or key not in self._auto_entries:
                 return {"updated": False, "key": key, "found": False}
@@ -798,6 +889,8 @@ class TxScheduler:
                         entry.data = None
                 if period_ms is not None:
                     entry.period_ms = max(1.0, float(period_ms))
+                if random_signals is not None:
+                    entry.random_signals = list(random_signals)
                 period = entry.period_ms
         if stale:
             # Stopped concurrently after the toggle store above -- roll it
@@ -853,6 +946,22 @@ class TxScheduler:
             for name in self._enable_msg_armed:
                 self._auto_entries.pop(name, None)
             self._enable_msg_armed.clear()
+        return self.status()
+
+    def stop_started(self, names: list[str]) -> dict:
+        """Stop exactly the named message auto entries (test-runner CANStop:
+        only what this run's CANStart armed). Like disable_all_periodic but
+        scoped to the given names -- TxBox rows, Random transmissions and a
+        manually-pressed "Enable Msg" batch for other messages are
+        untouched. Unknown/already-stopped names are ignored.
+
+        NOTE: entries are keyed by message name (see _upsert_auto), so if
+        the manual "Enable Msg" button armed the same message, that shared
+        entry stops too -- last-writer-wins on one entry per message."""
+        with self._lock:
+            for name in names:
+                self._auto_entries.pop(name, None)
+                self._enable_msg_armed.discard(name)
         return self.status()
 
     def stop_auto(self, message_name: Optional[str] = None) -> dict:
@@ -974,6 +1083,10 @@ class TxScheduler:
                 # registered sibling (e.g. an unclicked multi-Random cell or
                 # a deleted widget's leftover) keeps last-valid/initial/0x0
                 # via the resolver instead of also turning random.
+                # Plus this entry's own random list (TxBox "랜덤" checkbox,
+                # row-scoped -- works regardless of global arm timing;
+                # missing generators are auto-registered full-range).
+                row_random = list(entry.random_signals or [])
                 with self._lock:
                     generators = self._value_generators.get(entry.message_name)
                     active = set(self._random_active)
@@ -982,6 +1095,12 @@ class TxScheduler:
                          if (entry.message_name, n) in active]
                         if generators else []
                     )
+                for s in row_random:
+                    if all(n != s for n, _ in generators):
+                        self.set_value_generator(entry.message_name, s, "random")
+                        with self._lock:
+                            gen = self._value_generators[entry.message_name][s]
+                        generators.append((s, gen))
                 raw_values = {signal_name: gen() for signal_name, gen in generators}
                 # TxBox toggle: overlay the current phase set (scaled ->
                 # raw), then flip. Generator values win on conflict (a live

@@ -81,8 +81,8 @@ export const api = {
     bitrate_switch?: boolean;
     key?: string;
   }) => post('/api/tx/send_once', entry),
-  txSignal: (message_name: string, values: Record<string, number | string>, valuesAlt?: Record<string, number | string>, once = false) =>
-    post('/api/tx/signal', { message_name, values, values_alt: valuesAlt, once }),
+  txSignal: (message_name: string, values: Record<string, number | string>, valuesAlt?: Record<string, number | string>, once = false, randomSignals?: string[]) =>
+    post('/api/tx/signal', { message_name, values, values_alt: valuesAlt, once, random_signals: randomSignals }),
   txRowStart: (entry: {
     key: string;
     message_name?: string | null;
@@ -94,6 +94,7 @@ export const api = {
     is_extended?: boolean;
     is_fd?: boolean;
     bitrate_switch?: boolean;
+    random_signals?: string[];
   }) => post('/api/tx/row/start', entry),
   txRowStop: (key: string) => post('/api/tx/row/stop', { key }),
   txRowUpdate: (entry: {
@@ -102,6 +103,7 @@ export const api = {
     values?: Record<string, number | string>;
     values_alt?: Record<string, number | string> | null;
     period_ms?: number;
+    random_signals?: string[];
   }) => post('/api/tx/row/update', entry),
   txSignalInvalidFirst: (message_name: string, values: Record<string, number | string>) =>
     post('/api/tx/signal/invalid_first', { message_name, values }),
@@ -147,6 +149,10 @@ export const api = {
       '/api/tx/signal/generate/stop',
       { message_name, signal_name },
     ),
+  // TxBox per-signal "랜덤" 체크박스 arm/disarm (전송 없음 -- 이후 전송부터
+  // 백엔드 생성기 random값 적용, 해제는 추가 프레임 없이 설정값 복귀)
+  randomStop: (message_name: string, signal_name: string, values?: Record<string, number | string>) =>
+    post<{ stopped: boolean }>('/api/tx/signal/random/stop', { message_name, signal_name, values }),
 
   isotpSend: (
     tx_id: number,
@@ -176,6 +182,31 @@ export const api = {
       responses?: string[];
       response_error?: string;
     }>('/api/isotp/send', { tx_id, fc_id, data, ...opts }),
+
+  // ISO-TP 위젯 27 11 자동 ASK 인증: seed 수신 -> 키 생성(DLL/더미) ->
+  // 27 12 전송 -> 최종 응답까지. transcript 반환.
+  securityAccess: (
+    tx_id: number,
+    fc_id: number,
+    resp_id: number,
+    opts?: {
+      is_extended_id?: boolean;
+      fc_timeout_ms?: number;
+      resp_timeout_ms?: number;
+      resp_fc_block_size?: number;
+      resp_fc_stmin?: number;
+    },
+  ) =>
+    post<{
+      seed_request: string;
+      seed_responses: string[];
+      seed_hex: string;
+      key_hex: string;
+      key_source: string;
+      key_request: string;
+      key_responses: string[];
+      response_error?: string;
+    }>('/api/isotp/security-access', { tx_id, fc_id, resp_id, ...opts }),
 
   uploadReplay: (file: File) => upload('/api/replay/upload', file),
   replayStart: (mode: 'pass' | 'stop', frame_ids: number[]) =>

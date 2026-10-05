@@ -73,6 +73,14 @@ def test_full_api_flow():
         client.post("/api/disconnect")
 
 
+def test_layout_delete_nonexistent_is_idempotent():
+    """없는 이름 삭제도 200 (UI 삭제 버튼이 이미 사라진 이름을 눌러도 에러 없음)."""
+    with make_client() as client:
+        r = client.delete("/api/layouts/no_such_layout_xyz")
+        assert r.status_code == 200
+        assert r.json() == {"deleted": "no_such_layout_xyz"}
+
+
 def test_global_run_gate():
     with make_client() as client:
         client.post("/api/connect", json={"interface": "virtual", "channel": "t_run"})
@@ -395,6 +403,118 @@ def test_isotp_send_single_response_yields_single_element_responses():
             client.post("/api/disconnect")
 
 
+def test_isotp_send_nrc78_resets_deadline():
+    """NRC78 수신마다 deadline이 연장되어, 원래 타임아웃(150ms)을 넘겨
+    도착한 최종 응답(~215ms)까지 수집된다. 리셋 없으면 78b까지만 받고
+    최종을 놓친다."""
+    with make_client() as client:
+        client.post("/api/connect", json={"interface": "virtual", "channel": "t_api_isotp_resp6"})
+        client.post("/api/run/start")
+        peer = can.Bus(interface="virtual", channel="t_api_isotp_resp6")
+        try:
+            def responder():
+                m = peer.recv(timeout=1.0)
+                assert m is not None
+                for _ in range(2):
+                    peer.send(
+                        can.Message(
+                            arbitration_id=0x78B,
+                            data=bytes([0x03, 0x7F, 0x22, 0x78, 0, 0, 0, 0]),
+                            is_extended_id=False,
+                        )
+                    )
+                    time.sleep(0.1)
+                peer.send(
+                    can.Message(
+                        arbitration_id=0x78B,
+                        data=bytes([0x03, 0x62, 0xF1, 0xC1, 0, 0, 0, 0]),
+                        is_extended_id=False,
+                    )
+                )
+
+            t = threading.Thread(target=responder, daemon=True)
+            t.start()
+            r = client.post(
+                "/api/isotp/send",
+                json={
+                    "tx_id": 0x783,
+                    "fc_id": 0x78B,
+                    "data": "22 F1 C1",
+                    "resp_id": 0x78B,
+                    "resp_timeout_ms": 150,
+                },
+            )
+            t.join(timeout=3)
+            assert r.status_code == 200
+            body = r.json()
+            assert body["responses"] == ["7F 22 78", "7F 22 78", "62 F1 C1"]
+            assert "response_error" not in body
+        finally:
+            peer.shutdown()
+            client.post("/api/disconnect")
+
+
+def test_isotp_security_access_dummy_key_flow():
+    """27 11 자동 ASK: seed 수신 -> dummy 키 생성 -> 27 12 전송 -> 최종 응답."""
+    with make_client() as client:
+        client.post("/api/connect", json={"interface": "virtual", "channel": "t_api_isotp_sec"})
+        client.post("/api/run/start")
+        peer = can.Bus(interface="virtual", channel="t_api_isotp_sec")
+        try:
+            def responder():
+                m = peer.recv(timeout=1.0)
+                assert m is not None and bytes(m.data[:2]) == bytes([0x02, 0x27])
+                peer.send(
+                    can.Message(
+                        arbitration_id=0x78B,
+                        data=bytes([0x04, 0x67, 0x11, 0xAA, 0xBB, 0, 0, 0]),
+                        is_extended_id=False,
+                    )
+                )
+                # 27 12 + 8B key = 10B -> FF + CFs: FC로 받아낸 뒤 최종 응답
+                ff = peer.recv(timeout=1.0)
+                assert ff is not None and (ff.data[0] & 0xF0) == 0x10
+                # 송신측 isotp_service.send()는 fc_id(0x78B)로 FC를 기다린다
+                peer.send(
+                    can.Message(
+                        arbitration_id=0x78B,
+                        data=bytes([0x30, 0x00, 0x00, 0, 0, 0, 0, 0]),
+                        is_extended_id=False,
+                    )
+                )
+                got = bytearray(ff.data[2:8])
+                while len(got) < 8:
+                    cf = peer.recv(timeout=1.0)
+                    assert cf is not None and (cf.data[0] & 0xF0) == 0x20
+                    got.extend(cf.data[1:8])
+                assert bytes(got[:2]) == bytes([0x27, 0x12])
+                peer.send(
+                    can.Message(
+                        arbitration_id=0x78B,
+                        data=bytes([0x02, 0x67, 0x12, 0, 0, 0, 0, 0]),
+                        is_extended_id=False,
+                    )
+                )
+
+            t = threading.Thread(target=responder, daemon=True)
+            t.start()
+            r = client.post(
+                "/api/isotp/security-access",
+                json={"tx_id": 0x783, "fc_id": 0x78B, "resp_id": 0x78B, "resp_timeout_ms": 1000},
+            )
+            t.join(timeout=3)
+            assert r.status_code == 200
+            body = r.json()
+            assert body["seed_request"] == "27 11"
+            assert body["seed_hex"] == "AA BB"
+            assert "dummy" in body["key_source"]
+            assert body["key_request"].startswith("27 12 00")
+            assert body["key_responses"] == ["67 12"]
+        finally:
+            peer.shutdown()
+            client.post("/api/disconnect")
+
+
 def test_isotp_send_response_wait_timeout_reports_response_error():
     with make_client() as client:
         client.post("/api/connect", json={"interface": "virtual", "channel": "t_api_isotp_resp3"})
@@ -447,6 +567,59 @@ def test_isotp_send_blocked_when_globally_stopped():
         )
         assert r.status_code == 400
         client.post("/api/disconnect")
+
+
+def test_tx_row_random_signals_end_to_end():
+    """TxBox 랜덤 체크박스 HTTP 흐름: 행 시작(random 포함) -> tick 재생성 ->
+    update로 목록 제거+복원 -> 설정값 복귀. 라우트 배선 검증용."""
+    with make_client() as client:
+        client.post("/api/connect", json={"interface": "virtual", "channel": "t_api_row_rnd"})
+        client.post("/api/run/start")  # earlier tests may have left the global run gate stopped
+        client.post(
+            "/api/dbc/upload",
+            files={"file": ("sample.dbc", (SAMPLES_DIR / "sample.dbc").read_bytes())},
+        )
+        try:
+            r = client.post(
+                "/api/tx/row/start",
+                json={
+                    "key": "r1",
+                    "message_name": "EngineData",
+                    "values": {"EngineSpeed": 1000},
+                    "period_ms": 1000,
+                    "random_signals": ["EngineSpeed"],
+                },
+            )
+            assert r.status_code == 200, r.text
+            # 해제: 목록 제거 + 상태 복원 (값 없이 생략해도 200)
+            r = client.post("/api/tx/row/update", json={"key": "r1", "random_signals": []})
+            assert r.status_code == 200
+            assert r.json()["updated"] is True
+            r = client.post(
+                "/api/tx/signal/random/stop",
+                json={
+                    "message_name": "EngineData",
+                    "signal_name": "EngineSpeed",
+                    "values": {"EngineSpeed": 1000},
+                },
+            )
+            assert r.status_code == 200
+            assert r.json()["stopped"] is True
+            # 단발 random (미등록 생성기는 자동 등록)
+            r = client.post(
+                "/api/tx/signal",
+                json={
+                    "message_name": "EngineData",
+                    "values": {"EngineSpeed": 1000},
+                    "once": True,
+                    "random_signals": ["EngineSpeed"],
+                },
+            )
+            assert r.status_code == 200
+            assert "random_values" in r.json()
+            client.post("/api/tx/row/stop", json={"key": "r1"})
+        finally:
+            client.post("/api/disconnect")
 
 
 def test_testrunner_upload_and_run():

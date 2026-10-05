@@ -106,6 +106,18 @@ export function CanLogAnalysisWidget({ config }: { config: WidgetConfig }) {
   const [search, setSearch] = useState('');
   const viewMode = (config.options.viewMode as 'byMessage' | 'bySignal' | undefined) ?? 'byMessage';
   const setViewMode = (m: 'byMessage' | 'bySignal') => updateWidget({ ...config, options: { ...config.options, viewMode: m } });
+  // 전체 그래프 값 표시 형식 (DEC/HEX/설명) -- 레이아웃에 저장되어 불러와도
+  // 유지된다. 상단 버튼이 바꾸면 토큰 증가로 각 차트의 개별 override를
+  // 해제해 전체가 동기화된다.
+  type ValueMode = 'dec' | 'hex' | 'desc';
+  const valueMode = (config.options.valueMode as ValueMode | undefined) ?? 'dec';
+  const [valueModeToken, setValueModeToken] = useState(0);
+  const cycleValueMode = () => {
+    const next = valueMode === 'dec' ? 'hex' : valueMode === 'hex' ? 'desc' : 'dec';
+    updateWidget({ ...config, options: { ...config.options, valueMode: next } });
+    setValueModeToken((n) => n + 1);
+  };
+  const valueModeLabel = valueMode === 'dec' ? 'DEC' : valueMode === 'hex' ? 'HEX' : 'DESC';
   // Message table under the graphs: follows the visible X view (debounced).
   const showFrames = (config.options.showFrames as boolean | undefined) ?? true;
   const setShowFrames = (v: boolean) => updateWidget({ ...config, options: { ...config.options, showFrames: v } });
@@ -308,6 +320,7 @@ export function CanLogAnalysisWidget({ config }: { config: WidgetConfig }) {
         <span className="spacer" />
         <button className="icon-btn" title="X축 확대" onClick={() => zoomSharedX(1 / BUTTON_ZOOM_FACTOR)}>X+</button>
         <button className="icon-btn" title="X축 축소" onClick={() => zoomSharedX(BUTTON_ZOOM_FACTOR)}>X−</button>
+        <button className="icon-btn" title="전체 그래프 값 표시 형식 전환 (DEC/HEX/설명)" onClick={cycleValueMode}>{valueModeLabel}</button>
         <button className="icon-btn" title="모든 그래프 X/Y 리셋" onClick={resetEverything}>⟲</button>
         <button className={`small-btn ${cursorMode ? 'primary' : ''}`} onClick={toggleCursorMode}>커서 {cursorMode ? 'ON' : 'OFF'}</button>
         {cursorMode && cursorDeltaMs !== null && <span className="graph-xwindow mono">Δ {fmtTimeMs(cursorDeltaMs)}</span>}
@@ -366,7 +379,7 @@ export function CanLogAnalysisWidget({ config }: { config: WidgetConfig }) {
                             setSelectedKeys(selectedKeys.filter((k) => !set.has(k)));
                           }
                         }} />
-                      <span>{m.message} (0x{m.frame_id.toString(16).toUpperCase()})</span>
+                      <span className="syslog-id-group-name">{m.message} (0x{m.frame_id.toString(16).toUpperCase()})</span>
                     </label>
                     <span className="spacer" /><span className="hint">{m.count} pts</span></div>
                   {m.signals.map((s) => (
@@ -402,6 +415,7 @@ export function CanLogAnalysisWidget({ config }: { config: WidgetConfig }) {
                   xViewRef={sharedXRef} xVersion={sharedVersion} notifyChange={notifyChange}
                   defaultXMin={plotXMin} defaultXMax={plotXMax}
                   showXAxis={i === selectedKeys.length - 1} resetToken={resetToken}
+                  valueMode={valueMode} valueModeToken={valueModeToken}
                   cursor={cursor} hoverXRef={hoverXRef} setHoverX={setHoverX}
                   graphIndex={i} hoveredGraphIdxRef={hoveredGraphIdxRef}
                   onRemove={() => toggleKey(key)} isDragOver={dragOverId===key}
@@ -490,12 +504,17 @@ function VerticalScrollbar({ targetRef }: { targetRef: MutableRefObject<HTMLDivE
   return (<div className="syslog-scrollbar-track" ref={trackRef} onPointerDown={onTrackDown}>{canScroll && <div className="syslog-scrollbar-thumb" style={{top:thumbTop,height:thumbH}} onPointerDown={onThumbDown} onPointerMove={onThumbMove} onPointerUp={onThumbUp} onPointerLeave={onThumbUp} />}</div>);
 }
 
-function CanLogChart({ series, color, xViewRef, xVersion, notifyChange, defaultXMin, defaultXMax, showXAxis, resetToken, cursor, hoverXRef, setHoverX, graphIndex, hoveredGraphIdxRef, onRemove, isDragOver, onDragStart, onDragOver, onDrop, onDragEnd }: {
-  series: CanLogSeries; color: string; xViewRef: MutableRefObject<SharedXView>; xVersion: number; notifyChange: ()=>void; defaultXMin:number; defaultXMax:number; showXAxis:boolean; resetToken:number; cursor: DiffCursorState; hoverXRef: MutableRefObject<number|null>; setHoverX:(x:number|null)=>void; graphIndex:number; hoveredGraphIdxRef: MutableRefObject<number|null>; onRemove:()=>void; isDragOver:boolean; onDragStart:(e:React.DragEvent)=>void; onDragOver:(e:React.DragEvent)=>void; onDrop:(e:React.DragEvent)=>void; onDragEnd:()=>void;
+function CanLogChart({ series, color, xViewRef, xVersion, notifyChange, defaultXMin, defaultXMax, showXAxis, resetToken, valueMode, valueModeToken, cursor, hoverXRef, setHoverX, graphIndex, hoveredGraphIdxRef, onRemove, isDragOver, onDragStart, onDragOver, onDrop, onDragEnd }: {
+  series: CanLogSeries; color: string; xViewRef: MutableRefObject<SharedXView>; xVersion: number; notifyChange: ()=>void; defaultXMin:number; defaultXMax:number; showXAxis:boolean; resetToken:number; valueMode:'dec'|'hex'|'desc'; valueModeToken:number; cursor: DiffCursorState; hoverXRef: MutableRefObject<number|null>; setHoverX:(x:number|null)=>void; graphIndex:number; hoveredGraphIdxRef: MutableRefObject<number|null>; onRemove:()=>void; isDragOver:boolean; onDragStart:(e:React.DragEvent)=>void; onDragOver:(e:React.DragEvent)=>void; onDrop:(e:React.DragEvent)=>void; onDragEnd:()=>void;
 }) {
   const canvasRef=useRef<HTMLCanvasElement>(null); const wrapRef=useRef<HTMLDivElement>(null);
   const yViewRef=useRef<YView>({yMin:null,yMax:null}); const dragRef=useRef<{x:number;y:number;xView:SharedXView;yView:YView}|null>(null); const cursorDragRef=useRef<'a'|'b'|null>(null);
-  const [valueMode, setValueMode]=useState<'dec'|'hex'|'desc'>('dec');
+  // 그래프별 개별 override (null = 전역값 따름). 상단 전역 버튼은 토큰을
+  // 올려 모든 override를 해제하고 전체를 동기화한다.
+  const [localValueMode,setLocalValueMode]=useState<'dec'|'hex'|'desc'|null>(null);
+  const effValueMode=localValueMode ?? valueMode;
+  useEffect(()=>{ setLocalValueMode(null); },[valueModeToken]);
+  const cycleLocalValueMode=()=>setLocalValueMode((m)=>{ const cur=m ?? valueMode; return cur==='dec'?'hex':cur==='hex'?'desc':'dec'; });
   const lastGeomRef=useRef<Geom>({xMin:0,xMax:1,yMin:0,yMax:1,plotLeft:MARGIN.left,plotTop:MARGIN.top,plotW:1,plotH:1});
   const [size,setSize]=useState({w:260,h:200}); const [localTick,bump]=useState(0); const redraw=()=>bump(n=>n+1);
   useEffect(()=>{ const el=wrapRef.current; if(!el) return; const m=()=>setSize({w:el.clientWidth,h:el.clientHeight}); m(); const ro=new ResizeObserver(m); ro.observe(el); return()=>ro.disconnect(); },[]);
@@ -521,7 +540,7 @@ function CanLogChart({ series, color, xViewRef, xVersion, notifyChange, defaultX
     ctx.strokeStyle='#363b47'; ctx.fillStyle='#8b909c'; ctx.font='9px monospace'; ctx.lineWidth=1;
     const xTicks=niceTicks(xMin,xMax,10);
     xTicks.forEach((t,i)=>{ const px=xToPx(t); ctx.beginPath(); ctx.moveTo(px,plotTop); ctx.lineTo(px,plotTop+plotH); ctx.stroke(); if(!showXAxis) return; const label=fmtTimeMs(t); const tw=ctx.measureText(label).width; let lx=px-tw/2; if(i===0) lx=Math.max(plotLeft,lx); if(i===xTicks.length-1) lx=Math.min(plotLeft+plotW-tw,lx); ctx.fillText(label,lx,h-6); });
-    for(const t of yTickValues){ const py=yToPx(t); if(py<plotTop-0.5||py>plotTop+plotH+0.5) continue; ctx.beginPath(); ctx.moveTo(plotLeft,py); ctx.lineTo(plotLeft+plotW,py); ctx.stroke(); ctx.fillText(fmtValueRaw(t,valueMode,series.choices),2,py+3); }
+    for(const t of yTickValues){ const py=yToPx(t); if(py<plotTop-0.5||py>plotTop+plotH+0.5) continue; ctx.beginPath(); ctx.moveTo(plotLeft,py); ctx.lineTo(plotLeft+plotW,py); ctx.stroke(); ctx.fillText(fmtValueRaw(t,effValueMode,series.choices),2,py+3); }
     ctx.strokeStyle='#4b5160'; ctx.strokeRect(plotLeft,plotTop,plotW,plotH);
     let start=points.findIndex(p=>p.x_ms>=xMin!); let drawPoints:CanLogPoint[]=[]; if(start!==-1){ if(start>0) start-=1; let end=points.length-1; while(end>=0 && points[end].x_ms>xMax!) end-=1; if(end<points.length-1) end+=1; if(start<=end) drawPoints=points.slice(start,end+1); }
     if (drawPoints.length > plotW * 2) { const step=Math.ceil(drawPoints.length/(plotW*2)); drawPoints=drawPoints.filter((_,i)=>i%step===0); }
@@ -537,12 +556,12 @@ function CanLogChart({ series, color, xViewRef, xVersion, notifyChange, defaultX
     if(hoverPlotX!==null){ const px=xToPx(hoverPlotX); ctx.save(); ctx.strokeStyle='#ffffff88'; ctx.setLineDash([2,2]); ctx.lineWidth=1; ctx.beginPath(); ctx.moveTo(px,plotTop); ctx.lineTo(px,plotTop+plotH); ctx.stroke(); ctx.restore(); }
     if(hoverPlotX!==null && hoveredGraphIdxRef.current===graphIndex){
       const px=xToPx(hoverPlotX); const held=findHeldPoint(points,hoverPlotX);
-      const tooltipText=`${fmtTimeMs(hoverPlotX)}  ${held? fmtValueRaw(held.value,valueMode,series.choices):'-'}`;
+      const tooltipText=`${fmtTimeMs(hoverPlotX)}  ${held? fmtValueRaw(held.value,effValueMode,series.choices):'-'}`;
       ctx.font='10px monospace'; const tw=ctx.measureText(tooltipText).width; let tx=px+6; if(tx+tw+6>w) tx=px-tw-6; const ty=plotTop+12; ctx.fillStyle='rgba(0,0,0,0.8)'; ctx.fillRect(tx-3,ty-10,tw+6,14); ctx.fillStyle='#ffffff'; ctx.fillText(tooltipText,tx,ty);
     }
     lastGeomRef.current={xMin,xMax,yMin,yMax,plotLeft,plotTop,plotW,plotH};
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  },[size,xVersion,localTick,series,showXAxis,valueMode]);
+  },[size,xVersion,localTick,series,showXAxis,effValueMode]);
 
   const onWheel=(e:React.WheelEvent<HTMLCanvasElement>)=>{
     if(!e.ctrlKey) return; const rect=canvasRef.current!.getBoundingClientRect(); const px=e.clientX-rect.left, py=e.clientY-rect.top; const g=lastGeomRef.current; const factor=e.deltaY>0?WHEEL_ZOOM_STEP:1/WHEEL_ZOOM_STEP;
@@ -573,7 +592,7 @@ function CanLogChart({ series, color, xViewRef, xVersion, notifyChange, defaultX
         <span className="graph-swatch" style={{background:color}} />
         <span className="graph-chart-title" title={series.key}>{series.key}</span>
         <span className="spacer" />
-        <button className="icon-btn" title="값 표시 형식 전환 (DEC/HEX/설명)" onClick={()=>setValueMode(m=> m==='dec'? 'hex' : m==='hex' ? 'desc' : 'dec')}>{valueMode==='dec'?'DEC':valueMode==='hex'?'HEX':'DESC'}</button>
+        <button className="icon-btn" title="값 표시 형식 전환 (이 그래프만)" onClick={cycleLocalValueMode}>{effValueMode==='dec'?'DEC':effValueMode==='hex'?'HEX':'DESC'}</button>
         <button className="icon-btn" title="Y축 확대" onClick={()=>zoomY(1/BUTTON_ZOOM_FACTOR)}>Y+</button>
         <button className="icon-btn" title="Y축 축소" onClick={()=>zoomY(BUTTON_ZOOM_FACTOR)}>Y−</button>
         <button className="icon-btn" title="Y축 리셋" onClick={resetYOnly}>⟲</button>

@@ -14,6 +14,7 @@ Column layout of the "Script" sheet, one physical row per step, data rows
 start right after the row whose column B literally reads "Step 종류 선택":
     A: always "type" (fixed label, unused)
     B: step type -- ID / Power / delay / CANReq / CANEv / CANResp / Audio / loop / "]"
+       / CANStart / CANStop
     C: a label word for most types (num/command/ms/cycle) -- but for
        CANReq/CANEv/CANResp it instead holds a *duplicate* CAN signal name,
        an artifact of the sheet's own live search box. It is never a JSON
@@ -71,7 +72,7 @@ from typing import Optional
 import openpyxl
 
 HEADER_MARKER = "Step 종류 선택"  # column B of the header row in the Script sheet
-STEP_TYPES = {"ID", "Power", "delay", "CANReq", "CANEv", "CANResp", "Audio", "loop"}
+STEP_TYPES = {"ID", "Power", "delay", "CANReq", "CANEv", "CANResp", "Audio", "loop", "CANStart", "CANStop"}
 CAN_TYPES = {"CANReq", "CANEv", "CANResp"}
 GROUPABLE_CAN_TYPES = {"CANReq", "CANEv"}  # CANResp has no "Signals" equivalent
 LOOP_END = "]"
@@ -107,6 +108,13 @@ def _build_step(row: int, b: str, d, f, h) -> dict:
     if b == "delay":
         ms = _require(d, row, "D열(ms)")
         return {"type": "delay", "ms": int(ms)}
+    if b == "CANStart":
+        # D열 비어있으면 전체 arm, 값 있으면 해당 RxNode 제외
+        if d is None or (isinstance(d, str) and d.strip() == ""):
+            return {"type": "CANStart"}
+        return {"type": "CANStart", "RxNode": str(d).strip()}
+    if b == "CANStop":
+        return {"type": "CANStop"}
     if b in CAN_TYPES:
         message = _require(d, row, "D열(Message)")
         signal = _require(f, row, "F열(Signal)")

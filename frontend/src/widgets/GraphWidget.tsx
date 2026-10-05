@@ -126,8 +126,8 @@ export function GraphWidget({ config }: { config: WidgetConfig }) {
   const [xWindowMs, setXWindowMs] = useState(DEFAULT_X_WINDOW_MS);
   const [search, setSearch] = useState('');
   const [msgFilter, setMsgFilter] = useState<MessageFilterMode>('all');
-  const viewMode = (config.options.viewMode as 'byMessage' | 'bySignal' | undefined) ?? 'byMessage';
-  const setViewMode = (m: 'byMessage' | 'bySignal') =>
+  const viewMode = (config.options.viewMode as 'byMessage' | 'bySignal' | 'byMessageOnly' | undefined) ?? 'byMessage';
+  const setViewMode = (m: 'byMessage' | 'bySignal' | 'byMessageOnly') =>
     updateWidget({ ...config, options: { ...config.options, viewMode: m } });
 
   const existingKeys = new Set(series.map(seriesKey));
@@ -377,39 +377,61 @@ export function GraphWidget({ config }: { config: WidgetConfig }) {
             <label style={{ marginLeft: 8 }}>
               <input type="radio" checked={viewMode === 'bySignal'} onChange={() => setViewMode('bySignal')} /> Signal별
             </label>
+            <label style={{ marginLeft: 8 }}>
+              <input type="radio" checked={viewMode === 'byMessageOnly'} onChange={() => setViewMode('byMessageOnly')} /> 메시지 Only
+            </label>
           </div>
           <div className="syslog-id-list">
             {!dbc.loaded ? (
               <div className="hint">DBC를 업로드하세요.</div>
-            ) : viewMode === 'byMessage' ? (
-              filteredMessages.length === 0 ? (
-                <div className="hint">일치하는 신호 없음</div>
+            ) : viewMode === 'bySignal' ? (
+              filteredSignals.length === 0 ? (
+                <div className="hint">신호 없음</div>
               ) : (
-                filteredMessages.map((m) => {
-                  const selectableKeys = m.signals.map((s) => `${m.name}.${s.name}`);
-                  const allChecked = selectableKeys.length > 0 && selectableKeys.every((k) => existingKeys.has(k));
-                  const someChecked = selectableKeys.some((k) => existingKeys.has(k)) && !allChecked;
-                  const countHint = `${m.signals.length} signals`;
+                filteredSignals.map((s) => {
+                  const checked = existingKeys.has(s.key);
                   return (
-                    <div key={m.name} className="syslog-id-group">
-                      <div className="syslog-id-group-header">
-                        <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
-                          <input
-                            type="checkbox"
-                            checked={allChecked}
-                            ref={(el) => {
-                              if (el) el.indeterminate = someChecked;
-                            }}
-                            onChange={(e) => toggleMessage(m as unknown as { name: string; signals: { name: string }[] }, e.target.checked)}
-                          />
-                          <span>
-                            {m.name} (0x{m.frame_id.toString(16).toUpperCase()})
-                          </span>
-                        </label>
-                        <span className="spacer" />
-                        <span className="hint">{countHint}</span>
-                      </div>
-                      {m.signals.map((s) => {
+                    <label key={s.key} className="syslog-id-row">
+                      <input type="checkbox" checked={checked} onChange={() => toggleKey(s.key)} />
+                      <span className="syslog-id-name" title={s.key}>
+                        {s.signal}
+                      </span>
+                      <span className="hint" style={{ fontSize: 10 }}>
+                        {s.message} · {s.length}bit {s.send_type}
+                      </span>
+                    </label>
+                  );
+                })
+              )
+            ) : filteredMessages.length === 0 ? (
+              <div className="hint">일치하는 신호 없음</div>
+            ) : (
+              filteredMessages.map((m) => {
+                const selectableKeys = m.signals.map((s) => `${m.name}.${s.name}`);
+                const allChecked = selectableKeys.length > 0 && selectableKeys.every((k) => existingKeys.has(k));
+                const someChecked = selectableKeys.some((k) => existingKeys.has(k)) && !allChecked;
+                const countHint = `${m.signals.length} signals`;
+                return (
+                  <div key={m.name} className="syslog-id-group">
+                    <div className="syslog-id-group-header">
+                      <label style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
+                        <input
+                          type="checkbox"
+                          checked={allChecked}
+                          ref={(el) => {
+                            if (el) el.indeterminate = someChecked;
+                          }}
+                          onChange={(e) => toggleMessage(m as unknown as { name: string; signals: { name: string }[] }, e.target.checked)}
+                        />
+                        <span className="syslog-id-group-name">
+                          {m.name} (0x{m.frame_id.toString(16).toUpperCase()})
+                        </span>
+                      </label>
+                      <span className="spacer" />
+                      <span className="hint">{countHint}</span>
+                    </div>
+                    {viewMode === 'byMessage' &&
+                      m.signals.map((s) => {
                         const key = `${m.name}.${s.name}`;
                         const checked = existingKeys.has(key);
                         return (
@@ -424,25 +446,7 @@ export function GraphWidget({ config }: { config: WidgetConfig }) {
                           </label>
                         );
                       })}
-                    </div>
-                  );
-                })
-              )
-            ) : filteredSignals.length === 0 ? (
-              <div className="hint">신호 없음</div>
-            ) : (
-              filteredSignals.map((s) => {
-                const checked = existingKeys.has(s.key);
-                return (
-                  <label key={s.key} className="syslog-id-row">
-                    <input type="checkbox" checked={checked} onChange={() => toggleKey(s.key)} />
-                    <span className="syslog-id-name" title={s.key}>
-                      {s.signal}
-                    </span>
-                    <span className="hint" style={{ fontSize: 10 }}>
-                      {s.message} · {s.length}bit {s.send_type}
-                    </span>
-                  </label>
+                  </div>
                 );
               })
             )}
@@ -650,6 +654,21 @@ function SignalChart({
     const sig = msg?.signals.find((s) => s.name === series.signal);
     return sig?.choices ?? null;
   })();
+  // Y축 디폴트 범위: DBC minimum/maximum 우선, 없으면 bit폭 물리범위.
+  // 데이터 수신 전·빈 구간에만 적용되며, 사용자 줌·드래그·리셋 후에는 유지된다.
+  const yRange = (() => {
+    const msg = dbc.messages?.find((m) => m.name === series.message);
+    const sig = msg?.signals.find((s) => s.name === series.signal);
+    if (!sig) return null;
+    if (sig.minimum != null && sig.maximum != null && sig.maximum > sig.minimum) {
+      return { min: sig.minimum, max: sig.maximum };
+    }
+    const rawMin = sig.is_signed ? -(2 ** (sig.length - 1)) : 0;
+    const rawMax = sig.is_signed ? 2 ** (sig.length - 1) - 1 : 2 ** sig.length - 1;
+    const lo = rawMin * sig.scale + sig.offset;
+    const hi = rawMax * sig.scale + sig.offset;
+    return { min: Math.min(lo, hi), max: Math.max(lo, hi) };
+  })();
 
   useEffect(() => {
     canStore.watchSignal(key);
@@ -737,7 +756,14 @@ function SignalChart({
     let yMin = yViewRef.current.yMin;
     let yMax = yViewRef.current.yMax;
     if (yMin === null || yMax === null) {
-      if (visible.length > 0) {
+      if (yRange) {
+        yMin = yRange.min;
+        yMax = yRange.max;
+        if (yMin === yMax) {
+          yMin -= 1;
+          yMax += 1;
+        }
+      } else if (visible.length > 0) {
         const ys = visible.map((p) => p.value);
         const lo = Math.min(...ys);
         const hi = Math.max(...ys);
@@ -852,7 +878,7 @@ function SignalChart({
 
     lastGeomRef.current = { xMin, xMax, yMin, yMax, plotLeft, plotTop, plotW, plotH };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [size, xWindowMs, xVersion, paused, frozenXMax, series, showXAxis, valueMode, resetToken, version]);
+  }, [size, xWindowMs, xVersion, paused, frozenXMax, series, showXAxis, valueMode, resetToken, version, yRange]);
 
   const onWheel = (e: React.WheelEvent<HTMLCanvasElement>) => {
     if (!e.ctrlKey) return;
@@ -977,7 +1003,7 @@ function SignalChart({
       <div className="graph-chart-header syslog-chart-header-draggable" draggable onDragStart={onDragStart} onDragEnd={onDragEnd} title="드래그해서 그래프 순서 바꾸기">
         <span className="graph-swatch" style={{ background: series.color }} />
         <span className="graph-chart-title" title={`${series.message}.${series.signal}`}>
-          {series.signal}
+          {series.message}.{series.signal}
         </span>
         <span className="spacer" />
         <button className="icon-btn" title="이 그래프만 값 표시 형식 전환 (로컬, DEC/HEX/DESC)" onClick={cycleLocalValueMode}>

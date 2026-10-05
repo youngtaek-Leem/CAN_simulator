@@ -554,6 +554,13 @@ Event 규칙과 동일), `CANResp`(timeout 내 기대값 수신 대기/판정), 
 6. **결과 리포트**: 로컬 JSON 파일 저장은 유지하되, 브라우저에서 케이스별 pass/fail과
    스텝별 로그를 실시간으로 바로 확인할 수 있게 했다(Phase 2에서 오디오 파형 비교
    그래프까지 확장 검토).
+7. **CANStart/CANStop 스텝 (2026-10-05 추가)**: `{"type": "CANStart"}`는 "Enable Msg"
+   버튼과 동일한 `enable_all_periodic()` 호출(선택 `"RxNode"`로 해당 노드 제외),
+   `{"type": "CANStop"}`은 이번 실행의 CANStart가 arm한 메시지만 정지한다(TxBox 행·
+   Random 전송·수동 Enable Msg분은 유지 — `tx_scheduler.stop_started()`).
+   arm 실패분은 로그에 남기고 1건도 성공 없으면 Fail. Excel(`xlsx_to_script.py`,
+   `STEP_TYPES`)에서는 B열 `CANStart`(D열 비우면 전체, 노드명 입력 시 제외)/
+   `CANStop`(입력 불필요)으로 입력한다.
 
 ### Phase 2 모듈 분해 — 개발 완료 (2026-07-11, 검증 통과)
 

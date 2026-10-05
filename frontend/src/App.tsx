@@ -510,6 +510,28 @@ export default function App() {
     }
   };
 
+  const deleteLayout = async () => {
+    const name = layoutName.trim();
+    if (!name) {
+      notify('삭제할 설정 이름을 입력하세요');
+      return;
+    }
+    if (!layoutList.includes(name)) {
+      notify(`저장된 설정이 없습니다: "${name}"`);
+      return;
+    }
+    if (!window.confirm(`"${name}" 설정을 삭제할까요? (현재 편집 화면은 유지됩니다)`)) return;
+    try {
+      await api.deleteLayout(name);
+      const r = await api.listLayouts();
+      setLayoutList(r.layouts);
+      if (layoutName === name) setLayoutName('');
+      notify(`레이아웃 "${name}" 삭제됨`);
+    } catch (e) {
+      notify(`삭제 실패: ${(e as Error).message}`);
+    }
+  };
+
   const loadLayout = async (name: string) => {
     try {
       const saved = (await api.getLayout(name)) as Partial<SavedLayout> & Partial<LegacySavedLayout>;
@@ -734,6 +756,7 @@ export default function App() {
           layoutList={layoutList}
           newFile={newFile}
           saveLayout={saveLayout}
+          deleteLayout={deleteLayout}
           loadLayout={loadLayout}
           openSettings={() => setShowSettings(true)}
           notify={notify}
@@ -943,6 +966,7 @@ interface TopBarProps {
   layoutList: string[];
   newFile: () => void;
   saveLayout: () => void;
+  deleteLayout: () => void;
   loadLayout: (name: string) => void;
   openSettings: () => void;
   notify: (text: string) => void;
@@ -1097,7 +1121,7 @@ function TopBar(props: TopBarProps) {
         title="DBC의 Periodic Tx 메시지 전체를 각자의 cycle time으로 주기 송신 시작/중지 (기본값으로 시작, 이후 위젯에서 보낸 값으로 계속 전송)"
         onClick={toggleEnableMsg}
       >
-        {periodicOn ? '■ Enable Msg' : '▶ Enable Msg'}
+        {periodicOn ? '■ Enable All Msg' : '▶ Enable All Msg'}
       </button>
       <button
         className={`small-btn ${recording ? 'danger' : 'primary'}`}
@@ -1322,7 +1346,16 @@ function TopBar(props: TopBarProps) {
                 <button className="small-btn" onClick={props.saveLayout}>
                   저장
                 </button>
+                <button
+                  className="small-btn danger"
+                  onClick={props.deleteLayout}
+                  title="입력칸 이름과 일치하는 저장 설정을 삭제 (확인 후 삭제, 현재 편집 화면은 유지)"
+                >
+                  삭제
+                </button>
                 <select
+                  className="layout-input"
+                  title="저장된 설정 불러오기"
                   value=""
                   onChange={(e) => {
                     const v = e.target.value;

@@ -56,6 +56,7 @@ from syslog_service import SysLogService
 from can_log_service import CanLogService
 from test_runner_service import TestRunnerService
 from tx_scheduler import TxScheduler
+from uds_core import generate_key as _dummy_generate_key
 from uds_download_manager import MultiUdsDownloadManager
 from ota_tester_download_manager import OtaTesterDownloadManager
 
@@ -652,6 +653,9 @@ class SignalSendRequest(BaseModel):
     # True: exactly one frame (Event 30ms-invalid follow-up kept), never
     # arm a periodic auto-entry -- TxBox Send button.
     once: bool = False
+    # TxBox per-signal "랜덤" checkbox: these signals send one fresh
+    # generator draw instead of their configured value, for this send only.
+    random_signals: Optional[list[str]] = None
 
 
 @app.post("/api/tx/signal")
@@ -662,7 +666,7 @@ def tx_signal(req: SignalSendRequest):
     if not dbc_service.loaded:
         raise HTTPException(status_code=400, detail="no DBC loaded")
     try:
-        return tx_scheduler.send_signal(req.message_name, req.values, req.values_alt, req.once)
+        return tx_scheduler.send_signal(req.message_name, req.values, req.values_alt, req.once, req.random_signals)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
@@ -679,6 +683,9 @@ class TxRowPeriodicRequest(BaseModel):
     is_extended: bool = False
     is_fd: bool = False
     bitrate_switch: bool = False
+    # TxBox per-signal "랜덤": 첫 프레임부터 fresh random (이후 tick은
+    # _make_send_job 재생성). raw 행은 해당 없음.
+    random_signals: Optional[list[str]] = None
 
 
 @app.post("/api/tx/row/start")
@@ -695,7 +702,7 @@ def tx_row_start(req: TxRowPeriodicRequest):
         return tx_scheduler.row_periodic_start(
             req.key, req.message_name, req.values, req.values_alt, req.period_ms,
             req.data_hex, req.arbitration_id, req.is_extended, req.is_fd,
-            req.bitrate_switch,
+            req.bitrate_switch, req.random_signals,
         )
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))
@@ -721,6 +728,8 @@ class TxRowUpdateRequest(BaseModel):
     values: Optional[dict[str, float | int | str]] = None
     values_alt: Optional[dict[str, float | int | str]] = None
     period_ms: Optional[float] = None
+    # TxBox "랜덤" 목록 교체 (None = 유지). 다음 tick부터 적용.
+    random_signals: Optional[list[str]] = None
 
 
 @app.post("/api/tx/row/update")
@@ -732,6 +741,7 @@ def tx_row_update(req: TxRowUpdateRequest):
     try:
         return tx_scheduler.row_periodic_update(
             req.key, req.message_name, req.values, req.values_alt, req.period_ms,
+            req.random_signals,
         )
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))
@@ -858,6 +868,14 @@ class InvalidSendRequest(BaseModel):
     signal_name: str
 
 
+class RandomStopRequest(BaseModel):
+    message_name: str
+    signal_name: str
+    # 체크 해제 시 설정값으로 상태 복원 (전송 없음). 파싱 실패 등으로
+    # 생략 가능 -- 생략 시 상태는 그대로 둔다.
+    values: Optional[dict[str, float | int | str]] = None
+
+
 @app.post("/api/tx/signal/invalid")
 def tx_signal_invalid(req: InvalidSendRequest):
     _require_running()
@@ -925,6 +943,19 @@ def tx_signal_generate_stop(req: InvalidSendRequest):
         raise HTTPException(status_code=400, detail=str(exc))
 
 
+@app.post("/api/tx/signal/random/stop")
+def tx_signal_random_stop(req: RandomStopRequest):
+    """TxBox per-signal "랜덤" 체크박스 OFF: active에서만 제거 (추가 프레임
+    없음). values가 오면 설정값으로 상태를 복원해 다음 tick부터 설정값이
+    나간다 (랜덤 tick이 랜덤값을 영속화하기 때문). 멱등."""
+    if not dbc_service.loaded:
+        raise HTTPException(status_code=400, detail="no DBC loaded")
+    try:
+        return tx_scheduler.random_stop(req.message_name, req.signal_name, req.values)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
 class IsoTpSendRequest(BaseModel):
     tx_id: int
     fc_id: int
@@ -949,6 +980,51 @@ def _is_nrc78(payload: bytes) -> bool:
     판정한다 -- pending이면 ECU가 아직 처리 중이므로 최종 응답까지
     수신을 이어가야 한다."""
     return len(payload) >= 3 and payload[0] == 0x7F and payload[2] == 0x78
+
+
+def _collect_responses(result: dict, tx_id: int, resp_id: int, *,
+                      is_extended_id: bool = False, resp_timeout_s: float = 2.0,
+                      resp_fc_stmin: int = 0x00, resp_fc_block_size: int = 0,
+                      reader=None) -> None:
+    """Collect NRC78-tracked ISO-TP responses into result["response"] (first,
+    for compatibility) and result["responses"] (all hex strings). A received
+    NRC 0x78 extends the deadline by a full timeout again, so responses keep
+    arriving while the ECU reports pending. Raises IsoTpError only when
+    nothing was received at all; a mid-sequence timeout keeps what arrived
+    plus result["response_error"]. The shared reader must already be
+    registered (no gap between send and receive)."""
+    deadline = time.perf_counter() + resp_timeout_s
+    responses: list[bytes] = []
+    error: Optional[str] = None
+    for _ in range(100):  # pending 폭주 대비 안전 상한
+        remaining = deadline - time.perf_counter()
+        if remaining <= 0:
+            break
+        try:
+            response = isotp_service.receive(
+                can_manager,
+                resp_id,
+                tx_id,
+                timeout_s=remaining,
+                is_extended_id=is_extended_id,
+                fc_stmin=resp_fc_stmin,
+                fc_block_size=resp_fc_block_size,
+                reader=reader,
+            )
+        except isotp_service.IsoTpError as exc:
+            error = str(exc)
+            break
+        responses.append(response)
+        if _is_nrc78(response):
+            deadline = time.perf_counter() + resp_timeout_s
+            continue
+        break
+    if not responses:
+        raise isotp_service.IsoTpError(error or "응답 프레임을 기다리다 시간 초과되었습니다")
+    result["response"] = responses[0].hex(" ").upper()
+    result["responses"] = [r.hex(" ").upper() for r in responses]
+    if error:
+        result["response_error"] = error
 
 
 @app.post("/api/isotp/send")
@@ -1006,44 +1082,134 @@ def isotp_send(req: IsoTpSendRequest):
             raise HTTPException(status_code=400, detail=str(exc))
 
         try:
-            # 첫 응답 + NRC 0x78 pending 추적: ECU가 "7F xx 78"을 보내면 아직
-            # 처리 중이라는 뜻이므로 남은 타임아웃으로 수신을 반복해 최종
-            # 응답까지 전수 수집한다. 78이 아닌 첫 응답이면 1건으로 종료.
-            # result["response"]는 첫 메시지 (호환 유지),
-            # result["responses"]는 전수 hex 배열이다.
-            deadline = time.perf_counter() + req.resp_timeout_ms / 1000.0
-            responses: list[bytes] = []
-            for _ in range(100):  # pending 폭주 대비 안전 상한
-                remaining = deadline - time.perf_counter()
-                if remaining <= 0:
-                    break
-                response = isotp_service.receive(
-                    can_manager,
-                    req.resp_id,
-                    req.tx_id,
-                    timeout_s=remaining,
-                    is_extended_id=req.is_extended_id,
-                    fc_stmin=req.resp_fc_stmin,
-                    fc_block_size=req.resp_fc_block_size,
-                    reader=reader,
-                )
-                responses.append(response)
-                if not _is_nrc78(response):
-                    break
-            result["response"] = responses[0].hex(" ").upper()
-            result["responses"] = [r.hex(" ").upper() for r in responses]
+            # 첫 응답 + NRC 0x78 pending 추적은 _collect_responses가 담당:
+            # 78을 받을 때마다 deadline이 연장되어 78 지속 시 사실상 무한
+            # 대기, 끊기면 타임아웃. result["response"]=첫 메시지(호환),
+            # result["responses"]=전수 hex 배열.
+            _collect_responses(
+                result,
+                req.tx_id,
+                req.resp_id,
+                is_extended_id=req.is_extended_id,
+                resp_timeout_s=req.resp_timeout_ms / 1000.0,
+                resp_fc_stmin=req.resp_fc_stmin,
+                resp_fc_block_size=req.resp_fc_block_size,
+                reader=reader,
+            )
         except isotp_service.IsoTpError as exc:
-            if "responses" not in result and not responses:
-                result["response_error"] = str(exc)
-            else:
-                # pending 도중 타임아웃 등: 받은 만큼은 반환하고 에러도 기록
-                result["response"] = responses[0].hex(" ").upper()
-                result["responses"] = [r.hex(" ").upper() for r in responses]
-                result["response_error"] = str(exc)
+            # 아무것도 못 받았을 때만 여기 (일부는 받았으면
+            # _collect_responses가 response_error까지 채운다)
+            result["response_error"] = str(exc)
     finally:
         can_manager.notifier.remove_listener(reader)
 
     return result
+
+
+class IsoTpSecurityAccessRequest(BaseModel):
+    tx_id: int
+    fc_id: int
+    resp_id: int
+    is_extended_id: bool = False
+    fc_timeout_ms: int = 1000
+    resp_timeout_ms: int = 2000
+    resp_fc_stmin: int = 0x00
+    resp_fc_block_size: int = 0
+    seed_level: int = 0x11  # 27 11
+    key_level: int = 0x12  # 27 12
+
+
+@app.post("/api/isotp/security-access")
+def isotp_security_access(req: IsoTpSecurityAccessRequest):
+    """ISO-TP 위젯의 27 11 자동 ASK 인증: 27 <seed> 송신 -> 67 <seed> + seed
+    수신(78 pending 추적 포함) -> SeedKey DLL(미로드 시 dummy) 키 생성 ->
+    27 <key> + key 송신 -> 최종 응답까지. 송수신 transcript를 반환한다."""
+    _require_running()
+    if not can_manager.connected:
+        raise HTTPException(status_code=400, detail="CAN bus is not connected")
+    if can_manager.notifier is None:
+        raise HTTPException(status_code=400, detail="CAN 버스가 연결되어 있지 않습니다")
+    seed_req = bytes([0x27, req.seed_level & 0xFF])
+    transcript: dict = {
+        "seed_request": seed_req.hex(" ").upper(),
+        "seed_level": req.seed_level,
+        "key_level": req.key_level,
+    }
+    reader = can.BufferedReader()
+    can_manager.notifier.add_listener(reader)
+    try:
+        try:
+            isotp_service.send(
+                can_manager, req.tx_id, req.fc_id, seed_req,
+                is_extended_id=req.is_extended_id,
+                fc_timeout_s=req.fc_timeout_ms / 1000.0,
+                reader=reader,
+            )
+        except isotp_service.IsoTpError as exc:
+            raise HTTPException(status_code=400, detail=f"Seed 요청 송신 실패: {exc}")
+        seed_result: dict = {"sent": True}
+        try:
+            _collect_responses(
+                seed_result, req.tx_id, req.resp_id,
+                is_extended_id=req.is_extended_id,
+                resp_timeout_s=req.resp_timeout_ms / 1000.0,
+                resp_fc_stmin=req.resp_fc_stmin,
+                resp_fc_block_size=req.resp_fc_block_size,
+                reader=reader,
+            )
+        except isotp_service.IsoTpError as exc:
+            raise HTTPException(status_code=400, detail=f"Seed 응답 수신 실패: {exc}")
+        transcript["seed_responses"] = seed_result["responses"]
+        seed_resp = bytes.fromhex(seed_result["response"].replace(" ", ""))
+        if len(seed_resp) < 3 or seed_resp[0] != 0x67 or seed_resp[1] != (req.seed_level & 0xFF):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Seed 요청 거부/이상 응답: {seed_result['response']}",
+            )
+        seed = bytes(seed_resp[2:])
+        transcript["seed_hex"] = seed.hex(" ").upper()
+        if seedkey_service.loaded:
+            try:
+                key = bytes(seedkey_service.generate_key(seed))
+                transcript["key_source"] = f"dll ({seedkey_service.status().get('filename')})"
+            except Exception as exc:
+                key = bytes(_dummy_generate_key(seed))
+                transcript["key_source"] = f"dummy (DLL 실패: {exc})"
+        else:
+            key = bytes(_dummy_generate_key(seed))
+            transcript["key_source"] = "dummy (DLL 미로드)"
+        transcript["key_hex"] = key.hex(" ").upper()
+        key_req = bytes([0x27, req.key_level & 0xFF]) + key
+        transcript["key_request"] = key_req.hex(" ").upper()
+        try:
+            isotp_service.send(
+                can_manager, req.tx_id, req.fc_id, key_req,
+                is_extended_id=req.is_extended_id,
+                fc_timeout_s=req.fc_timeout_ms / 1000.0,
+                reader=reader,
+            )
+        except isotp_service.IsoTpError as exc:
+            raise HTTPException(status_code=400, detail=f"Key 송신 실패: {exc}")
+        key_result: dict = {"sent": True}
+        try:
+            _collect_responses(
+                key_result, req.tx_id, req.resp_id,
+                is_extended_id=req.is_extended_id,
+                resp_timeout_s=req.resp_timeout_ms / 1000.0,
+                resp_fc_stmin=req.resp_fc_stmin,
+                resp_fc_block_size=req.resp_fc_block_size,
+                reader=reader,
+            )
+        except isotp_service.IsoTpError as exc:
+            transcript["key_responses"] = []
+            transcript["response_error"] = f"Key 응답 수신 실패: {exc}"
+            return transcript
+        transcript["key_responses"] = key_result["responses"]
+        if "response_error" in key_result:
+            transcript["response_error"] = key_result["response_error"]
+        return transcript
+    finally:
+        can_manager.notifier.remove_listener(reader)
 
 
 # ---- Replay -------------------------------------------------------------
