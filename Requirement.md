@@ -4285,3 +4285,23 @@ data_tseg2=..., data_sjw=...)` 직접 생성자로 전환했다.
 - 전체 백엔드 테스트 306개(기존 305 + 신규 1) 회귀 없이 통과.
 - 실제 PCAN-FD 하드웨어로의 연결 성공 여부는 사용자 환경에서만
   확인 가능 -- 여기서는 검증하지 못함.
+
+## "sysLog 취득" 위젯 (UDS Upload, 사용자 요청 — 개발 완료, 검증 통과)
+
+ECU의 시스템 로그 메모리를 UDS로 읽어내 `.bin`으로 저장하는 위젯
+(`frontend/src/widgets/SysLogUploadWidget.tsx`, registry `sysLogUpload`).
+시퀀스: `10 03` → `22 F1 20`(4B big-endian 크기)
+→ [Security Enable 시] `27 11` → seed → SeedKey DLL(미로드 시 dummy) 키 → `27 12`
+→ `35 00 44 <addr> <size>` (RequestUpload)
+→ `36 ZZ` 반복 (응답 `76 ZZ` seq 검증, 블록당 최대 1024B = maxBlockLength 1026 - 2)
+→ `37` → `.bin` 저장. NRC 0x78 pending 대기, 블록 3회 재전송,
+TransferData 10초 타임아웃, 2초 suppress TesterPresent keep-alive,
+진행률/Stop/에러 처리는 다운로드 매니저와 동일 패턴
+(`backend/syslog_upload_manager.py`, `uds_core.build_request_upload`/
+`parse_request_upload_response`/`parse_memory_size_did` 신규).
+ID/주소 변경 가능 (기본 TX 0x6D1/RX 0x6B0/addr 0), 완료 후 다운로드 버튼
+(`GET /api/syslog_upload/download`, `syslog_upload_*.bin` 검증).
+DID 크기 상한 16MB 캡. pytest 4개
+(`tests/test_syslog_upload_manager.py`: 가상 ECU 전 sequence 시뮬레이션,
+Security OFF 스킵, 크기 0 실패, 전송 중 Stop) + 전체 백엔드 회귀 통과,
+`npm run build` 통과. 실차(1MB) 수신은 사용자 환경에서 확인 필요.

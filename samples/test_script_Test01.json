@@ -1,0 +1,23 @@
+[
+	{ "type": "ID", "num": "5", "Cycle": 1},
+	{ "type": "CANStart"},
+	{ "type": "loop", "cycle": 10, "steps": [
+		{ "type": "CANReq", "Message": "CLU_AMP_01_200ms", "Signals": [
+				{ "Signal": "Warn_Sound_TikTok", "Value": "0x01" },
+				{ "Signal": "Warn_Sound_SeatBeltStep", "Value": "0x01" },
+				{ "Signal": "Warn_Sound_FCW", "Value": "0x02" },
+				{ "Signal": "Warn_Sound_EPB", "Value": "0x03" }
+			]
+		},
+		{ "type": "delay", "ms": 500},
+		{ "type": "CANReq", "Message": "CLU_AMP_01_200ms", "Signals": [
+				{ "Signal": "Warn_Sound_TikTok", "Value": "0x02" },
+				{ "Signal": "Warn_Sound_SeatBeltStep", "Value": "0x00" },
+				{ "Signal": "Warn_Sound_FCW", "Value": "0x00" }
+			]
+		},
+		{ "type": "delay", "ms": 500}
+	]},
+	{ "type": "CANStop"}
+	
+]

@@ -3,9 +3,9 @@
 // where the backend applies the Event(valid → 30ms → invalid) / Periodic rule.
 
 import { useEffect, useRef, useState } from 'react';
-import { findSignal, signalBitMax, signalRawBounds, useApp } from '../store/appContext';
+import { findSignal, signalBitMax, signalBitMin, signalRawBounds, useApp } from '../store/appContext';
 import { canStore } from '../store/canStore';
-import type { WidgetConfig } from '../types';
+import type { DbcSummary, ExtraBinding, SignalBinding, WidgetConfig } from '../types';
 
 function useSendSignal(config: WidgetConfig) {
   const [error, setError] = useState<string | null>(null);
@@ -24,23 +24,107 @@ function useSendSignal(config: WidgetConfig) {
   return { send, error, setError };
 }
 
+/** 버튼 눌림 fan-out: entries(바인딩+전송값)를 메시지별로 묶어 전송한다.
+ * 그룹 내 전부 periodic → ZeroAfter pulse 1회, 그 외 일반 단발
+ * (ZeroAfter는 Event 신호를 거부하므로 혼합 그룹은 periodic/event로
+ * 나눠 2프레임 — 각 신호의 단건 버튼 동작과 동일 보장). */
+export async function sendButtonBindings(
+  entries: { binding: SignalBinding | undefined; value: number }[],
+  dbc: DbcSummary,
+): Promise<void> {
+  const seen = new Set<string>();
+  const byMessage = new Map<string, { signal: string; value: number; periodic: boolean }[]>();
+  for (const e of entries) {
+    if (!e.binding?.message || !e.binding?.signal) continue;
+    const k = `${e.binding.message}.${e.binding.signal}`;
+    if (seen.has(k)) continue;
+    seen.add(k);
+    const sig = findSignal(dbc, e.binding)?.signal;
+    let v = e.value;
+    if (sig) {
+      const lo = sig.minimum ?? signalBitMin(sig);
+      const hi = sig.maximum ?? signalBitMax(sig);
+      v = Math.min(hi, Math.max(lo, e.value));
+    }
+    const list = byMessage.get(e.binding.message) ?? [];
+    list.push({ signal: e.binding.signal, value: v, periodic: sig?.send_type === 'periodic' });
+    byMessage.set(e.binding.message, list);
+  }
+  if (byMessage.size === 0) throw new Error('신호 미할당');
+  const toValues = (list: { signal: string; value: number }[]) =>
+    Object.fromEntries(list.map((s) => [s.signal, s.value]));
+  for (const [message, list] of byMessage) {
+    if (list.every((s) => s.periodic)) {
+      await canStore.sendSignalZeroAfter(message, toValues(list));
+    } else if (list.every((s) => !s.periodic)) {
+      await canStore.sendSignal(message, toValues(list));
+    } else {
+      const per = list.filter((s) => s.periodic);
+      const ev = list.filter((s) => !s.periodic);
+      await canStore.sendSignalZeroAfter(message, toValues(per));
+      await canStore.sendSignal(message, toValues(ev));
+    }
+  }
+}
+
+/** 여러 바인딩 신호에 동일 물리값을 전송 -- 메시지별로 묶어 메시지당 1회
+ * 호출한다. 각 신호는 자신의 선언 범위(minimum/maximum 우선, 없으면
+ * bit폭)로 클램프된다. 바인딩이 하나도 없으면 throw (호출자가 표시). */
+export async function sendValueToBindings(
+  bindings: SignalBinding[],
+  value: number,
+  dbc: DbcSummary,
+): Promise<void> {
+  const seen = new Set<string>();
+  const byMessage = new Map<string, Record<string, number>>();
+  for (const b of bindings) {
+    if (!b?.message || !b?.signal) continue;
+    const k = `${b.message}.${b.signal}`;
+    if (seen.has(k)) continue;
+    seen.add(k);
+    let v = value;
+    const sig = findSignal(dbc, b)?.signal;
+    if (sig) {
+      const lo = sig.minimum ?? signalBitMin(sig);
+      const hi = sig.maximum ?? signalBitMax(sig);
+      v = Math.min(hi, Math.max(lo, value));
+    }
+    const values = byMessage.get(b.message) ?? {};
+    values[b.signal] = v;
+    byMessage.set(b.message, values);
+  }
+  if (byMessage.size === 0) throw new Error('신호 미할당');
+  for (const [message, values] of byMessage) {
+    await canStore.sendSignal(message, values);
+  }
+}
+
 export function ButtonWidget({ config }: { config: WidgetConfig }) {
   const value = Number(config.options.value ?? 1);
   const { dbc } = useApp();
-  const { send, error, setError } = useSendSignal(config);
-  const isPeriodic = findSignal(dbc, config.binding)?.signal.send_type === 'periodic';
+  const { error, setError } = useSendSignal(config);
+  const extras = (config.options.extraBindings as ExtraBinding[] | undefined) ?? [];
+  const extraCount = extras.filter((b) => b?.signal).length;
+  const allLabels = [
+    ...(config.binding?.signal ? [`${config.binding.message}.${config.binding.signal} = ${value}`] : []),
+    ...extras.filter((b) => b?.signal).map((b) => `${b.message}.${b.signal} = ${b.value ?? 1}`),
+  ].join('\n');
   // Periodic: one-shot pulse (configured value immediately, raw 0x0 30ms
   // later with 0 persisted, server-side) on every click -- no toggle.
   // Event: existing behavior, unchanged (value now + auto-invalid 30ms later).
+  // 여러 신호면 메시지별로 묶어 전송 (전부 periodic인 그룹만 pulse).
   const activate = async () => {
-    if (!config.binding?.signal || !isPeriodic) {
-      send(value);
-      return;
-    }
     try {
-      await canStore.sendSignalZeroAfter(config.binding.message, {
-        [config.binding.signal]: value,
-      });
+      await sendButtonBindings(
+        [
+          ...(config.binding?.signal ? [{ binding: config.binding, value }] : []),
+          ...extras.filter((b) => b?.signal).map((b) => ({
+            binding: { message: b.message, signal: b.signal },
+            value: b.value ?? 1,
+          })),
+        ],
+        dbc,
+      );
       setError(null);
     } catch (e) {
       setError((e as Error).message);
@@ -60,9 +144,14 @@ export function ButtonWidget({ config }: { config: WidgetConfig }) {
             activate();
           }
         }}
-        disabled={!config.binding?.signal}
+        disabled={!(config.binding?.signal || extraCount > 0)}
+        title={allLabels || undefined}
       >
-        {config.binding?.signal ? `${config.binding.signal} = ${value}` : '신호 미할당'}
+        {config.binding?.signal
+          ? `${config.binding.signal} = ${value}${extraCount > 0 ? ` +외 ${extraCount}개` : ''}`
+          : extraCount > 0
+            ? `+외 ${extraCount}개`
+            : '신호 미할당'}
       </button>
       {error && <span className="error">{error}</span>}
     </div>
@@ -139,7 +228,7 @@ export function DropdownWidget({ config }: { config: WidgetConfig }) {
 
 export function SliderWidget({ config }: { config: WidgetConfig }) {
   const { dbc, updateWidget } = useApp();
-  const { send, error } = useSendSignal(config);
+  const { error, setError } = useSendSignal(config);
   const bound = findSignal(dbc, config.binding);
   const min = Number(config.options.min ?? bound?.signal.minimum ?? 0);
   const max = Number(
@@ -160,6 +249,41 @@ export function SliderWidget({ config }: { config: WidgetConfig }) {
   const valueRef = useRef(initialValue);
   const lastSent = useRef(0);
   const isFirstRender = useRef(true);
+
+  // 본 바인딩 + 추가 바인딩 (유효·비어있지 않은 것만, 본 바인딩 중복 제외).
+  // 없으면 기존 단일 바인딩 동작과 완전히 동일하다.
+  const bindings = (() => {
+    const list: SignalBinding[] = [];
+    const seen = new Set<string>();
+    const push = (b: SignalBinding | undefined) => {
+      if (!b?.message || !b?.signal) return;
+      const k = `${b.message}.${b.signal}`;
+      if (seen.has(k)) return;
+      seen.add(k);
+      list.push({ message: b.message, signal: b.signal });
+    };
+    push(config.binding);
+    for (const b of (config.options.extraBindings as SignalBinding[] | undefined) ?? []) push(b);
+    return list;
+  })();
+  const extraCount = bindings.length - (config.binding?.signal ? 1 : 0);
+  const headerLabel =
+    !config.binding?.signal && extraCount <= 0
+      ? '신호 미할당'
+      : `${config.binding?.signal ?? ''}${config.binding?.signal && extraCount > 0 ? ' ' : ''}${extraCount > 0 ? `+외 ${extraCount}개` : ''}`;
+  const headerTitle = bindings.map((b) => `${b.message}.${b.signal}`).join('\n') || undefined;
+
+  // 같은 값을 모든 바인딩 신호에 전송 -- 메시지별로 묶어 메시지당 1회 호출.
+  // 각 신호는 자신의 선언 범위(minimum/maximum 우선, 없으면 bit폭)로
+  // 클램프된다.
+  const sendAll = async (v: number) => {
+    try {
+      await sendValueToBindings(bindings, v, dbc);
+      setError(null);
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
 
   // Re-apply the configured default whenever it (or min/max, which it's
   // clamped into) changes in the config modal -- otherwise a slider that's
@@ -184,7 +308,7 @@ export function SliderWidget({ config }: { config: WidgetConfig }) {
     const now = performance.now();
     if (now - lastSent.current >= 100) {
       lastSent.current = now;
-      void send(v);
+      void sendAll(v);
     }
   };
 
@@ -196,7 +320,7 @@ export function SliderWidget({ config }: { config: WidgetConfig }) {
   // single pointermove tick.
   const flush = () => {
     lastSent.current = performance.now();
-    void send(valueRef.current);
+    void sendAll(valueRef.current);
     updateWidget({ ...config, options: { ...config.options, currentValue: valueRef.current } });
   };
 
@@ -237,7 +361,7 @@ export function SliderWidget({ config }: { config: WidgetConfig }) {
   return (
     <div className="control-widget slider-widget">
       <div className="slider-header">
-        <span>{config.binding?.signal ?? '신호 미할당'}</span>
+        <span title={headerTitle}>{headerLabel}</span>
         <span className="mono">
           {value}
           {bound?.signal.unit ? ` ${bound.signal.unit}` : ''}
@@ -249,7 +373,7 @@ export function SliderWidget({ config }: { config: WidgetConfig }) {
         max={max}
         step={step}
         value={value}
-        disabled={!config.binding?.signal}
+        disabled={bindings.length === 0}
         onChange={(e) => onChange(Number(e.target.value))}
         onPointerUp={flush}
         onKeyDown={onKeyDown}

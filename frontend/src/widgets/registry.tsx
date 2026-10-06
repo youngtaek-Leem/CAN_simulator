@@ -25,6 +25,7 @@ import { PowerControlWidget } from './PowerControlWidget';
 import { CanAudioLatencyWidget } from './CanAudioLatencyWidget';
 import { SysLogAnalysisWidget } from './SysLogAnalysisWidget';
 import { CanLogAnalysisWidget } from './CanLogAnalysisWidget';
+import SysLogUploadWidget from './SysLogUploadWidget';
 
 interface WidgetMeta {
   label: string;
@@ -166,6 +167,11 @@ export const WIDGET_REGISTRY: Record<WidgetType, WidgetMeta> = {
   canLogAnalysis: {
     label: 'CAN log 분석',
     component: CanLogAnalysisWidget,
+    defaultSize: { w: 12, h: 14, minW: 4, minH: 3 },
+  },
+  sysLogUpload: {
+    label: 'sysLog 취득',
+    component: SysLogUploadWidget,
     defaultSize: { w: 12, h: 14, minW: 4, minH: 3 },
   },
   powerControl: {

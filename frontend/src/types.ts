@@ -345,6 +345,35 @@ export interface SysLogStatus {
   entry_count?: number;
 }
 
+export interface SysLogUploadProgress {
+  phase: string;
+  total_bytes: number;
+  received_bytes: number;
+  percent: number;
+  current_block: number;
+  total_blocks: number;
+}
+
+export interface SysLogUploadEvent {
+  ts: number;
+  level: string;
+  msg: string;
+  service?: string;
+}
+
+export interface SysLogUploadStatus {
+  state: string;
+  running: boolean;
+  request_id: number;
+  response_id: number;
+  security_enable: boolean;
+  progress: SysLogUploadProgress;
+  saved_filename: string | null;
+  saved_size: number;
+  events: SysLogUploadEvent[];
+  error: string | null;
+}
+
 export interface SysLogIdInfo {
   id: number;
   name: string;
@@ -359,6 +388,9 @@ export interface SysLogPoint {
   hour: number;
   minute: number;
   ms: number;
+  // 원본 8바이트 hex (호버 툴팁 표시용). 페어드 float 포인트는 2개 레코드라 raw2도 있다.
+  raw: string;
+  raw2?: string;
 }
 
 export interface SysLogSeries {
@@ -446,11 +478,18 @@ export type WidgetType =
   | 'powerControl'
   | 'canAudioLatency'
   | 'sysLogAnalysis'
-  | 'canLogAnalysis';
+  | 'canLogAnalysis'
+  | 'sysLogUpload';
 
 export interface SignalBinding {
   message: string;
   signal: string;
+}
+
+/** 추가 바인딩 (버튼 다중 신호용): 바인딩 + 해당 신호의 전송값.
+ * value 없음 = 미지정 (버튼 클릭 시 해당 신호 스킵 또는 기본값 — 호출자 정책). */
+export interface ExtraBinding extends SignalBinding {
+  value?: number;
 }
 
 export interface MultiCell {
@@ -485,6 +524,10 @@ export interface MultiCell {
   selectedRaw?: string;
   sliderCurrent?: number;
   inputCurrent?: string;
+  // 슬라이더 셀의 추가 바인딩: 셀 슬라이더 값이 본 바인딩과 함께 동일하게
+  // 전송된다 (단일 SliderWidget의 extraBindings와 동일).
+  // 버튼 셀은 전송값(value)까지 함께 저장한다.
+  extraBindings?: ExtraBinding[];
 }
 
 export interface WidgetConfig {

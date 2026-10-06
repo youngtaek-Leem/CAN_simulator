@@ -7,8 +7,14 @@ import { createPortal } from 'react-dom';
 import { api } from '../api/client';
 import { findSignal, signalBitMax, signalBitMin, signalRawBounds, useApp } from '../store/appContext';
 import { canStore } from '../store/canStore';
-import { SignalPicker } from './MessageOptions';
-import type { DbcSignal, WidgetConfig } from '../types';
+import {
+  CompactSignalPicker,
+  ExtraBindingsEditor,
+  FlexibleValueInput,
+  SendTypeSelect,
+  SignalPicker,
+} from './MessageOptions';
+import type { DbcSignal, ExtraBinding, SignalBinding, WidgetConfig } from '../types';
 
 const BINDABLE = new Set(['button', 'checkbox', 'dropdown', 'slider', 'randomButton', 'manualValue']);
 
@@ -86,6 +92,38 @@ function ConfigModal({ config, onClose }: { config: WidgetConfig; onClose: () =>
     setDraft((d) => ({ ...d, options: { ...d.options, [key]: value } }));
 
   const save = () => {
+    if (config.type === 'button' && draft.binding?.signal) {
+      // 본 바인딩 입력 UI 삭제에 따른 1회성 마이그레이션: 기존 본 바인딩을
+      // 추가 목록 맨 앞에 편입시킨 뒤 바인딩을 비운다 (이후 저장에서는 스킵).
+      const k = `${draft.binding.message}.${draft.binding.signal}`;
+      const migrated: ExtraBinding[] = [
+        {
+          message: draft.binding.message,
+          signal: draft.binding.signal,
+          value: Number(draft.options.value ?? 1),
+        },
+      ];
+      for (const b of (draft.options.extraBindings as ExtraBinding[] | undefined) ?? []) {
+        if (b?.signal && `${b.message}.${b.signal}` !== k) migrated.push(b);
+      }
+      draft.options.extraBindings = migrated;
+      draft.binding = undefined;
+    }
+    if (config.type === 'slider' || config.type === 'button') {
+      // 추가 바인딩 정리: 미완성 행 제거 + 중복 제거 + 본 바인딩과 겹치면 제외
+      // (value 등 기존 필드는 보존).
+      const seen = new Set<string>();
+      if (draft.binding?.signal) seen.add(`${draft.binding.message}.${draft.binding.signal}`);
+      const cleaned: ExtraBinding[] = [];
+      for (const b of (draft.options.extraBindings as ExtraBinding[] | undefined) ?? []) {
+        if (!b?.message || !b?.signal) continue;
+        const k = `${b.message}.${b.signal}`;
+        if (seen.has(k)) continue;
+        seen.add(k);
+        cleaned.push({ ...b, message: b.message, signal: b.signal });
+      }
+      draft.options.extraBindings = cleaned;
+    }
     updateWidget(draft);
     if (config.type === 'randomButton' && draft.binding?.signal) {
       const mode = (draft.options.mode as string | undefined) ?? 'random';
@@ -147,14 +185,24 @@ function ConfigModal({ config, onClose }: { config: WidgetConfig; onClose: () =>
             {!dbc.loaded && <p className="hint">신호 할당을 하려면 먼저 DBC를 업로드하세요.</p>}
             {dbc.loaded && (
               <>
-                <SignalPicker
-                  dbc={dbc}
-                  rxNode={canStore.getRxNode()}
-                  binding={draft.binding}
-                  onChange={(b) => setDraft({ ...draft, binding: b })}
-                  messageLabelFor={(m) => `${m.name} (0x${m.frame_id.toString(16).toUpperCase()})`}
-                />
-                {bound && (
+                {config.type === 'slider' ? (
+                  <CompactSignalPicker
+                    dbc={dbc}
+                    rxNode={canStore.getRxNode()}
+                    binding={draft.binding}
+                    onChange={(b) => setDraft({ ...draft, binding: b })}
+                    messageLabelFor={(m) => `${m.name} (0x${m.frame_id.toString(16).toUpperCase()})`}
+                  />
+                ) : config.type === 'button' ? null : (
+                  <SignalPicker
+                    dbc={dbc}
+                    rxNode={canStore.getRxNode()}
+                    binding={draft.binding}
+                    onChange={(b) => setDraft({ ...draft, binding: b })}
+                    messageLabelFor={(m) => `${m.name} (0x${m.frame_id.toString(16).toUpperCase()})`}
+                  />
+                )}
+                {bound && config.type !== 'button' && (
                   <label>
                     송신 속성 (Event: 30ms 후 invalid 값 자동 송신)
                     <select
@@ -179,25 +227,26 @@ function ConfigModal({ config, onClose }: { config: WidgetConfig; onClose: () =>
         )}
 
         {config.type === 'button' && (
-          <label>
-            전송 값
-            {bound && (
-              <span className="hint">
-                범위: {signalValueRange(bound.signal).min} ~ {signalValueRange(bound.signal).max}
-              </span>
+          <ExtraBindingsEditor
+            dbc={dbc}
+            rxNode={canStore.getRxNode()}
+            primary={undefined}
+            value={(draft.options.extraBindings as ExtraBinding[] | undefined) ?? []}
+            onChange={(next) => setOption('extraBindings', next)}
+            messageLabelFor={(m) => `${m.name} (0x${m.frame_id.toString(16).toUpperCase()})`}
+            pickerFilter={false}
+            renderRowExtra={(b, _i, patch) => (
+              <>
+                <SendTypeSelect dbc={dbc} binding={b.signal ? b : undefined} onDbcRefresh={refreshDbc} />
+                <FlexibleValueInput
+                  dbc={dbc}
+                  binding={b.signal ? b : undefined}
+                  value={b.value ?? 1}
+                  onValue={(v) => patch({ value: v })}
+                />
+              </>
             )}
-            <input
-              type="number"
-              min={bound ? signalValueRange(bound.signal).min : undefined}
-              max={bound ? signalValueRange(bound.signal).max : undefined}
-              value={String(draft.options.value ?? 1)}
-              onChange={(e) => {
-                const raw = Number(e.target.value);
-                const { min, max } = bound ? signalValueRange(bound.signal) : { min: -Infinity, max: Infinity };
-                setOption('value', bound ? clamp(raw, min, max) : raw);
-              }}
-            />
-          </label>
+          />
         )}
         {config.type === 'randomButton' && (
           <>
@@ -367,6 +416,15 @@ function ConfigModal({ config, onClose }: { config: WidgetConfig; onClose: () =>
               />
             </label>
           </div>
+        )}
+        {config.type === 'slider' && (
+          <ExtraBindingsEditor
+            dbc={dbc}
+            rxNode={canStore.getRxNode()}
+            primary={draft.binding}
+            value={(draft.options.extraBindings as SignalBinding[] | undefined) ?? []}
+            onChange={(next) => setOption('extraBindings', next)}
+          />
         )}
         {config.type === 'slider' && (
           <div className="row-2">

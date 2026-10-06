@@ -37,6 +37,7 @@ if sys.platform == "win32":
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 from fastapi import FastAPI, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -58,6 +59,7 @@ from test_runner_service import TestRunnerService
 from tx_scheduler import TxScheduler
 from uds_core import generate_key as _dummy_generate_key
 from uds_download_manager import MultiUdsDownloadManager
+from syslog_upload_manager import SysLogUploadManager
 from ota_tester_download_manager import OtaTesterDownloadManager
 
 
@@ -181,6 +183,14 @@ uds_download_manager = MultiUdsDownloadManager(
 )
 
 ota_tester_manager = OtaTesterDownloadManager(
+    can_manager,
+    isotp_service.send,
+    isotp_service.receive,
+    seedkey_service,
+    log_dir=CAN_LOG_DIR,
+)
+
+syslog_upload_manager = SysLogUploadManager(
     can_manager,
     isotp_service.send,
     isotp_service.receive,
@@ -2105,6 +2115,52 @@ def ota_tester_start(req: OtaTesterStartRequest):
 def ota_tester_stop():
     """Stop OTA Tester procedure."""
     return ota_tester_manager.stop()
+
+
+# ---- sysLog 취득 (UDS Upload) ----------------------------------------------
+
+
+class SysLogUploadStartRequest(BaseModel):
+    request_id: int = 0x6D1
+    response_id: int = 0x6B0
+    address: int = 0x00000000
+    security_enable: bool = True
+
+
+@app.post("/api/syslog_upload/start")
+def syslog_upload_start(req: SysLogUploadStartRequest):
+    """Start UDS sysLog memory upload."""
+    _require_running()
+    if not can_manager.connected:
+        raise HTTPException(status_code=400, detail="CAN bus is not connected")
+    try:
+        return syslog_upload_manager.start(
+            req.request_id, req.response_id, req.address, req.security_enable
+        )
+    except (RuntimeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/api/syslog_upload/stop")
+def syslog_upload_stop():
+    """Stop UDS sysLog memory upload."""
+    return syslog_upload_manager.stop()
+
+
+@app.get("/api/syslog_upload/status")
+def syslog_upload_status(tail: int | None = None):
+    """sysLog upload status (progress, events, saved file)."""
+    return syslog_upload_manager.status(tail=tail)
+
+
+@app.get("/api/syslog_upload/download")
+def syslog_upload_download(file: str):
+    """Download a saved syslog_upload_*.bin file."""
+    try:
+        path = syslog_upload_manager.saved_file_path(file)
+    except (ValueError, FileNotFoundError) as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    return FileResponse(path, media_type="application/octet-stream", filename=path.name)
 
 
 # ---- Frontend static files (production build) ----------------------------

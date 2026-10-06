@@ -490,3 +490,32 @@ def test_service_load_txt_binary_content_falls_back_to_binary():
     data = (REFERENCE_DIR / "syslog.bin").read_bytes()
     result = svc.load_log(data, "oddname.txt")
     assert result["record_count"] == len(data) // 8
+
+
+def test_decode_record_keeps_raw_bytes():
+    from syslog_service import _decode_record
+
+    chunk = bytes([0x00, 0x00, 0x00, 0x64, 0x00, 0x01, 0x00, 0x07])
+    rec = _decode_record(chunk, 3)
+    assert rec.raw == chunk
+    assert (rec.ms, rec.log_id, rec.value) == (100, 1, 7)
+
+
+def test_series_points_include_raw_hex():
+    records = parse_log(bytes([0x00, 0x00, 0x00, 0x64, 0x00, 0x01, 0x00, 0x07]))
+    points = build_series(records, {})[0][1]["points"]
+    assert points[0]["raw"] == "00 00 00 64 00 01 00 07"
+
+
+def test_paired_series_points_include_raw_and_raw2():
+    # 1300~1399 페어드: 1ms 이내 2레코드 -> 값 1개, raw/raw2 둘 다 보관
+    import struct
+
+    def chunk(ms: int, value: int) -> bytes:
+        return struct.pack(">IHH", ms, 1300, value)
+
+    records = parse_log(chunk(100, 0x3F80) + chunk(100, 0x0000))
+    points = build_series(records, {})[0][1300]["points"]
+    assert len(points) == 1
+    assert points[0]["raw"] == chunk(100, 0x3F80).hex(" ").upper()
+    assert points[0]["raw2"] == chunk(100, 0x0000).hex(" ").upper()

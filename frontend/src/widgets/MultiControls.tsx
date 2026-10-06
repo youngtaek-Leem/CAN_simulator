@@ -9,9 +9,15 @@ import { createPortal } from 'react-dom';
 import { api } from '../api/client';
 import { findSignal, signalBitMax, signalRawBounds, useApp } from '../store/appContext';
 import { canStore, useCanVersion } from '../store/canStore';
-import { parseFlexibleInt } from './controls';
-import { SignalPicker } from './MessageOptions';
-import type { MultiCell, WidgetConfig } from '../types';
+import { parseFlexibleInt, sendButtonBindings, sendValueToBindings } from './controls';
+import {
+  CompactSignalPicker,
+  ExtraBindingsEditor,
+  FlexibleValueInput,
+  SendTypeSelect,
+  SignalPicker,
+} from './MessageOptions';
+import type { ExtraBinding, MultiCell, SignalBinding, WidgetConfig } from '../types';
 
 function getGrid(config: WidgetConfig): { rows: number; cols: number; cells: MultiCell[] } {  const rows = Math.max(1, Math.min(10, Number(config.options.rows) || 3));
   const cols = Math.max(1, Math.min(10, Number(config.options.cols) || 4));
@@ -37,30 +43,26 @@ export function MultiButtonWidget({ config }: { config: WidgetConfig }) {
   const [editingIndex, setEditingIndex] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const send = async (cell: MultiCell) => {
-    if (!cell.binding?.signal) return;
-    try {
-      await canStore.sendSignal(cell.binding.message, { [cell.binding.signal]: cell.value ?? 1 });
-      setError(null);
-    } catch (e) {
-      setError((e as Error).message);
-    }
-  };
-
   // Periodic: one-shot pulse (cell value immediately, raw 0x0 30ms later
   // with 0 persisted, server-side) on every click -- no toggle. Event:
-  // existing behavior, unchanged.
+  // existing behavior, unchanged. 여러 신호면 메시지별로 묶어 전송
+  // (전부 periodic인 그룹만 pulse, 혼합은 분리 -- controls.sendButtonBindings).
   const activate = async (cell: MultiCell) => {
-    if (!cell.binding?.signal) return;
-    const isPeriodic = findSignal(dbc, cell.binding)?.signal.send_type === 'periodic';
-    if (!isPeriodic) {
-      send(cell);
-      return;
-    }
     try {
-      await canStore.sendSignalZeroAfter(cell.binding.message, {
-        [cell.binding.signal]: cell.value ?? 1,
-      });
+      await sendButtonBindings(
+        [
+          ...(cell.binding?.signal
+            ? [{ binding: cell.binding, value: Number(cell.value ?? 1) }]
+            : []),
+          ...((cell.extraBindings as ExtraBinding[] | undefined) ?? [])
+            .filter((b) => b?.signal)
+            .map((b) => ({
+              binding: { message: b.message, signal: b.signal },
+              value: b.value ?? 1,
+            })),
+        ],
+        dbc,
+      );
       setError(null);
     } catch (e) {
       setError((e as Error).message);
@@ -75,13 +77,18 @@ export function MultiButtonWidget({ config }: { config: WidgetConfig }) {
       >
         {Array.from({ length: rows * cols }, (_, i) => {
           const cell = cells[i] ?? {};
-          const label = cell.label || cell.binding?.signal || `#${i + 1}`;
+          const extraList = ((cell.extraBindings as ExtraBinding[] | undefined) ?? []).filter((b) => b?.signal);
+          const label = cell.label || cell.binding?.signal || (extraList.length > 0 ? `+외 ${extraList.length}개` : `#${i + 1}`);
+          const labelTitle = [
+            ...(cell.binding?.signal ? [`${cell.binding.message}.${cell.binding.signal} = ${cell.value ?? 1}`] : []),
+            ...extraList.map((b) => `${b.message}.${b.signal} = ${b.value ?? 1}`),
+          ].join('\n');
           return (
             <div className="multi-cell" key={i}>
               <button
                 className="big-btn multi-cell-btn"
-                disabled={!cell.binding?.signal}
-                title={cell.binding?.signal ? `${cell.binding.message}.${cell.binding.signal} = ${cell.value ?? 1}` : '신호 미할당'}
+                disabled={!(cell.binding?.signal || extraList.length > 0)}
+                title={cell.binding?.signal || extraList.length > 0 ? labelTitle : '신호 미할당'}
                 onClick={() => activate(cell)}
                 onKeyDown={(e) => {
                   if (e.key === ' ' || e.key === 'Enter') {
@@ -292,9 +299,13 @@ export function MultiSliderWidget({ config }: { config: WidgetConfig }) {
   };
 
   const send = async (cell: MultiCell, v: number) => {
-    if (!cell.binding?.signal) return;
+    const bindings = [
+      ...(cell.binding?.signal ? [cell.binding] : []),
+      ...((cell.extraBindings as SignalBinding[] | undefined) ?? []),
+    ];
+    if (bindings.length === 0) return;
     try {
-      await canStore.sendSignal(cell.binding.message, { [cell.binding.signal]: v });
+      await sendValueToBindings(bindings, v, dbc);
       setError(null);
     } catch (e) {
       setError((e as Error).message);
@@ -330,6 +341,9 @@ export function MultiSliderWidget({ config }: { config: WidgetConfig }) {
           const cell = cells[i] ?? {};
           const bound = findSignal(dbc, cell.binding);
           const { min, max, step } = range(cell);
+          const extraList = ((cell.extraBindings as SignalBinding[] | undefined) ?? []).filter(
+            (b) => b?.signal && (!cell.binding?.signal || `${b.message}.${b.signal}` !== `${cell.binding.message}.${cell.binding.signal}`),
+          );
           const defaultValue = Math.min(max, Math.max(min, cell.sliderDefault ?? min));
           const persistedValue =
             cell.sliderCurrent !== undefined ? Math.min(max, Math.max(min, cell.sliderCurrent)) : defaultValue;
@@ -337,7 +351,15 @@ export function MultiSliderWidget({ config }: { config: WidgetConfig }) {
           return (
             <div className="multi-cell multi-cell-slider" key={i}>
               <div className="slider-header">
-                <span>{cell.label || cell.binding?.signal || `#${i + 1}`}</span>
+                <span
+                  title={
+                    [cell.binding?.signal ? `${cell.binding.message}.${cell.binding.signal}` : null,
+                      ...extraList.map((b) => `${b.message}.${b.signal}`)].filter(Boolean).join('\n') || undefined
+                  }
+                >
+                  {cell.label || cell.binding?.signal || `#${i + 1}`}
+                  {extraList.length > 0 ? ` +외 ${extraList.length}개` : ''}
+                </span>
                 <span className="mono">
                   {value}
                   {bound?.signal.unit ? ` ${bound.signal.unit}` : ''}
@@ -746,7 +768,7 @@ function CellEditModal({
   onSave: (patch: MultiCell) => void;
   onClose: () => void;
 }) {
-  const { dbc } = useApp();
+  const { dbc, refreshDbc } = useApp();
   const [draft, setDraft] = useState<MultiCell>({ ...cell });
   const bound = findSignal(dbc, draft.binding);
   const kindLabel = {
@@ -790,7 +812,7 @@ function CellEditModal({
           </label>
         )}
         {kind !== 'function' && !dbc.loaded && <p className="hint">신호 할당을 하려면 먼저 DBC를 업로드하세요.</p>}
-        {kind !== 'function' && dbc.loaded && (
+        {kind !== 'function' && dbc.loaded && kind !== 'slider' && kind !== 'button' && (
           <SignalPicker
             dbc={dbc}
             rxNode={canStore.getRxNode()}
@@ -799,7 +821,47 @@ function CellEditModal({
             messageLabelFor={(m) => `${m.name} (0x${m.frame_id.toString(16).toUpperCase()})`}
           />
         )}
-        {kind === 'button' && (
+        {kind === 'slider' && dbc.loaded && (
+          <>
+            <CompactSignalPicker
+              dbc={dbc}
+              rxNode={canStore.getRxNode()}
+              binding={draft.binding}
+              onChange={(b) => setDraft({ ...draft, binding: b })}
+              messageLabelFor={(m) => `${m.name} (0x${m.frame_id.toString(16).toUpperCase()})`}
+            />
+            <ExtraBindingsEditor
+              dbc={dbc}
+              rxNode={canStore.getRxNode()}
+              primary={draft.binding}
+              value={draft.extraBindings ?? []}
+              onChange={(next) => setDraft({ ...draft, extraBindings: next })}
+            />
+          </>
+        )}
+        {kind === 'button' && dbc.loaded && (
+          <ExtraBindingsEditor
+            dbc={dbc}
+            rxNode={canStore.getRxNode()}
+            primary={undefined}
+            value={draft.extraBindings ?? []}
+            onChange={(next) => setDraft({ ...draft, extraBindings: next })}
+            messageLabelFor={(m) => `${m.name} (0x${m.frame_id.toString(16).toUpperCase()})`}
+            pickerFilter={false}
+            renderRowExtra={(b, _i, patch) => (
+              <>
+                <SendTypeSelect dbc={dbc} binding={b.signal ? b : undefined} onDbcRefresh={refreshDbc} />
+                <FlexibleValueInput
+                  dbc={dbc}
+                  binding={b.signal ? b : undefined}
+                  value={b.value ?? 1}
+                  onValue={(v) => patch({ value: v })}
+                />
+              </>
+            )}
+          />
+        )}
+        {kind === 'button' && !dbc.loaded && (
           <label>
             전송 값
             <input
@@ -956,7 +1018,29 @@ function CellEditModal({
           </>
         )}
         <div className="modal-buttons">
-          <button onClick={() => onSave(draft)}>저장</button>
+          <button
+            onClick={() => {
+              if (kind === 'button' && draft.binding?.signal) {
+                // 본 바인딩 입력 UI 삭제에 따른 1회성 마이그레이션
+                const k = `${draft.binding.message}.${draft.binding.signal}`;
+                const migrated: ExtraBinding[] = [
+                  {
+                    message: draft.binding.message,
+                    signal: draft.binding.signal,
+                    value: Number(draft.value ?? 1),
+                  },
+                ];
+                for (const b of draft.extraBindings ?? []) {
+                  if (b?.signal && `${b.message}.${b.signal}` !== k) migrated.push(b);
+                }
+                onSave({ ...draft, binding: undefined, extraBindings: migrated });
+                return;
+              }
+              onSave(draft);
+            }}
+          >
+            저장
+          </button>
           <button onClick={onClose}>취소</button>
         </div>
       </div>

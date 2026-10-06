@@ -501,6 +501,39 @@ export function SysLogAnalysisWidget({ config }: { config: WidgetConfig }) {
     setDragOverId(null);
   };
 
+  // ---- 좌측 패널 가로폭 드래그 조절 (영속) ------------------------------------
+  // TxBox 상/하 분할과 동일 패턴: 드래그 중 로컬 상태, mouseup 때 레이아웃 저장.
+  const bodyRef = useRef<HTMLDivElement | null>(null);
+  const idlistWidth = (() => {
+    const v = config.options.idlistWidth;
+    return typeof v === 'number' ? Math.min(600, Math.max(160, v)) : 240;
+  })();
+  const [dragW, setDragW] = useState<number | null>(null);
+  const dragWRef = useRef<number | null>(null);
+  const shownIdlistW = dragW ?? idlistWidth;
+  const onSplitDown = (e: React.MouseEvent) => {
+    e.preventDefault();
+    const body = bodyRef.current;
+    if (!body) return;
+    const rect = body.getBoundingClientRect();
+    const move = (ev: MouseEvent) => {
+      const w = Math.min(600, Math.max(160, ev.clientX - rect.left));
+      dragWRef.current = w;
+      setDragW(w);
+    };
+    const up = () => {
+      window.removeEventListener('mousemove', move);
+      window.removeEventListener('mouseup', up);
+      if (dragWRef.current !== null) {
+        updateWidget({ ...config, options: { ...config.options, idlistWidth: dragWRef.current } });
+      }
+      dragWRef.current = null;
+      setDragW(null);
+    };
+    window.addEventListener('mousemove', move);
+    window.addEventListener('mouseup', up);
+  };
+
   return (
     <div className="syslog-widget">
       <div className="graph-toolbar">
@@ -603,8 +636,8 @@ export function SysLogAnalysisWidget({ config }: { config: WidgetConfig }) {
           )}
         </div>
       )}
-      <div className="syslog-body">
-        <div className="syslog-idlist">
+      <div className="syslog-body" ref={bodyRef}>
+        <div className="syslog-idlist" style={{ width: shownIdlistW }}>
           {segments.length > 0 && (
             <div className="syslog-segment-box">
               <div className="syslog-section-title">
@@ -621,7 +654,7 @@ export function SysLogAnalysisWidget({ config }: { config: WidgetConfig }) {
                 {segments.map((seg, i) => (
                   <label key={i} className="syslog-segment-row">
                     <input type="checkbox" checked={checkedSegments.has(i)} onChange={() => toggleSegment(i)} />
-                    <span className="syslog-segment-range">
+                    <span className="syslog-segment-range" title={`구간${i + 1}: ${fmtAbsTime(seg.abs_ms_start)} ~ ${fmtAbsTime(seg.abs_ms_end)}`}>
                       구간{i + 1}: {fmtAbsTime(seg.abs_ms_start)} ~ {fmtAbsTime(seg.abs_ms_end)}
                     </span>
                   </label>
@@ -684,6 +717,11 @@ export function SysLogAnalysisWidget({ config }: { config: WidgetConfig }) {
             ))}
           </div>
         </div>
+        <div
+          className="syslog-split-drag"
+          title="드래그해서 좌측 목록 폭 조절"
+          onMouseDown={onSplitDown}
+        />
         <div className="syslog-graphs-wrap">
           <div className="graph-charts-col syslog-graphs" ref={graphsColRef}>
             {selectedIds.length === 0 && <div className="hint">왼쪽에서 log ID를 선택하세요.</div>}
@@ -1096,21 +1134,24 @@ function SysLogChart({
       ctx.restore();
     }
 
-    // 시간정보 툴팁은 마우스커서가 있는 그래프에만 표시
+    // 시간정보 툴팁은 마우스커서가 있는 그래프에만 표시 -- 디코딩 정보
+    // 아랫줄에 raw 8바이트 hex (페어드 포인트는 raw2까지)
     if (hoverPlotX !== null && hoveredGraphIdxRef.current === graphIndex) {
       const px = xToPx(hoverPlotX);
       const plotX = hoverPlotX;
       const heldPoint = findHeldPoint(points, plotX);
-      const tooltipText = `${fmtAbsTime(plotXToAbsMs(segments, plotX))}  ${heldPoint ? fmtValue(heldPoint.value, mode) : '-'}`;
+      const tipLines = [`${fmtAbsTime(plotXToAbsMs(segments, plotX))}  ${heldPoint ? fmtValue(heldPoint.value, mode) : '-'}`];
+      if (heldPoint?.raw) tipLines.push(heldPoint.raw);
+      if (heldPoint?.raw2) tipLines.push(heldPoint.raw2);
       ctx.font = '10px monospace';
-      const textW = ctx.measureText(tooltipText).width;
+      const textW = Math.max(...tipLines.map((t) => ctx.measureText(t).width));
       let tx = px + 6;
       if (tx + textW + 6 > w) tx = px - textW - 6;
       const ty = plotTop + 12;
       ctx.fillStyle = 'rgba(0, 0, 0, 0.8)';
-      ctx.fillRect(tx - 3, ty - 10, textW + 6, 14);
+      ctx.fillRect(tx - 3, ty - 10, textW + 6, 14 * tipLines.length);
       ctx.fillStyle = '#ffffff';
-      ctx.fillText(tooltipText, tx, ty);
+      tipLines.forEach((t, i) => ctx.fillText(t, tx, ty + i * 14));
     }
 
     lastGeomRef.current = { xMin, xMax, yMin, yMax, plotLeft, plotTop, plotW, plotH };

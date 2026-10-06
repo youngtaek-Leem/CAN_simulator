@@ -662,6 +662,71 @@ td.empty {
   min-width: 0;
 }
 
+/* 한 줄형 바인딩 피커: [신호검색][CAN 메시지][전체|TX|RX][신호] 1라인 배치 */
+.binding-inline {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.binding-inline input {
+  flex: 1.4;
+  min-width: 0;
+}
+
+.binding-inline select {
+  flex: 1;
+  min-width: 0;
+}
+
+.binding-inline .msg-filter {
+  flex-shrink: 0;
+}
+
+.binding-search-wrap {
+  position: relative;
+  flex: 1.4;
+  min-width: 0;
+  display: flex;
+}
+
+.binding-search-wrap input {
+  flex: 1;
+  min-width: 0;
+}
+
+.signal-search-overlay {
+  position: absolute;
+  top: 100%;
+  left: 0;
+  right: 0;
+  z-index: 5;
+  background: var(--panel);
+  max-height: 160px;
+}
+
+.binding-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 4px;
+  flex-wrap: nowrap;
+}
+
+.binding-row > * {
+  min-width: 0;
+}
+
+.binding-row > button {
+  flex-shrink: 0;
+}
+
+.binding-row .binding-inline {
+  flex: 1;
+  min-width: 0;
+}
+
 /* ---- trace (scroll) view ---- */
 
 .msg-display {
@@ -1166,12 +1231,30 @@ select.tx-signal-input {
 }
 
 .syslog-idlist {
-  width: 240px;
   flex-shrink: 0;
   display: flex;
   flex-direction: column;
   min-height: 0;
   gap: 4px;
+}
+
+/* 좌측 목록 ↔ 그래프 사이 가로폭 조절 핸들 (TxBox 상/하 분할과 동일 패턴) */
+.syslog-split-drag {
+  flex: none;
+  width: 9px;
+  display: flex;
+  align-items: stretch;
+  cursor: col-resize;
+}
+.syslog-split-drag::after {
+  content: '';
+  width: 3px;
+  background: var(--border);
+  border-radius: 2px;
+  margin: 0 auto;
+}
+.syslog-split-drag:hover::after {
+  background: var(--accent);
 }
 
 .syslog-section-title {

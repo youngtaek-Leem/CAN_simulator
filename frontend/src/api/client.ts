@@ -317,6 +317,17 @@ export const api = {
   deleteLayout: (name: string) =>
     request(`/api/layouts/${encodeURIComponent(name)}`, { method: 'DELETE' }),
 
+  // sysLog 취득 (UDS Upload: 10 03 / 22 F1 20 / [27 11-12] / 35 / 36 ZZ / 37)
+  syslogUploadStatus: (tail?: number) =>
+    request<import('../types').SysLogUploadStatus>(
+      `/api/syslog_upload/status${tail !== undefined ? `?tail=${tail}` : ''}`,
+    ),
+  syslogUploadStart: (request_id: number, response_id: number, address: number, security_enable: boolean) =>
+    post<import('../types').SysLogUploadStatus>('/api/syslog_upload/start', {
+      request_id, response_id, address, security_enable,
+    }),
+  syslogUploadStop: () => post<import('../types').SysLogUploadStatus>('/api/syslog_upload/stop'),
+
   // OTA Tester (folder-driven: CLI/cli_config.json -> Testcases/<id>/*.json -> hook/testBlock XML+bin)
   otaTesterStatus: () => request<import('../types').OtaTesterStatus>('/api/ota_tester/status'),
   otaTesterCaseUploadXml: (

@@ -445,3 +445,56 @@ def parse_request_download_response(response: bytes) -> dict:
             info["length_format"] = lfi
             info["max_length"] = int.from_bytes(response[start:end], byteorder="big")
     return info
+
+
+# ---------------------------------------------------------------------------
+# Service 0x35 - RequestUpload (sysLog 취득용)
+# ---------------------------------------------------------------------------
+
+def build_request_upload(
+    data_format_identifier: int,
+    address_and_length_format_identifier: int,
+    memory_address: int,
+    memory_size: int,
+) -> bytearray:
+    """UDS RequestUpload (0x35) -- RequestDownload(0x34)와 동일 레이아웃."""
+    addr_len = (address_and_length_format_identifier >> 4) & 0xF
+    size_len = address_and_length_format_identifier & 0xF
+
+    result = bytearray([0x35, data_format_identifier,
+                         address_and_length_format_identifier])
+    result.extend(memory_address.to_bytes(addr_len, 'big'))
+    result.extend(memory_size.to_bytes(size_len, 'big'))
+    return result
+
+
+def parse_request_upload_response(response: bytes) -> dict:
+    """Parse RequestUpload positive response payload (0x75 ...).
+
+    Returns {"length_format", "max_length"} -- e.g. 75 20 04 02 means
+    length field 2 bytes, maxNumberOfBlockLength 1026
+    (= 1 SID + 1 blockSequenceCounter + 1024 data)."""
+    info = {"length_format": 0, "max_length": 0}
+    if len(response) >= 2 and response[0] == 0x75:
+        lfi = response[1] & 0x0F
+        if lfi == 0:
+            lfi = 2
+        start = 2
+        end = start + lfi
+        if end <= len(response):
+            info["length_format"] = lfi
+            info["max_length"] = int.from_bytes(response[start:end], byteorder="big")
+    return info
+
+
+def parse_memory_size_did(response: bytes, did: int = 0xF120) -> int:
+    """Parse a ReadDataByIdentifier positive response carrying a 4-byte
+    big-endian memory size (e.g. 62 F1 20 00 10 00 00 -> 0x00100000).
+    Returns -1 when the payload doesn't match."""
+    if (
+        len(response) >= 7
+        and response[0] == 0x62
+        and int.from_bytes(response[1:3], byteorder="big") == did
+    ):
+        return int.from_bytes(response[3:7], byteorder="big")
+    return -1

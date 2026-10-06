@@ -93,6 +93,8 @@ class SysLogRecord:
     abs_ms: int
     log_id: int
     value: int
+    # 원본 8바이트 (호버 툴팁 raw 표시용 -- 파싱 필드와 별개로 보관)
+    raw: bytes = b""
 
 
 def _decode_record(chunk: bytes, seq: int) -> SysLogRecord:
@@ -103,7 +105,7 @@ def _decode_record(chunk: bytes, seq: int) -> SysLogRecord:
     minute = (time_word >> MIN_SHIFT) & MIN_MASK
     ms = time_word & MS_MASK
     abs_ms = day * MS_PER_DAY + hour * MS_PER_HOUR + minute * MS_PER_MIN + ms
-    return SysLogRecord(seq, day, hour, minute, ms, abs_ms, log_id, value)
+    return SysLogRecord(seq, day, hour, minute, ms, abs_ms, log_id, value, bytes(chunk))
 
 
 def parse_log(data: bytes) -> list[SysLogRecord]:
@@ -267,6 +269,8 @@ def build_series(
                     "hour": recs[i].hour,
                     "minute": recs[i].minute,
                     "ms": recs[i].ms,
+                    "raw": recs[i].raw.hex(" ").upper(),
+                    "raw2": recs[i + 1].raw.hex(" ").upper(),
                 })
                 i += 2
             # 홀수 1개 잔류는 무시 (스펙)
@@ -280,6 +284,7 @@ def build_series(
                     "hour": rec.hour,
                     "minute": rec.minute,
                     "ms": rec.ms,
+                    "raw": rec.raw.hex(" ").upper(),
                 }
                 for rec in recs
             ]
