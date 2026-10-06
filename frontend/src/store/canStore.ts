@@ -394,6 +394,7 @@ class CanStore {
       });
       if (f.decoded) {
         const validNames = new Set(f.decoded.valid_signals);
+        const rawMap = f.decoded.raw_signals;
         for (const [sig, value] of Object.entries(f.decoded.signals)) {
           const key = `${f.decoded.name}.${sig}`;
           this.signals.set(key, value);
@@ -401,8 +402,17 @@ class CanStore {
             this.lastValidSignal.set(key, { ts: f.ts, message: f.decoded.name, signal: sig, value });
           }
           if (this.signalWatchers.has(key)) {
+            // Prefer the exact raw value: label strings are lossy when one
+            // VAL_ label covers several raw values (all chart as one).
+            // Falls back to the legacy label->raw reverse lookup (and plain
+            // numbers pass through) for payloads without raw_signals.
+            const rawValue = rawMap?.[sig];
             const numeric =
-              typeof value === 'number' ? value : this.choiceReverse.get(key)?.get(value);
+              rawValue !== undefined
+                ? rawValue
+                : typeof value === 'number'
+                  ? value
+                  : this.choiceReverse.get(key)?.get(value);
             if (numeric !== undefined) {
               const points = this.signalHistory.get(key)!;
               points.push({ ts: f.ts, value: numeric });

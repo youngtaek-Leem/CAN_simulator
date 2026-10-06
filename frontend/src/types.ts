@@ -50,6 +50,10 @@ export interface RxFrame {
     name: string;
     signals: Record<string, number | string>;
     valid_signals: string[];
+    // Exact raw value per signal (backend decode()). Preferred for charting:
+    // "signals" labels are lossy when several raw values share one VAL_
+    // label (e.g. "RESERVED" x23 collapses 8..30 onto one raw value).
+    raw_signals?: Record<string, number>;
   };
 }
 

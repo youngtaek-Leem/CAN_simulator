@@ -352,6 +352,13 @@ class DbcService:
             "valid_signals": [
                 s.name for s in message.signals if raw.get(s.name) != _invalid_raw(s)
             ],
+            # Exact raw value per signal. Labels in "signals" are lossy when
+            # several raw values share one VAL_ label (e.g. "RESERVED" x23):
+            # the frontend's label->raw reverse lookup then collapses them
+            # all onto one raw value on graphs. Prefer this for charting.
+            "raw_signals": {
+                s.name: raw.get(s.name) for s in message.signals
+            },
         }
 
     def decode_raw(self, frame_id: int, data: bytes) -> Optional[dict[str, int]]:

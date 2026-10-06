@@ -9,6 +9,29 @@ def make_service() -> DbcService:
     return svc
 
 
+def test_decode_raw_signals_disambiguates_duplicate_labels():
+    """VAL_ 라벨이 여러 raw 값을 가리키면("RESERVED" x23 같은) 라벨만으로는
+    원래 값을 복원할 수 없어 그래프가 한 값으로 뭉개진다. decode()는
+    raw_signals에 정확한 raw 값을 함께 담아야 한다 (Warn_Sound_EPB: 8 이상이
+    전부 한 값으로 표시되던 버그의 회귀 테스트)."""
+    svc = DbcService()
+    svc.load_string(
+        'VERSION ""\n'
+        "NS_ :\n"
+        "BS_:\n"
+        "BU_: TESTER\n"
+        "BO_ 100 TestMsg: 8 TESTER\n"
+        ' SG_ DupSig : 0|8@1+ (1,0) [0|0] "" TESTER\n'
+        'VAL_ 100 DupSig 0 "Off" 1 "On" 2 "Reserved" 3 "Reserved" ;\n',
+        "dup.dbc",
+    )
+    data = bytes.fromhex("02") + bytes(7)
+    decoded = svc.decode(0x64, data)
+    assert decoded is not None
+    assert decoded["signals"]["DupSig"] == "Reserved"
+    assert decoded["raw_signals"]["DupSig"] == 2
+
+
 def test_summary_structure():
     svc = make_service()
     summary = svc.summary()

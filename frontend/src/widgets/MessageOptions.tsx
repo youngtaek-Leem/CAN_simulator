@@ -326,10 +326,18 @@ export function ExtraBindingsEditor({
       }
     });
     const next = [...rows];
-    if (!nb?.signal || taken.has(bindingKey(nb))) {
+    const nbMsg = nb?.message ?? '';
+    const nbSig = nb?.signal ?? '';
+    if (!nbMsg && !nbSig) {
+      // 메시지 선택 해제 -- 빈 행으로 유지 (저장 시 정리됨)
+      next[i] = { ...next[i], message: '', signal: '' };
+    } else if (!nbSig) {
+      // 메시지 먼저 선택 (신호는 아직) -- 행 유지, 신호 선택 대기
+      next[i] = { ...next[i], message: nbMsg, signal: '' };
+    } else if (taken.has(`${nbMsg}.${nbSig}`)) {
       next.splice(i, 1);
     } else {
-      next[i] = { ...next[i], message: nb.message, signal: nb.signal };
+      next[i] = { ...next[i], message: nbMsg, signal: nbSig };
     }
     onChange(next);
   };
@@ -341,7 +349,7 @@ export function ExtraBindingsEditor({
           <CompactSignalPicker
             dbc={dbc}
             rxNode={rxNode}
-            binding={b?.signal ? b : undefined}
+            binding={b.message || b.signal ? b : undefined}
             onChange={(nb) => updateRow(i, nb)}
             messageLabelFor={messageLabelFor}
             showFilter={pickerFilter}
