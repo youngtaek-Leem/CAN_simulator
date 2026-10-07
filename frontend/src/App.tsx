@@ -988,6 +988,7 @@ function TopBar(props: TopBarProps) {
   const setFd = (v: boolean) => props.setCanConfig({ ...props.canConfig, fd: v });
   const setDataBitrate = (v: number) => props.setCanConfig({ ...props.canConfig, dataBitrate: v });
   const [showMore, setShowMore] = useState(false);
+  const [showContact, setShowContact] = useState(false);
   const moreRef = useRef<HTMLSpanElement>(null);
   const connected = canStore.status?.can.connected ?? false;
 
@@ -1104,8 +1105,12 @@ function TopBar(props: TopBarProps) {
   };
 
   return (
+    <>
     <header className="topbar">
-      <span className="logo">
+      <span className="logo" role="button" tabIndex={0} title="Contact me"
+        style={{ cursor: 'pointer' }}
+        onClick={() => setShowContact(true)}
+        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') setShowContact(true); }}>
         CAN Simulator <span className="app-version">{APP_VERSION}</span>
       </span>
       <button
@@ -1381,6 +1386,8 @@ function TopBar(props: TopBarProps) {
         ⚙ 최적화 설정
       </button>
     </header>
+    {showContact && <ContactModal onClose={() => setShowContact(false)} />}
+    </>
   );
 }
 
@@ -1416,6 +1423,22 @@ function StatusBar() {
       <span className="spacer" />
       <span>UI {canStore.getFps()} fps</span>
     </footer>
+  );
+}
+
+function ContactModal({ onClose }: { onClose: () => void }) {
+  return (
+    <div className="modal-backdrop" onClick={onClose}>
+      <div className="modal" onClick={(e) => e.stopPropagation()}>
+        <h3>Contact me</h3>
+        <p>
+          <a href="mailto:youngtaek.leem@harman.com">youngtaek.leem@harman.com</a>
+        </p>
+        <div className="modal-buttons">
+          <button onClick={onClose}>닫기</button>
+        </div>
+      </div>
+    </div>
   );
 }
 
