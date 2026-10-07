@@ -20,9 +20,12 @@ def test_virtual_roundtrip():
 
         peer.send(can.Message(arbitration_id=0x321, data=b"\x05", is_extended_id=False))
         time.sleep(0.3)
-        ids = [m.arbitration_id for m in cm.drain_rx()]
+        drained = cm.drain_rx()
+        ids = [m.arbitration_id for m, _host_ts in drained]
         assert 0x123 in ids  # own message (receive_own_messages=True)
         assert 0x321 in ids
+        for _m, host_ts in drained:
+            assert abs(host_ts - time.time()) < 5.0
         assert cm.counters["tx"] == 1
     finally:
         peer.shutdown()
@@ -148,3 +151,34 @@ def test_default_tx_gap_is_zero_for_vector_and_virtual_but_guarded_for_pcan():
     cm3.config = {"interface": "pcan"}
     assert cm3.default_tx_gap_s() == pytest.approx(can_manager.PCAN_MIN_TX_GAP_S)
     assert CanManager().default_tx_gap_s() == 0.0  # disconnected -> fast
+
+
+def test_pcan_leading_driver_timestamp_falls_back_to_host_time():
+    """Windows P-CAN FD 실측 회귀 테스트: 드라이버 ts가 epoch보다 약 +20s
+    앞서 들어오면 effective_timestamp()는 호스트 수신시각을 써야 한다.
+    그렇지 않으면 프론트 nowMs()가 -20000ms에서 시작해 신호 변경이
+    20초 후에 그래프에 나타난다."""
+    cm = CanManager()
+    cm.config = {"interface": "pcan", "epoch_aligned": True}
+    host = time.time()
+    assert cm.effective_timestamp(host + 20.0, host) == pytest.approx(host)
+    # 정상 지터(수백ms)는 드라이버 ts를 그대로 쓴다 (정밀도 유지)
+    assert cm.effective_timestamp(host + 0.05, host) == pytest.approx(host + 0.05)
+
+
+def test_pcan_not_epoch_aligned_always_uses_host_time():
+    """boottimeEpoch==0 (uptime 패키지 없음) PCAN은 skew 크기와 무관하게
+    항상 호스트 시각을 쓴다."""
+    cm = CanManager()
+    cm.config = {"interface": "pcan", "epoch_aligned": False}
+    host = time.time()
+    assert cm.effective_timestamp(host + 0.05, host) == pytest.approx(host)
+    assert cm.effective_timestamp(host, host) == pytest.approx(host)
+
+
+def test_virtual_never_corrects_driver_timestamp():
+    """virtual/Vector는 항상 드라이버 ts를 신뢰한다."""
+    cm = CanManager()
+    cm.config = {"interface": "virtual", "epoch_aligned": True}
+    host = time.time()
+    assert cm.effective_timestamp(host + 20.0, host) == pytest.approx(host + 20.0)

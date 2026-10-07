@@ -737,8 +737,12 @@ function SignalChart({
     let xMin = xViewRef.current.xMin;
     let xMax = xViewRef.current.xMax;
     if (xMin === null || xMax === null) {
-      const now = paused && frozenXMax !== null ? frozenXMax : canStore.nowMs();
-      xMax = now;
+      const rawNow = paused && frozenXMax !== null ? frozenXMax : canStore.nowMs();
+      // Driver-clock skew guard: nowMs() is already arrival-anchored and
+      // clamped >= 0, but an old frozen value (or old backend) could still
+      // hand a negative xMax here -- never let xMin end up above xMax
+      // (that rendered as "start -20000ms" with new points hidden).
+      xMax = Math.max(0, rawNow);
       xMin = Math.max(0, xMax - xWindowMs);
       // 초기 + Pause 중에도 xMin이 0에서 시작해 단조 증가하도록 클램프
       // xMax가 window보다 작을 때는 0~xMax로 신축, 이후 window 폭 유지

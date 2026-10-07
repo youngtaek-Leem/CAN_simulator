@@ -21,6 +21,7 @@ needs different timing.
 """
 
 import threading
+import time
 from collections import deque
 from typing import Any, Optional
 
@@ -56,13 +57,27 @@ MAX_CLASSIC_DATA_LEN = 8
 PCAN_MIN_TX_GAP_S = 0.0002
 
 
+# PCAN 드라이버 타임스탬프가 벽시계(epoch)와 어긋났는지 판단하는 가드.
+# Windows P-CAN FD 실측: 드라이버 ts가 항상 epoch보다 약 +20s 앞서
+# 들어오며, 이 경우 GraphWidget의 nowMs()=Date.now()-timeBase*1000이
+# -20000ms에서 시작해 신호 변경이 20초 후에 그래프에 나타난다.
+# `epoch_aligned` 플래그만 믿지 않고, 호스트 수신시각과 2초 이상
+# 벌어지면 호스트 시각을 사용한다 (WS 30ms 플러시 + 버퍼 지연을
+# 감안해도 정상 지터는 수백ms 이하이므로 2s는 안전 마진).
+PCAN_TS_SKEW_GUARD_S = 2.0
+
+
 class _BufferListener(can.Listener):
-    def __init__(self, buffer: deque, counter: dict):
+    def __init__(self, buffer: deque, host_ts_buffer: deque, counter: dict):
         self._buffer = buffer
+        self._host_ts_buffer = host_ts_buffer
         self._counter = counter
 
     def on_message_received(self, msg: can.Message) -> None:
+        # can.Message는 __slots__라 임의 속성을 붙일 수 없어 호스트
+        # 수신시각(time.time, epoch seconds)을 병렬 덱에 함께 보관한다.
         self._buffer.append(msg)
+        self._host_ts_buffer.append(time.time())
         self._counter["rx"] += 1
 
     def on_error(self, exc: Exception) -> None:  # pragma: no cover
@@ -74,6 +89,7 @@ class CanManager:
         self.bus: Optional[can.BusABC] = None
         self.notifier: Optional[can.Notifier] = None
         self._rx_buffer: deque = deque(maxlen=rx_buffer_size)
+        self._rx_host_ts: deque = deque(maxlen=rx_buffer_size)
         self._lock = threading.Lock()
         self.counters = {"rx": 0, "tx": 0, "errors": 0}
         self.config: dict[str, Any] = {}
@@ -130,7 +146,7 @@ class CanManager:
                 kwargs["bitrate"] = bitrate
         self.bus = can.Bus(**kwargs)
         self.notifier = can.Notifier(
-            self.bus, [_BufferListener(self._rx_buffer, self.counters)], timeout=0.1
+            self.bus, [_BufferListener(self._rx_buffer, self._rx_host_ts, self.counters)], timeout=0.1
         )
         self.fd_enabled = fd
         self.config = {
@@ -169,6 +185,7 @@ class CanManager:
         self.config = {}
         self.fd_enabled = False
         self._rx_buffer.clear()
+        self._rx_host_ts.clear()
         self.counters.update({"rx": 0, "tx": 0, "errors": 0})
 
     def send(
@@ -229,14 +246,38 @@ class CanManager:
 
     def clear_rx(self) -> None:
         self._rx_buffer.clear()
+        self._rx_host_ts.clear()
 
-    def drain_rx(self, max_messages: int = 2000) -> list[can.Message]:
+    def effective_timestamp(self, hw_ts: float, host_ts: float) -> float:
+        """그래프/WS에 내보낼 최종 타임스탬프(epoch seconds).
+
+        정상이면 드라이버 ts(hw_ts)를 그대로 쓰고, PCAN처럼 드라이버
+        시계가 벽시계와 어긋난 경우(플래그 False 또는 2s 이상 skew)에는
+        호스트 수신시각을 쓴다. virtual/Vector는 항상 hw_ts 경로."""
+        if self.config.get("interface") == "pcan":
+            if not self.config.get("epoch_aligned", True):
+                return host_ts
+            if abs(hw_ts - host_ts) > PCAN_TS_SKEW_GUARD_S:
+                return host_ts
+        return hw_ts
+
+    def drain_rx(self, max_messages: int = 2000) -> list:
+        """버퍼를 비워 (msg, host_ts) 튜플 리스트로 반환한다.
+
+        host_ts는 Notifier 스레드가 on_message_received 시점에 찍은
+        time.time() (epoch seconds)이며, PCAN 드라이버 ts skew 보정용.
+        기존 호출부(main._broadcast_loop, tests)는 튜플 언패킹한다."""
         out = []
         for _ in range(max_messages):
             try:
-                out.append(self._rx_buffer.popleft())
+                msg = self._rx_buffer.popleft()
             except IndexError:
                 break
+            try:
+                host_ts = self._rx_host_ts.popleft()
+            except IndexError:  # pragma: no cover - 병렬 덱 불일치 방어
+                host_ts = time.time()
+            out.append((msg, host_ts))
         return out
 
     def status(self) -> dict:

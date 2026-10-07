@@ -40,6 +40,12 @@ export interface DbcSummary {
 
 export interface RxFrame {
   ts: number;
+  /** Driver timestamp as reported by python-can (may lead wall-clock by
+   * ~20s on Windows P-CAN FD). Present on new backends for diagnostics. */
+  hw_ts?: number;
+  /** Host receipt time (time.time() at Notifier callback, epoch seconds).
+   * Present on new backends; preferred when ts/hw_ts is skewed. */
+  host_ts?: number;
   id: number;
   ext: boolean;
   dlc: number;

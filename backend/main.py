@@ -314,9 +314,15 @@ async def _diag_timing_middleware(request, call_next):
 # ---- WebSocket: RX stream + status ------------------------------------
 
 
-def _frame_to_dict(msg, do_decode: bool = True) -> dict:
+def _frame_to_dict(msg, host_ts: float | None = None, do_decode: bool = True) -> dict:
+    hw_ts = msg.timestamp
+    if host_ts is None:
+        host_ts = time.time()
+    ts = can_manager.effective_timestamp(hw_ts, host_ts)
     d = {
-        "ts": msg.timestamp,
+        "ts": ts,
+        "hw_ts": hw_ts,
+        "host_ts": host_ts,
         "id": msg.arbitration_id,
         "ext": msg.is_extended_id,
         "dlc": msg.dlc,
@@ -371,7 +377,7 @@ async def _broadcast_loop() -> None:
             # only decode first 500 when overloaded, rest as raw
             do_decode_limit = 500
             await _broadcast(
-                {"type": "rx", "frames": [_frame_to_dict(m, i < do_decode_limit) for i, m in enumerate(frames)]}
+                {"type": "rx", "frames": [_frame_to_dict(m, h, i < do_decode_limit) for i, (m, h) in enumerate(frames)]}
             )
         now = time.monotonic()
         if now - last_status >= 0.5:

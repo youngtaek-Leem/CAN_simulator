@@ -40,7 +40,7 @@ const TESTRUNNER_POLL_MS = 400; // matches TestRunnerBox's own poll cadence
 const TRACE_REVEAL_PER_TICK = 80;
 
 export interface HistoryPoint {
-  ts: number; // raw backend timestamp (seconds)
+  ts: number; // effective backend timestamp (seconds, PCAN skew-corrected)
   value: number;
 }
 
@@ -97,6 +97,12 @@ class CanStore {
   // by the backend as a string label) can still be charted numerically.
   private choiceReverse = new Map<string, Map<string, number>>();
   timeBase: number | null = null; // ts of the first frame after (re)start = 0 ms
+  // Arrival-anchored "now" bookkeeping (PCAN skew guard, frontend half of
+  // the A+B fix): last effective frame ts + wall-clock at ingest time, so
+  // nowMs() tracks the data timeline instead of blindly doing
+  // Date.now()-timeBase (which goes -20000ms when the driver clock leads).
+  private lastRxTs: number | null = null;
+  private lastRxWallMs: number | null = null;
   status: BackendStatus | null = null;
   wsConnected = false;
 
@@ -381,10 +387,30 @@ class CanStore {
     }
   }
 
+  /** Driver-vs-host skew guard (mirrors backend PCAN_TS_SKEW_GUARD_S).
+   * New backends already send corrected `ts`, but an old backend (or a
+   * cached page) may still send skewed `ts` with `host_ts` attached --
+   * pick host time when they disagree by >2s so graphs never start at
+   * -20000ms. */
+  private static SKEW_GUARD_S = 2.0;
+
+  static effectiveTs(f: RxFrame): number {
+    if (typeof f.host_ts === 'number' && Number.isFinite(f.host_ts)) {
+      if (Math.abs(f.ts - f.host_ts) > CanStore.SKEW_GUARD_S) return f.host_ts;
+    }
+    return f.ts;
+  }
+
   ingestFrames(rx: RxFrame[]) {
     if (rx.length === 0) return;
-    if (this.timeBase === null) this.timeBase = rx[0].ts;
-    for (const f of rx) {
+    // Normalize once so timeBase/trace/history/cycleMs all share the same
+    // skew-corrected timeline (P-CAN FD on Windows leads by ~20s).
+    const normed: RxFrame[] = rx.map((f) => {
+      const ets = CanStore.effectiveTs(f);
+      return ets === f.ts ? f : { ...f, ts: ets };
+    });
+    if (this.timeBase === null) this.timeBase = normed[0].ts;
+    for (const f of normed) {
       const prev = this.frames.get(f.id);
       const cycleMs = prev ? (f.ts - prev.ts) * 1000 : null;
       this.frames.set(f.id, {
@@ -426,12 +452,18 @@ class CanStore {
       }
       this.trace.push(f);
     }
+    // Arrival anchor for nowMs(): last effective ts + wall-clock at ingest.
+    // Makes the rolling window follow the data timeline even if a driver
+    // clock still disagrees with Date.now(), and keeps scrolling during
+    // quiet-bus gaps via wall elapsed.
+    this.lastRxTs = normed[normed.length - 1].ts;
+    this.lastRxWallMs = Date.now();
     // prune the trace buffer: drop frames older than the window, then cap.
     // Each splice removes from the front, so revealedCount (an index into
     // this same array) must shrink by the same amount to keep pointing at
     // the same conceptual position -- otherwise it would silently jump
     // ahead relative to the remaining content once older rows are dropped.
-    const cutoff = rx[rx.length - 1].ts - TRACE_WINDOW_S;
+    const cutoff = normed[normed.length - 1].ts - TRACE_WINDOW_S;
     let stale = 0;
     while (stale < this.trace.length && this.trace[stale].ts < cutoff) stale++;
     if (stale > 0) {
@@ -470,16 +502,28 @@ class CanStore {
   private frozenNowMs: number | null = null;
 
   /** Current wall-clock position on the same timeline as relMs(), so a
-   * rolling time window can keep scrolling even between samples (backend
-   * and frontend share the same clock -- this is a local-only tool). Frozen
-   * while globally stopped (see ingestStatus()). */
+   * rolling time window can keep scrolling even between samples. Frozen
+   * while globally stopped (see ingestStatus()).
+   *
+   * Arrival-anchored: relMs(lastRxTs) + wall elapsed since that batch
+   * arrived, instead of Date.now()-timeBase. Identical to the old formula
+   * when driver and wall clocks agree, but immune to a leading driver
+   * clock (P-CAN +20s -> old formula started at -20000ms and hid new
+   * points for 20s). Never returns negative. */
   nowMs(): number {
     if (this.frozenNowMs !== null) return this.frozenNowMs;
-    return this.timeBase === null ? 0 : Date.now() - this.timeBase * 1000;
+    if (this.timeBase === null) return 0;
+    if (this.lastRxTs !== null && this.lastRxWallMs !== null) {
+      const anchored = (this.lastRxTs - this.timeBase) * 1000 + (Date.now() - this.lastRxWallMs);
+      return Math.max(0, anchored);
+    }
+    return Math.max(0, Date.now() - this.timeBase * 1000);
   }
 
   resetTimeBase() {
     this.timeBase = null;
+    this.lastRxTs = null;
+    this.lastRxWallMs = null;
     this.trace = [];
     this._revealedCount = 0;
     for (const key of this.signalHistory.keys()) this.signalHistory.set(key, []);
