@@ -37,17 +37,17 @@ export const WIDGET_REGISTRY: Record<WidgetType, WidgetMeta> = {
   button: {
     label: '버튼',
     component: ButtonWidget,
-    defaultSize: { w: 2, h: 2, minW: 1, minH: 1 },
+    defaultSize: { w: 2, h: 3, minW: 1, minH: 1 },
   },
   checkbox: {
     label: '체크박스',
     component: CheckboxWidget,
-    defaultSize: { w: 2, h: 2, minW: 1, minH: 1 },
+    defaultSize: { w: 2, h: 3, minW: 1, minH: 1 },
   },
   dropdown: {
     label: '드롭다운',
     component: DropdownWidget,
-    defaultSize: { w: 2, h: 2, minW: 2, minH: 1 },
+    defaultSize: { w: 2, h: 3, minW: 2, minH: 1 },
   },
   slider: {
     label: '슬라이더',
@@ -62,57 +62,57 @@ export const WIDGET_REGISTRY: Record<WidgetType, WidgetMeta> = {
   functionButton: {
     label: 'Function 버튼',
     component: FunctionButtonWidget,
-    defaultSize: { w: 2, h: 2, minW: 1, minH: 1 },
+    defaultSize: { w: 2, h: 3, minW: 1, minH: 1 },
   },
   randomButton: {
     label: 'Random 버튼',
     component: RandomButtonWidget,
-    defaultSize: { w: 2, h: 2, minW: 1, minH: 1 },
+    defaultSize: { w: 2, h: 3, minW: 1, minH: 1 },
   },
   multiButton: {
     label: '멀티 버튼',
     component: MultiButtonWidget,
-    defaultSize: { w: 6, h: 5, minW: 1, minH: 2 },
+    defaultSize: { w: 7, h: 5, minW: 1, minH: 2 },
   },
   multiCheckbox: {
     label: '멀티 체크박스',
     component: MultiCheckboxWidget,
-    defaultSize: { w: 6, h: 5, minW: 1, minH: 2 },
+    defaultSize: { w: 7, h: 5, minW: 1, minH: 2 },
   },
   multiDropdown: {
     label: '멀티 드롭다운',
     component: MultiDropdownWidget,
-    defaultSize: { w: 6, h: 5, minW: 1, minH: 2 },
+    defaultSize: { w: 7, h: 5, minW: 1, minH: 2 },
   },
   multiSlider: {
     label: '멀티 슬라이더',
     component: MultiSliderWidget,
-    defaultSize: { w: 8, h: 5, minW: 1, minH: 2 },
+    defaultSize: { w: 9, h: 7, minW: 1, minH: 2 },
   },
   multiManualValue: {
     label: '멀티 입력 박스',
     component: MultiManualValueWidget,
-    defaultSize: { w: 8, h: 7, minW: 1, minH: 2 },
+    defaultSize: { w: 9, h: 7, minW: 1, minH: 2 },
   },
   functionMultiButton: {
     label: '멀티 Function 버튼',
     component: FunctionMultiButtonWidget,
-    defaultSize: { w: 6, h: 5, minW: 1, minH: 2 },
+    defaultSize: { w: 7, h: 5, minW: 1, minH: 2 },
   },
   randomMultiButton: {
     label: '멀티 Random 버튼',
     component: RandomMultiButtonWidget,
-    defaultSize: { w: 6, h: 5, minW: 1, minH: 2 },
+    defaultSize: { w: 7, h: 5, minW: 1, minH: 2 },
   },
   txBox: {
     label: 'CAN 메시지 전송[IG]',
     component: TxBox,
-    defaultSize: { w: 12, h: 10, minW: 4, minH: 3 },
+    defaultSize: { w: 12, h: 16, minW: 4, minH: 3 },
   },
   isotpTx: {
     label: 'ISO-TP 메시지 전송[UDS]',
     component: IsoTpBox,
-    defaultSize: { w: 10, h: 12, minW: 1, minH: 2 },
+    defaultSize: { w: 10, h: 16, minW: 1, minH: 2 },
   },
   canMessageDisplay: {
     label: 'CAN 메시지 표시창',
@@ -137,7 +137,7 @@ export const WIDGET_REGISTRY: Record<WidgetType, WidgetMeta> = {
   testRunner: {
     label: '테스트 Sequence 실행기',
     component: TestRunnerBox,
-    defaultSize: { w: 14, h: 12, minW: 4, minH: 3 },
+    defaultSize: { w: 14, h: 18, minW: 4, minH: 3 },
   },
   udsSwdl: {
     label: 'CAN-SWDL',
@@ -152,22 +152,22 @@ export const WIDGET_REGISTRY: Record<WidgetType, WidgetMeta> = {
   audioMonitor: {
     label: '오디오 신호 모니터',
     component: AudioMonitorWidget,
-    defaultSize: { w: 11, h: 12, minW: 3, minH: 2 },
+    defaultSize: { w: 12, h: 16, minW: 4, minH: 3 },
   },
   canAudioLatency: {
     label: 'CAN-오디오 멀티뷰',
     component: CanAudioLatencyWidget,
-    defaultSize: { w: 8, h: 10, minW: 3, minH: 3 },
+    defaultSize: { w: 12, h: 16, minW: 4, minH: 3 },
   },
   sysLogAnalysis: {
     label: 'sysLog 분석',
     component: SysLogAnalysisWidget,
-    defaultSize: { w: 12, h: 14, minW: 4, minH: 3 },
+    defaultSize: { w: 14, h: 16, minW: 4, minH: 3 },
   },
   canLogAnalysis: {
     label: 'CAN log 분석',
     component: CanLogAnalysisWidget,
-    defaultSize: { w: 12, h: 14, minW: 4, minH: 3 },
+    defaultSize: { w: 14, h: 16, minW: 4, minH: 3 },
   },
   sysLogUpload: {
     label: 'sysLog 취득',
@@ -177,7 +177,7 @@ export const WIDGET_REGISTRY: Record<WidgetType, WidgetMeta> = {
   powerControl: {
     label: '전원 컨트롤',
     component: PowerControlWidget,
-    defaultSize: { w: 6, h: 14, minW: 3, minH: 6 },
+    defaultSize: { w: 5, h: 18, minW: 3, minH: 6 },
   },
   textDisplay: {
     label: '텍스트 표시창',
