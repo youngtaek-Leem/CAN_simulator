@@ -198,6 +198,19 @@ syslog_upload_manager = SysLogUploadManager(
     log_dir=CAN_LOG_DIR,
 )
 
+# ---- MCP (Model Context Protocol) ---------------------------------------
+# AI 클라이언트가 simulator 전체 기능을 쓸 수 있도록 동일 서비스 객체를
+# MCP 도구로 공개한다. mcp_server는 main을 import하지 않고(순환 방지)
+# bind_services()로 주입받는다. 전송: Streamable HTTP(/mcp) + stdio(mcp_stdio.py).
+try:
+    import mcp_server
+
+    _MCP_AVAILABLE = True
+except ImportError:
+    # mcp 패키지 미설치 환경에서도 백엔드 자체는 정상 동작한다.
+    mcp_server = None  # type: ignore[assignment]
+    _MCP_AVAILABLE = False
+
 
 def _power_measurement_busy() -> bool:
     """CAN-SWDL/OTA Tester 실행 중에는 파워 실시간 측정을 스킵한다 (부하
@@ -222,6 +235,51 @@ settings = {"ws_flush_ms": 30}
 run_state = {"running": True}
 ws_clients: set[WebSocket] = set()
 
+if _MCP_AVAILABLE:
+    # settings/run_state 정의 이후에 바인딩 (위 import 블록은 순환 방지용).
+    mcp_server.bind_services(
+        can_manager=can_manager,
+        dbc_service=dbc_service,
+        tx_scheduler=tx_scheduler,
+        replay_service=replay_service,
+        log_service=log_service,
+        power_supply_service=power_supply_service,
+        audio_service=audio_service,
+        syslog_service=syslog_service,
+        can_log_service=can_log_service,
+        test_runner_service=test_runner_service,
+        seedkey_service=seedkey_service,
+        uds_download_manager=uds_download_manager,
+        ota_tester_manager=ota_tester_manager,
+        syslog_upload_manager=syslog_upload_manager,
+        settings=settings,
+        run_state=run_state,
+        layout_dir=LAYOUT_DIR,
+        base_dir=BASE_DIR,
+    )
+
+
+@asynccontextmanager
+async def _maybe_mcp_session():
+    """MCP StreamableHTTP 세션 매니저 진입. 마운트된 서브앱의 lifespan은
+    이 앱의 커스텀 lifespan과 함께 전파되지 않으므로(동작 확인됨),
+    SDK가 공식 노출한 session_manager를 호스트 lifespan에서 직접 진입시킨다
+    (mcp/fastmcp/server.py docstring의 "mounting in a single FastAPI" 용법).
+    session_manager.run()은 인스턴스당 1회용이므로 프로세스 첫 lifespan에서만
+    진입한다 — 실서버(uvicorn)는 lifespan이 1회라 정상 동작하고, 테스트처럼
+    TestClient를 여러 번 열고닫는 경우 두 번째부터는 MCP 세션 없이 REST만
+    동작한다(해당 테스트들은 /mcp를 쓰지 않으므로 영향 없음)."""
+    global _mcp_session_started
+    if _MCP_AVAILABLE and not _mcp_session_started:
+        _mcp_session_started = True
+        async with mcp_server.mcp.session_manager.run():
+            yield
+    else:
+        yield
+
+
+_mcp_session_started = False
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -233,7 +291,8 @@ async def lifespan(app: FastAPI):
     TESTRUNNER_GOLDEN_DIR.mkdir(parents=True, exist_ok=True)
     timer_util.enable_1ms_timer()
     broadcaster = asyncio.create_task(_broadcast_loop())
-    yield
+    async with _maybe_mcp_session():
+        yield
     shutdown_logger.info("lifespan shutdown starting")
     broadcaster.cancel()
     shutdown_logger.info("test_runner_service.stop() starting")
@@ -270,6 +329,37 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+if _MCP_AVAILABLE:
+    # MCP Streamable HTTP — AI 클라이언트용.
+    # app.mount("/mcp", ...) 대신 ASGI 프록시 라우트로 등록한다:
+    # Starlette Mount는 정확히 "/mcp"(trailing slash 없음) 요청을 405로
+    # 거부하므로(동작 확인됨), "/mcp"와 "/mcp/..." 모두 내부 앱 기준으로
+    # 정규화해 전달한다. 내부 앱은 streamable_http_path="/" 로 생성된다
+    # (mcp_server.py — 기본값 "/mcp"를 두면 /mcp/mcp 이중 prefix가 된다).
+    # ("/" StaticFiles catch-all보다 먼저 등록되어야 가려지지 않는다.)
+    _mcp_asgi_app = mcp_server.mcp.streamable_http_app()
+
+    class _McpProxy:
+        """Raw ASGI endpoint (class이므로 request_response 래핑 없이
+        (scope, receive, send) 그대로 받는다)."""
+
+        async def __call__(self, scope, receive, send) -> None:
+            if scope["type"] not in ("http", "websocket"):
+                return
+            scope = dict(scope)
+            orig_path: str = scope.get("path", "")
+            rest = orig_path[len("/mcp"):] if orig_path.startswith("/mcp") else orig_path
+            if not rest.startswith("/"):
+                rest = "/" + rest
+            scope["root_path"] = scope.get("root_path", "") + "/mcp"
+            scope["path"] = rest
+            if scope.get("raw_path") is not None:
+                scope["raw_path"] = rest.encode("ascii")
+            await _mcp_asgi_app(scope, receive, send)
+
+    app.router.add_route("/mcp", _McpProxy(), methods=["GET", "POST", "DELETE"])
+    app.router.add_route("/mcp/{_rest:path}", _McpProxy(), methods=["GET", "POST", "DELETE"])
 
 
 @app.middleware("http")

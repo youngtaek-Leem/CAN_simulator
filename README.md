@@ -227,7 +227,7 @@ PyVISA/SCPI 파워서플라이를 직접 제어하는 위젯(`backend/power_supp
 
 ```bash
 cd backend
-.venv/bin/python -m pytest tests/          # 219개 테스트 (virtual 버스 기반, 하드웨어 불필요)
+.venv/bin/python -m pytest tests/          # 468개 테스트 (virtual 버스 기반, 하드웨어 불필요)
 ```
 
 Power/Audio 관련 테스트는 실제 VISA 장비·오디오 장치가 없는 환경에서도 "미연결/우아한
@@ -236,11 +236,74 @@ Power/Audio 관련 테스트는 실제 VISA 장비·오디오 장치가 없는 �
 샘플 데이터: `samples/sample.dbc`(CAN-FD 메시지 `FdSensorData` 포함), `samples/sample.asc`,
 `samples/sample.blf` (재생성: `backend/.venv/bin/python samples/make_sample_logs.py`)
 
+## 버전·브랜치 운용
+
+1.x 계열은 minor 업데이트(`Rev1.1`, `Rev1.2`…)를 계속하고, 대기능 변경인 2.0은
+별도 브랜치에서 개발한다. 태그는 `Rev` 표기 annotated 태그를 쓴다
+(긴급 패치는 `Rev1.2.1` 형태 3자리).
+
+| 브랜치 | 용도 |
+|---|---|
+| `main` | 1.x 안정 라인. 평소 개발·릴리즈는 전부 여기, `Rev1.1`… 태그 |
+| `dev-2.0` | 2.0 대기능 개발 전용 (`Rev1.0`에서 분기). 완성 시 `main`에 병합 후 `Rev2.0` 태그 |
+| `hotfix/*` | 긴급 수정용 임시 브랜치. `main`에 병합 후 삭제 |
+
+```bash
+# 1.x 개발 (평소)
+git switch main            # 작업·커밋·push
+git tag -a Rev1.1 -m "Rev1.1 ..." && git push origin Rev1.1
+gh release create Rev1.1 --title "Rev1.1" --notes "..."   # GitHub Release
+
+# 2.0 개발
+git switch dev-2.0         # 2.0 작업은 이 브랜치에서만
+
+# 1.x 수정분을 2.0에 반영 (주기적으로)
+git switch dev-2.0 && git merge main
+
+# 2.0 완성 시
+git switch main && git merge dev-2.0   # → Rev2.0 태그 + Release
+
+# 릴리즈된 버전 가져오기
+git fetch --tags
+git checkout Rev1.0                    # 살펴보기 (detached HEAD)
+git switch -c hotfix/xxx Rev1.2        # 해당 버전에서 이어서 개발
+git clone --branch Rev1.0 <repo-url>    # 새로 클론
+```
+
+`git push`는 태그를 올리지 않으므로 태그는 반드시 별도로 push한다
+(`git push origin <태그명>`). 일반 `push` 후 태그 push를 잊으면 GitHub에
+릴리즈가 안 보인다.
+
+## AI 연동 (MCP)
+
+백엔드 전체 기능(연결·DBC·TX·Replay·ISO-TP·TestRunner·UDS SWDL·OTA·Power·Audio·
+SysLog/CanLog 분석·레이아웃)을 MCP(Model Context Protocol) **42개 도구**로 공개한다.
+상세: [docs/MCP_INTEGRATION.md](docs/MCP_INTEGRATION.md).
+
+- **Streamable HTTP (범용 — 웹 AI·Copilot 등)**: 백엔드 실행 후
+  `http://127.0.0.1:8000/mcp` 로 MCP 클라이언트 연결
+  (Inspector: `npx @modelcontextprotocol/inspector` → Transport `Streamable HTTP`).
+  uvicorn 프로세스 내장이라 CAN 버스 상태를 GUI와 공유한다 — 하드웨어 제어는 이 방식 권장.
+- **stdio (Claude Desktop/Code 로컬)**: `backend/.venv/bin/python backend/mcp_stdio.py`
+  (`.mcp.json`·`claude_desktop_config.json`의 command/args에 등록).
+  별도 프로세스라 버스 상태를 공유하지 않으므로 DBC 조회·스크립트 작성 등 비상태성 작업에 적합.
+- **안전**: 전원 출력 변경·UDS 플래시·OTA 실행·SeedKey DLL 로드·서버 종료는
+  `confirm=True` 없으면 코드 레벨에서 거부된다.
+- **제약**: MCP에는 파일 업로드가 없어 바이너리 아티팩트(BLF/BIN/DLL 등)는 서버 로컬
+  경로로 전달하고, WebSocket 실시간 스트림은 `canlog_query`·`can_status` 폴링으로 대체한다.
+
+```bash
+cd backend
+.venv/bin/python -m pytest tests/test_mcp_server.py -v   # MCP 17 테스트
+```
+
 ## 디렉터리 구조
 
 ```
 backend/
-  main.py                          FastAPI 앱 + REST/WebSocket 엔드포인트
+  main.py                          FastAPI 앱 + REST/WebSocket 엔드포인트 (+ MCP `/mcp`)
+  mcp_server.py                    MCP 42 tools (FastMCP, AI 연동)
+  mcp_stdio.py                     MCP stdio 진입점 (Claude Desktop/Code 로컬용)
   can_manager.py                   CAN 버스 연결/송수신 (virtual/PCAN/Vector, classic+FD)
   dbc_service.py                   DBC 파싱, 신호 인코딩/디코딩, Event/Periodic 판별
   tx_scheduler.py                  주기/이벤트 송신 스케줄러, 값 생성기(Random/Range)
