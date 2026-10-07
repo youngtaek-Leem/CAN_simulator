@@ -9,7 +9,7 @@ import { createPortal } from 'react-dom';
 import { api } from '../api/client';
 import { findSignal, signalBitMax, signalRawBounds, useApp } from '../store/appContext';
 import { canStore, useCanVersion } from '../store/canStore';
-import { parseFlexibleInt, sendButtonBindings, sendValueToBindings } from './controls';
+import { parseFlexibleInt, sendButtonBindings, sendCheckboxBindings, sendValueToBindings } from './controls';
 import {
   CompactSignalPicker,
   ExtraBindingsEditor,
@@ -129,7 +129,7 @@ export function MultiButtonWidget({ config }: { config: WidgetConfig }) {
 }
 
 export function MultiCheckboxWidget({ config }: { config: WidgetConfig }) {
-  const { editMode } = useApp();
+  const { editMode, dbc } = useApp();
   const { rows, cols, cells } = getGrid(config);
   const updateCell = useCellUpdater(config);
   const [editingIndex, setEditingIndex] = useState<number | null>(null);
@@ -137,10 +137,27 @@ export function MultiCheckboxWidget({ config }: { config: WidgetConfig }) {
 
   const toggle = async (i: number, cell: MultiCell, checked: boolean) => {
     updateCell(i, { ...cell, checked });
-    if (!cell.binding?.signal) return;
-    const value = checked ? (cell.onValue ?? 1) : (cell.offValue ?? 0);
     try {
-      await canStore.sendSignal(cell.binding.message, { [cell.binding.signal]: value });
+      await sendCheckboxBindings(
+        [
+          ...(cell.binding?.signal
+            ? [{
+              binding: cell.binding,
+              onValue: Number(cell.onValue ?? 1),
+              offValue: Number(cell.offValue ?? 0),
+            }]
+            : []),
+          ...((cell.extraBindings as ExtraBinding[] | undefined) ?? [])
+            .filter((b) => b?.signal)
+            .map((b) => ({
+              binding: { message: b.message, signal: b.signal },
+              onValue: b.onValue ?? 1,
+              offValue: b.offValue ?? 0,
+            })),
+        ],
+        checked,
+        dbc,
+      );
       setError(null);
     } catch (e) {
       setError((e as Error).message);
@@ -155,14 +172,21 @@ export function MultiCheckboxWidget({ config }: { config: WidgetConfig }) {
       >
         {Array.from({ length: rows * cols }, (_, i) => {
           const cell = cells[i] ?? {};
-          const label = cell.label || cell.binding?.signal || `#${i + 1}`;
+          const extraList = ((cell.extraBindings as ExtraBinding[] | undefined) ?? []).filter((b) => b?.signal);
+          const label = cell.label || cell.binding?.signal || (extraList.length > 0 ? `+외 ${extraList.length}개` : `#${i + 1}`);
+          const labelTitle = [
+            ...(cell.binding?.signal
+              ? [`${cell.binding.message}.${cell.binding.signal} ON=${cell.onValue ?? 1} OFF=${cell.offValue ?? 0}`]
+              : []),
+            ...extraList.map((b) => `${b.message}.${b.signal} ON=${b.onValue ?? 1} OFF=${b.offValue ?? 0}`),
+          ].join('\n');
           return (
             <div className="multi-cell" key={i}>
-              <label className="check-label multi-cell-check">
+              <label className="check-label multi-cell-check" title={labelTitle || undefined}>
                 <input
                   type="checkbox"
                   checked={cell.checked ?? false}
-                  disabled={!cell.binding?.signal}
+                  disabled={!(cell.binding?.signal || extraList.length > 0)}
                   onChange={(e) => toggle(i, cell, e.target.checked)}
                   onKeyDown={(e) => {
                     if (e.key === ' ') {
@@ -812,7 +836,7 @@ function CellEditModal({
           </label>
         )}
         {kind !== 'function' && !dbc.loaded && <p className="hint">신호 할당을 하려면 먼저 DBC를 업로드하세요.</p>}
-        {kind !== 'function' && dbc.loaded && kind !== 'slider' && kind !== 'button' && (
+        {kind !== 'function' && dbc.loaded && kind !== 'slider' && kind !== 'button' && kind !== 'checkbox' && (
           <SignalPicker
             dbc={dbc}
             rxNode={canStore.getRxNode()}
@@ -871,7 +895,41 @@ function CellEditModal({
             />
           </label>
         )}
-        {kind === 'checkbox' && (
+        {kind === 'checkbox' && dbc.loaded && (
+          <ExtraBindingsEditor
+            dbc={dbc}
+            rxNode={canStore.getRxNode()}
+            primary={undefined}
+            value={draft.extraBindings ?? []}
+            onChange={(next) => setDraft({ ...draft, extraBindings: next })}
+            messageLabelFor={(m) => `${m.name} (0x${m.frame_id.toString(16).toUpperCase()})`}
+            pickerFilter={false}
+              renderRowExtra={(b, _i, patch) => (
+                <>
+                  <SendTypeSelect dbc={dbc} binding={b.signal ? b : undefined} onDbcRefresh={refreshDbc} />
+                  <span title="ON값">
+                    <FlexibleValueInput
+                      dbc={dbc}
+                      binding={b.signal ? b : undefined}
+                      value={b.onValue}
+                      placeholder="On Value"
+                      onValue={(v) => patch({ onValue: v })}
+                    />
+                  </span>
+                  <span title="OFF값">
+                    <FlexibleValueInput
+                      dbc={dbc}
+                      binding={b.signal ? b : undefined}
+                      value={b.offValue}
+                      placeholder="Off Value"
+                      onValue={(v) => patch({ offValue: v })}
+                    />
+                  </span>
+                </>
+              )}
+          />
+        )}
+        {kind === 'checkbox' && !dbc.loaded && (
           <div className="row-2">
             <label>
               ON 값
@@ -1028,6 +1086,23 @@ function CellEditModal({
                     message: draft.binding.message,
                     signal: draft.binding.signal,
                     value: Number(draft.value ?? 1),
+                  },
+                ];
+                for (const b of draft.extraBindings ?? []) {
+                  if (b?.signal && `${b.message}.${b.signal}` !== k) migrated.push(b);
+                }
+                onSave({ ...draft, binding: undefined, extraBindings: migrated });
+                return;
+              }
+              if (kind === 'checkbox' && draft.binding?.signal) {
+                // 버튼과 동일: 본 바인딩을 ON/OFF값과 함께 추가 목록 맨 앞에 편입.
+                const k = `${draft.binding.message}.${draft.binding.signal}`;
+                const migrated: ExtraBinding[] = [
+                  {
+                    message: draft.binding.message,
+                    signal: draft.binding.signal,
+                    onValue: Number(draft.onValue ?? 1),
+                    offValue: Number(draft.offValue ?? 0),
                   },
                 ];
                 for (const b of draft.extraBindings ?? []) {

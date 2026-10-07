@@ -5,7 +5,7 @@
 import { useState, type ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { api } from '../api/client';
-import { findSignal, signalBitMax, signalBitMin, signalRawBounds, useApp } from '../store/appContext';
+import { findSignal, signalBitMax, signalRawBounds, useApp } from '../store/appContext';
 import { canStore } from '../store/canStore';
 import {
   CompactSignalPicker,
@@ -14,22 +14,11 @@ import {
   SendTypeSelect,
   SignalPicker,
 } from './MessageOptions';
-import type { DbcSignal, ExtraBinding, SignalBinding, WidgetConfig } from '../types';
+import type { ExtraBinding, SignalBinding, WidgetConfig } from '../types';
 
 const BINDABLE = new Set(['button', 'checkbox', 'dropdown', 'slider', 'randomButton', 'manualValue']);
 
 const clamp = (v: number, min: number, max: number) => Math.min(max, Math.max(min, v));
-
-/** Physical value range for a "전송 값" input: the signal's own declared
- * DBC minimum/maximum when present (may be tighter than the bit width,
- * e.g. a 4-bit signal documented as only using 0..14), falling back to the
- * full bit-width range otherwise -- same convention as SliderWidget. */
-function signalValueRange(signal: DbcSignal): { min: number; max: number } {
-  return {
-    min: signal.minimum ?? signalBitMin(signal),
-    max: signal.maximum ?? signalBitMax(signal),
-  };
-}
 
 export function WidgetFrame({ config, children }: { config: WidgetConfig; children: ReactNode }) {
   const { editMode, removeWidget, toggleMinimize } = useApp();
@@ -109,7 +98,24 @@ function ConfigModal({ config, onClose }: { config: WidgetConfig; onClose: () =>
       draft.options.extraBindings = migrated;
       draft.binding = undefined;
     }
-    if (config.type === 'slider' || config.type === 'button') {
+    if (config.type === 'checkbox' && draft.binding?.signal) {
+      // 버튼과 동일: 본 바인딩을 ON/OFF값과 함께 추가 목록 맨 앞에 편입.
+      const k = `${draft.binding.message}.${draft.binding.signal}`;
+      const migrated: ExtraBinding[] = [
+        {
+          message: draft.binding.message,
+          signal: draft.binding.signal,
+          onValue: Number(draft.options.onValue ?? 1),
+          offValue: Number(draft.options.offValue ?? 0),
+        },
+      ];
+      for (const b of (draft.options.extraBindings as ExtraBinding[] | undefined) ?? []) {
+        if (b?.signal && `${b.message}.${b.signal}` !== k) migrated.push(b);
+      }
+      draft.options.extraBindings = migrated;
+      draft.binding = undefined;
+    }
+    if (config.type === 'slider' || config.type === 'button' || config.type === 'checkbox') {
       // 추가 바인딩 정리: 미완성 행 제거 + 중복 제거 + 본 바인딩과 겹치면 제외
       // (value 등 기존 필드는 보존).
       const seen = new Set<string>();
@@ -193,7 +199,7 @@ function ConfigModal({ config, onClose }: { config: WidgetConfig; onClose: () =>
                     onChange={(b) => setDraft({ ...draft, binding: b })}
                     messageLabelFor={(m) => `${m.name} (0x${m.frame_id.toString(16).toUpperCase()})`}
                   />
-                ) : config.type === 'button' ? null : (
+                ) : config.type === 'button' || config.type === 'checkbox' ? null : (
                   <SignalPicker
                     dbc={dbc}
                     rxNode={canStore.getRxNode()}
@@ -202,7 +208,7 @@ function ConfigModal({ config, onClose }: { config: WidgetConfig; onClose: () =>
                     messageLabelFor={(m) => `${m.name} (0x${m.frame_id.toString(16).toUpperCase()})`}
                   />
                 )}
-                {bound && config.type !== 'button' && (
+                {bound && config.type !== 'button' && config.type !== 'checkbox' && (
                   <label>
                     송신 속성 (Event: 30ms 후 invalid 값 자동 송신)
                     <select
@@ -235,17 +241,19 @@ function ConfigModal({ config, onClose }: { config: WidgetConfig; onClose: () =>
             onChange={(next) => setOption('extraBindings', next)}
             messageLabelFor={(m) => `${m.name} (0x${m.frame_id.toString(16).toUpperCase()})`}
             pickerFilter={false}
-            renderRowExtra={(b, _i, patch) => (
-              <>
-                <SendTypeSelect dbc={dbc} binding={b.signal ? b : undefined} onDbcRefresh={refreshDbc} />
-                <FlexibleValueInput
-                  dbc={dbc}
-                  binding={b.signal ? b : undefined}
-                  value={b.value ?? 1}
-                  onValue={(v) => patch({ value: v })}
-                />
-              </>
-            )}
+              renderRowExtra={(b, _i, patch) => (
+                <>
+                  <SendTypeSelect dbc={dbc} binding={b.signal ? b : undefined} onDbcRefresh={refreshDbc} />
+                  <FlexibleValueInput
+                    dbc={dbc}
+                    binding={b.signal ? b : undefined}
+                    value={b.value ?? 1}
+                    savedText={b.text}
+                    onText={(t) => patch({ text: t })}
+                    onValue={(v) => patch({ value: v })}
+                  />
+                </>
+              )}
           />
         )}
         {config.type === 'randomButton' && (
@@ -351,41 +359,42 @@ function ConfigModal({ config, onClose }: { config: WidgetConfig; onClose: () =>
           </label>
         )}
         {config.type === 'checkbox' && (
-          <div className="row-2">
-            {bound && (
-              <p className="hint">
-                범위: {signalValueRange(bound.signal).min} ~ {signalValueRange(bound.signal).max}
-              </p>
-            )}
-            <label>
-              ON 값
-              <input
-                type="number"
-                min={bound ? signalValueRange(bound.signal).min : undefined}
-                max={bound ? signalValueRange(bound.signal).max : undefined}
-                value={String(draft.options.onValue ?? 1)}
-                onChange={(e) => {
-                  const raw = Number(e.target.value);
-                  const { min, max } = bound ? signalValueRange(bound.signal) : { min: -Infinity, max: Infinity };
-                  setOption('onValue', bound ? clamp(raw, min, max) : raw);
-                }}
-              />
-            </label>
-            <label>
-              OFF 값
-              <input
-                type="number"
-                min={bound ? signalValueRange(bound.signal).min : undefined}
-                max={bound ? signalValueRange(bound.signal).max : undefined}
-                value={String(draft.options.offValue ?? 0)}
-                onChange={(e) => {
-                  const raw = Number(e.target.value);
-                  const { min, max } = bound ? signalValueRange(bound.signal) : { min: -Infinity, max: Infinity };
-                  setOption('offValue', bound ? clamp(raw, min, max) : raw);
-                }}
-              />
-            </label>
-          </div>
+          <ExtraBindingsEditor
+            dbc={dbc}
+            rxNode={canStore.getRxNode()}
+            primary={undefined}
+            value={(draft.options.extraBindings as ExtraBinding[] | undefined) ?? []}
+            onChange={(next) => setOption('extraBindings', next)}
+            messageLabelFor={(m) => `${m.name} (0x${m.frame_id.toString(16).toUpperCase()})`}
+            pickerFilter={false}
+              renderRowExtra={(b, _i, patch) => (
+                <>
+                  <SendTypeSelect dbc={dbc} binding={b.signal ? b : undefined} onDbcRefresh={refreshDbc} />
+                  <span title="ON값">
+                    <FlexibleValueInput
+                      dbc={dbc}
+                      binding={b.signal ? b : undefined}
+                      value={b.onValue}
+                      placeholder="On Value"
+                      savedText={b.onText}
+                      onText={(t) => patch({ onText: t })}
+                      onValue={(v) => patch({ onValue: v })}
+                    />
+                  </span>
+                  <span title="OFF값">
+                    <FlexibleValueInput
+                      dbc={dbc}
+                      binding={b.signal ? b : undefined}
+                      value={b.offValue}
+                      placeholder="Off Value"
+                      savedText={b.offText}
+                      onText={(t) => patch({ offText: t })}
+                      onValue={(v) => patch({ offValue: v })}
+                    />
+                  </span>
+                </>
+              )}
+          />
         )}
         {(config.type === 'multiButton' ||
           config.type === 'multiCheckbox' ||

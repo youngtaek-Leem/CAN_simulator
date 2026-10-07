@@ -490,10 +490,17 @@ export interface SignalBinding {
   signal: string;
 }
 
-/** 추가 바인딩 (버튼 다중 신호용): 바인딩 + 해당 신호의 전송값.
- * value 없음 = 미지정 (버튼 클릭 시 해당 신호 스킵 또는 기본값 — 호출자 정책). */
+/** 추가 바인딩 (버튼/체크박스 다중 신호용): 바인딩 + 해당 신호의 전송값.
+ * value 없음 = 미지정 (버튼 클릭 시 해당 신호 스킵 또는 기본값 — 호출자 정책).
+ * text/onText/offText: 입력 표기 그대로 저장 (재오픈 시 hex/binary 유지). */
 export interface ExtraBinding extends SignalBinding {
   value?: number;
+  // 체크박스용 행별 ON/OFF 값 (슬라이더·버튼은 무시).
+  onValue?: number;
+  offValue?: number;
+  text?: string;
+  onText?: string;
+  offText?: string;
 }
 
 export interface MultiCell {

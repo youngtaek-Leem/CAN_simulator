@@ -99,6 +99,39 @@ export async function sendValueToBindings(
   }
 }
 
+/** 체크박스 토글 fan-out: entries(바인딩+ON/OFF값)를 메시지별로 묶어
+ * checked ? ON값 : OFF값으로 일반 단발 전송한다 (체크박스는 pulse 없음).
+ * 각 값은 신호별 선언 범위로 클램프. 바인딩이 하나도 없으면 throw. */
+export async function sendCheckboxBindings(
+  entries: { binding: SignalBinding | undefined; onValue: number; offValue: number }[],
+  checked: boolean,
+  dbc: DbcSummary,
+): Promise<void> {
+  const seen = new Set<string>();
+  const byMessage = new Map<string, Record<string, number>>();
+  for (const e of entries) {
+    if (!e.binding?.message || !e.binding?.signal) continue;
+    const k = `${e.binding.message}.${e.binding.signal}`;
+    if (seen.has(k)) continue;
+    seen.add(k);
+    const sig = findSignal(dbc, e.binding)?.signal;
+    const raw = checked ? e.onValue : e.offValue;
+    let v = raw;
+    if (sig) {
+      const lo = sig.minimum ?? signalBitMin(sig);
+      const hi = sig.maximum ?? signalBitMax(sig);
+      v = Math.min(hi, Math.max(lo, raw));
+    }
+    const values = byMessage.get(e.binding.message) ?? {};
+    values[e.binding.signal] = v;
+    byMessage.set(e.binding.message, values);
+  }
+  if (byMessage.size === 0) throw new Error('신호 미할당');
+  for (const [message, values] of byMessage) {
+    await canStore.sendSignal(message, values);
+  }
+}
+
 export function ButtonWidget({ config }: { config: WidgetConfig }) {
   const value = Number(config.options.value ?? 1);
   const { dbc } = useApp();
@@ -159,18 +192,51 @@ export function ButtonWidget({ config }: { config: WidgetConfig }) {
 }
 
 export function CheckboxWidget({ config }: { config: WidgetConfig }) {
-  const { updateWidget } = useApp();
-  const { send, error } = useSendSignal(config);
+  const { dbc, updateWidget } = useApp();
+  const { error, setError } = useSendSignal(config);
   // Persisted in config.options (not local useState) so the checked state
   // survives switching to another page and back -- App.tsx only mounts the
   // active page's widgets, so any value kept only in local useState resets
   // on remount.
   const checked = Boolean(config.options.checked ?? false);
-  const onValue = Number(config.options.onValue ?? 1);
-  const offValue = Number(config.options.offValue ?? 0);
+  const extras = (config.options.extraBindings as ExtraBinding[] | undefined) ?? [];
+  const extraCount = extras.filter((b) => b?.signal).length;
+  const allLabels = [
+    ...(config.binding?.signal
+      ? [`${config.binding.message}.${config.binding.signal} ON=${Number(config.options.onValue ?? 1)} OFF=${Number(config.options.offValue ?? 0)}`]
+      : []),
+    ...extras
+      .filter((b) => b?.signal)
+      .map((b) => `${b.message}.${b.signal} ON=${b.onValue ?? 1} OFF=${b.offValue ?? 0}`),
+  ].join('\n');
+  // 토글 시 전체 행의 ON/OFF값을 메시지별로 묶어 전송 (일반 단발, pulse 없음).
   const toggle = (next: boolean) => {
     updateWidget({ ...config, options: { ...config.options, checked: next } });
-    send(next ? onValue : offValue);
+    void (async () => {
+      try {
+        await sendCheckboxBindings(
+          [
+            ...(config.binding?.signal
+              ? [{
+                binding: config.binding,
+                onValue: Number(config.options.onValue ?? 1),
+                offValue: Number(config.options.offValue ?? 0),
+              }]
+              : []),
+            ...extras.filter((b) => b?.signal).map((b) => ({
+              binding: { message: b.message, signal: b.signal },
+              onValue: b.onValue ?? 1,
+              offValue: b.offValue ?? 0,
+            })),
+          ],
+          next,
+          dbc,
+        );
+        setError(null);
+      } catch (e) {
+        setError((e as Error).message);
+      }
+    })();
   };
   return (
     <div className="control-widget">
@@ -178,7 +244,7 @@ export function CheckboxWidget({ config }: { config: WidgetConfig }) {
         <input
           type="checkbox"
           checked={checked}
-          disabled={!config.binding?.signal}
+          disabled={!(config.binding?.signal || extraCount > 0)}
           onChange={(e) => toggle(e.target.checked)}
           onKeyDown={(e) => {
             if (e.key === ' ') {
@@ -187,7 +253,10 @@ export function CheckboxWidget({ config }: { config: WidgetConfig }) {
             }
           }}
         />
-        {config.binding?.signal ?? '신호 미할당'}
+        <span title={allLabels || undefined}>
+          {config.binding?.signal ?? (extraCount > 0 ? `+외 ${extraCount}개` : '신호 미할당')}
+          {config.binding?.signal && extraCount > 0 ? ` +외 ${extraCount}개` : ''}
+        </span>
       </label>
       {error && <span className="error">{error}</span>}
     </div>

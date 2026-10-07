@@ -182,8 +182,7 @@ function ChoiceComboInput({
       <input
         className="mono tx-signal-input"
         value={value}
-        disabled={disabled}
-        title={disabled ? '랜덤 체크 중 — 전송 시 매번 랜덤값' : '선택지에서 고르거나 직접 입력'}
+        title={disabled ? '랜덤 체크 중 — 전송 시 매번 랜덤값' : '선택지에서 고르거나 직접 입력 (클릭하면 목록 표시)'}
         onChange={(e) => {
           onChange(e.target.value);
           setQuery(e.target.value);
@@ -207,18 +206,6 @@ function ChoiceComboInput({
           }
         }}
       />
-      <button
-        className="small-btn"
-        title="VAL_ 전체 목록 보기"
-        disabled={disabled}
-        onMouseDown={(e) => e.preventDefault()}
-        onClick={() => {
-          setQuery(null);
-          setOpenListKey(open ? null : openKey);
-        }}
-      >
-        ▼
-      </button>
       {open && (
         <div className="tx-combo-list">
           {items.length === 0 ? (

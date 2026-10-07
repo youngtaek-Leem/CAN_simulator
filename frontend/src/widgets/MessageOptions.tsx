@@ -449,17 +449,26 @@ export function parsePhysicalValue(input: string): number | null {
 
 /** 전송값 텍스트 입력 (dec/0x/0b 표기, 물리값 의미): 입력 중 텍스트 유지,
  * 파싱 성공 시 범위 클램프 후 전파, 실패 시 빨간 테두리+타이틀 안내만
- * (1라인 유지를 위해 별도 에러행 없음). 바인딩 변경 시 텍스트 리셋. */
+ * (1라인 유지를 위해 별도 에러행 없음). 바인딩 변경 시 텍스트 리셋.
+ * value 미지정 시 빈칸 + 플레이스홀더 표시 (전송 시 호출자가 폴백).
+ * savedText: 저장된 입력 표기 -- 재오픈 시 hex/binary 그대로 표시.
+ * 유효 파싱·빈칸만 저장되고 파싱 실패 입력은 로컬에만 남는다. */
 export function FlexibleValueInput({
   dbc,
   binding,
   value,
   onValue,
+  placeholder,
+  savedText,
+  onText,
 }: {
   dbc: DbcSummary;
   binding: SignalBinding | undefined;
-  value: number;
+  value?: number;
   onValue: (v: number) => void;
+  placeholder?: string;
+  savedText?: string;
+  onText?: (t: string) => void;
 }) {
   const bound = findSignal(dbc, binding);
   const lo = bound ? (bound.signal.minimum ?? signalBitMin(bound.signal)) : undefined;
@@ -468,29 +477,99 @@ export function FlexibleValueInput({
   useEffect(() => {
     setText(null);
   }, [binding?.message, binding?.signal]);
+  const empty = text === null ? savedText === undefined && value === undefined : text.trim() === '';
   const parsed = text === null ? null : parsePhysicalValue(text);
-  const invalid = text !== null && parsed === null;
+  const invalid = !empty && text !== null && parsed === null;
+  const shownText = text ?? savedText ?? (value !== undefined ? String(value) : '');
+  const applyText = (t: string) => {
+    setText(t);
+    if (t.trim() === '') {
+      onText?.('');
+      return;
+    }
+    const n = parsePhysicalValue(t);
+    if (n !== null) {
+      onValue(bound ? Math.min(hi!, Math.max(lo!, n)) : n);
+      onText?.(t);
+    }
+  };
+  // VAL_ 선택지가 있으면 TxBox와 동일한 콤보 동작: 포커스/▼ = 입력값 무관
+  // 전체 목록 + 현재값 하이라이트, 타이핑 = 포함 필터, 항목 선택 = 숫자 확정.
+  const [comboOpen, setComboOpen] = useState(false);
+  const [query, setQuery] = useState<string | null>(null);
+  const choiceItems = (() => {
+    if (!bound?.signal.choices) return null;
+    const q = (query ?? '').trim().toLowerCase();
+    return Object.entries(bound.signal.choices)
+      .map(([k, v]) => ({ k: Number(k), v }))
+      .sort((a, b) => a.k - b.k)
+            .filter(({ k, v }) => query === null || q === '' || String(k).includes(q) || v.toLowerCase().includes(q));
+  })();
+  const closeCombo = () => {
+    setComboOpen(false);
+    setQuery(null);
+  };
   return (
-    <input
-      className="mono"
-      title={
-        bound
-          ? `전송값 (dec/0x/0b, 범위 ${lo} ~ ${hi})${invalid ? ' — 잘못된 값 형식' : ''}`
-          : '전송값 (dec/0x/0b)'
-      }
-      style={{
-        width: 88,
-        flexShrink: 0,
-        ...(invalid ? { borderColor: 'var(--bad)' } : {}),
-      }}
-      value={text ?? String(value)}
-      onChange={(e) => {
-        const t = e.target.value;
-        setText(t);
-        const n = parsePhysicalValue(t);
-        if (n !== null) onValue(bound ? Math.min(hi!, Math.max(lo!, n)) : n);
-      }}
-    />
+    <span className="tx-combo" style={{ width: 112, flexShrink: 0 }}>
+      <input
+        className="mono"
+        title={
+          bound
+            ? `전송값 (dec/0x/0b, 범위 ${lo} ~ ${hi})${choiceItems ? ' — 클릭하면 목록 표시' : ''}${invalid ? ' — 잘못된 값 형식' : ''}`
+            : '전송값 (dec/0x/0b)'
+        }
+        placeholder={placeholder}
+        style={{
+          flex: 1,
+          minWidth: 0,
+          ...(invalid ? { borderColor: 'var(--bad)' } : {}),
+        }}
+        value={shownText}
+        onChange={(e) => {
+          applyText(e.target.value);
+          if (choiceItems) setQuery(e.target.value);
+        }}
+        onFocus={() => {
+          if (!choiceItems) return;
+          setQuery(null);
+          setComboOpen(true);
+        }}
+        onBlur={() => {
+          if (!choiceItems) return;
+          // 항목 mousedown이 먼저 처리되도록 blur 닫힘을 한 tick 미룬다
+          setTimeout(closeCombo, 120);
+        }}
+        onKeyDown={(e) => {
+          if (e.key === 'Escape') {
+            closeCombo();
+            (e.target as HTMLInputElement).blur();
+          }
+        }}
+      />
+      {choiceItems && comboOpen && (
+        <div className="tx-combo-list">
+          {choiceItems.length === 0 ? (
+            <div className="hint">일치 없음 — 직접 입력값을 그대로 사용</div>
+          ) : (
+            choiceItems.map(({ k, v }) => (
+              <div
+                key={k}
+                className={`tx-combo-hit${String(k) === shownText.trim() ? ' active' : ''}`}
+                title={`${v} (${k}) 입력`}
+                onMouseDown={(e) => {
+                  e.preventDefault();
+                  applyText(String(k));
+                  closeCombo();
+                }}
+              >
+                <span className="mono">{k}</span>
+                <span className="hint">{v}</span>
+              </div>
+            ))
+          )}
+        </div>
+      )}
+    </span>
   );
 }
 
