@@ -194,11 +194,15 @@ export function GraphWidget({ config }: { config: WidgetConfig }) {
     else setCursorB(ms);
   };
   const toggleCursorMode = () => {
-    if (!cursorMode && cursorA === null && cursorB === null) {
+    // 매 Off→On마다 현재 확대 뷰 중앙에 리시드 (중앙 ± span/8).
+    // 이전 좌표를 유지하면 확대 후 뷰 밖에 남아 커서가 안 보인다.
+    if (!cursorMode) {
       const xMax = sharedXRef.current.xMax ?? canStore.nowMs();
       const xMin = sharedXRef.current.xMin ?? Math.max(0, xMax - xWindowMs);
-      setCursorA(xMin + (xMax - xMin) / 3);
-      setCursorB(xMin + ((xMax - xMin) * 2) / 3);
+      const xc = (xMin + xMax) / 2;
+      const xs = xMax - xMin;
+      setCursorA(xc - xs / 8);
+      setCursorB(xc + xs / 8);
     }
     setCursorMode((m) => !m);
   };
@@ -881,8 +885,10 @@ function SignalChart({
     }
 
     lastGeomRef.current = { xMin, xMax, yMin, yMax, plotLeft, plotTop, plotW, plotH };
+    // cursor primitives are deps so On/Off toggles redraw immediately --
+    // otherwise the canvas stays stale until the next hover/scroll tick.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [size, xWindowMs, xVersion, paused, frozenXMax, series, showXAxis, valueMode, resetToken, version, yRange]);
+  }, [size, xWindowMs, xVersion, paused, frozenXMax, series, showXAxis, valueMode, resetToken, version, yRange, cursor.mode, cursor.a, cursor.b]);
 
   const onWheel = (e: React.WheelEvent<HTMLCanvasElement>) => {
     if (!e.ctrlKey) return;

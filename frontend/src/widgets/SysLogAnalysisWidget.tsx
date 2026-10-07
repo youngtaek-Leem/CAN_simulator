@@ -355,12 +355,17 @@ export function SysLogAnalysisWidget({ config }: { config: WidgetConfig }) {
     notifyChange();
   };
   const toggleCursorMode = () => {
-    if (!cursorMode && cursorA === null && cursorB === null) {
+    // 매 Off→On마다 현재 확대 뷰 중앙에 리시드 (CanAudioLatencyWidget과
+    // 동일 규격: 중앙 ± span/8). 이전 좌표를 유지하면 확대 후 뷰 밖에
+    // 남아 커서가 안 보인다(DiffCursor는 범위 밖을 그리지 않음).
+    if (!cursorMode) {
       const v = sharedXRef.current;
       const xMax = v.xMax ?? plotXMax;
       const xMin = v.xMin ?? plotXMin;
-      setCursorA(xMin + (xMax - xMin) / 3);
-      setCursorB(xMin + ((xMax - xMin) * 2) / 3);
+      const xc = (xMin + xMax) / 2;
+      const xs = xMax - xMin;
+      setCursorA(xc - xs / 8);
+      setCursorB(xc + xs / 8);
     }
     setCursorMode((m) => !m);
   };
@@ -1155,8 +1160,10 @@ function SysLogChart({
     }
 
     lastGeomRef.current = { xMin, xMax, yMin, yMax, plotLeft, plotTop, plotW, plotH };
+    // cursor primitives are deps so On/Off toggles redraw immediately --
+    // otherwise the canvas stays stale until the next hover/scroll tick.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [size, xVersion, localTick, series, showXAxis, mode]);
+  }, [size, xVersion, localTick, series, showXAxis, mode, cursor.mode, cursor.a, cursor.b]);
 
   const onWheel = (e: React.WheelEvent<HTMLCanvasElement>) => {
     if (!e.ctrlKey) return; // 일반 휠은 막지 않고 그대로 둬서 목록이 스크롤되게 한다

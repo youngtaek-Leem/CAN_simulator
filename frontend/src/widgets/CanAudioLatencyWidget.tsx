@@ -816,8 +816,10 @@ function CanSignalChart({
 
     lastGeomRef.current = { xMin, xMax, yMin, yMax, plotLeft, plotTop, plotW, plotH };
     refreshDwell();
+    // cursor primitives are deps so On/Off toggles redraw immediately --
+    // otherwise the canvas stays stale until the next hover/scroll tick.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [size, xWindowMs, xVersion, bindingKey, streamOriginMs]);
+  }, [size, xWindowMs, xVersion, bindingKey, streamOriginMs, cursor.mode, cursor.a, cursor.b]);
 
   const onWheel = (e: React.WheelEvent<HTMLCanvasElement>) => {
     e.preventDefault();

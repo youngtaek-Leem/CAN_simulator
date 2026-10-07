@@ -275,9 +275,13 @@ export function CanLogAnalysisWidget({ config }: { config: WidgetConfig }) {
   const [cursorB, setCursorB] = useState<number | null>(null);
   const onCursorMove = (which: 'a' | 'b', x: number) => { if (which === 'a') setCursorA(x); else setCursorB(x); notifyChange(); };
   const toggleCursorMode = () => {
-    if (!cursorMode && cursorA === null && cursorB === null) {
+    // 매 Off→On마다 현재 확대 뷰 중앙에 리시드 (SysLog 위젯과 동일 규격:
+    // 중앙 ± span/8). 이전 좌표를 유지하면 확대 후 뷰 밖에 남아 커서가
+    // 안 보인다(DiffCursor는 범위 밖을 그리지 않음).
+    if (!cursorMode) {
       const v = sharedXRef.current; const xMax = v.xMax ?? plotXMax; const xMin = v.xMin ?? plotXMin;
-      setCursorA(xMin + (xMax - xMin) / 3); setCursorB(xMin + ((xMax - xMin) * 2) / 3);
+      const xc = (xMin + xMax) / 2; const xs = xMax - xMin;
+      setCursorA(xc - xs / 8); setCursorB(xc + xs / 8);
     }
     setCursorMode((m) => !m);
   };
@@ -560,8 +564,10 @@ function CanLogChart({ series, color, xViewRef, xVersion, notifyChange, defaultX
       ctx.font='10px monospace'; const tw=ctx.measureText(tooltipText).width; let tx=px+6; if(tx+tw+6>w) tx=px-tw-6; const ty=plotTop+12; ctx.fillStyle='rgba(0,0,0,0.8)'; ctx.fillRect(tx-3,ty-10,tw+6,14); ctx.fillStyle='#ffffff'; ctx.fillText(tooltipText,tx,ty);
     }
     lastGeomRef.current={xMin,xMax,yMin,yMax,plotLeft,plotTop,plotW,plotH};
+    // cursor primitives are deps so On/Off toggles redraw immediately --
+    // otherwise the canvas stays stale until the next hover/scroll tick.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  },[size,xVersion,localTick,series,showXAxis,effValueMode]);
+  },[size,xVersion,localTick,series,showXAxis,effValueMode,cursor.mode,cursor.a,cursor.b]);
 
   const onWheel=(e:React.WheelEvent<HTMLCanvasElement>)=>{
     if(!e.ctrlKey) return; const rect=canvasRef.current!.getBoundingClientRect(); const px=e.clientX-rect.left, py=e.clientY-rect.top; const g=lastGeomRef.current; const factor=e.deltaY>0?WHEEL_ZOOM_STEP:1/WHEEL_ZOOM_STEP;
