@@ -53,6 +53,7 @@ from log_service import LogService
 from power_supply_service import PowerSupplyService
 from replay_service import ReplayService
 from seedkey_client import SeedKeyService
+from serial_service import SerialService
 from syslog_service import SysLogService
 from can_log_service import CanLogService
 from test_runner_service import TestRunnerService
@@ -157,6 +158,7 @@ dbc_service = DbcService()
 tx_scheduler = TxScheduler(can_manager, dbc_service)
 replay_service = ReplayService(can_manager)
 log_service = LogService(can_manager, CAN_LOG_DIR)
+serial_service = SerialService(CAN_LOG_DIR)
 power_supply_service = PowerSupplyService()
 audio_service = AudioService(TESTRUNNER_AUDIO_DIR, TESTRUNNER_GOLDEN_DIR)
 syslog_service = SysLogService()
@@ -312,6 +314,10 @@ async def lifespan(app: FastAPI):
     # is itself bounded-time (see its docstring), so it can't turn into the
     # very "Ctrl-C doesn't exit" symptom this is meant to prevent.
     audio_service.shutdown()
+    try:
+        serial_service.shutdown()
+    except Exception:
+        shutdown_logger.warning("serial_service.shutdown() failed", exc_info=True)
     timer_util.disable_1ms_timer()
     shutdown_logger.info("lifespan shutdown complete")
 
@@ -469,6 +475,9 @@ async def _broadcast_loop() -> None:
             await _broadcast(
                 {"type": "rx", "frames": [_frame_to_dict(m, h, i < do_decode_limit) for i, (m, h) in enumerate(frames)]}
             )
+        serial_lines = serial_service.drain()
+        if ws_clients and (serial_lines["a"] or serial_lines["b"]):
+            await _broadcast({"type": "serial", **serial_lines})
         now = time.monotonic()
         if now - last_status >= 0.5:
             last_status = now
@@ -514,6 +523,7 @@ def _status() -> dict:
         "ota_tester": ota_tester_manager.status(tail=100),
         "power": power_supply_service.info(),
         "audio": audio_service.info(),
+        "serial": serial_service.status(),
         "log": log_service.status(),
     }
 
@@ -538,6 +548,12 @@ def run_start():
     tx_scheduler.stop_auto()
     run_state["running"] = True
     tx_scheduler.set_paused(False)
+    # Configured serial ports start monitoring together with the simulator
+    # (best-effort -- a missing device must never break Start).
+    try:
+        serial_service.open_all()
+    except Exception:
+        logger.warning("serial_service.open_all() failed on run_start", exc_info=True)
     return _status()
 
 
@@ -560,6 +576,10 @@ def run_stop():
             mgr.stop()
     if ota_tester_manager.running:
         ota_tester_manager.stop()
+    try:
+        serial_service.close_all()
+    except Exception:
+        logger.warning("serial_service.close_all() failed on run_stop", exc_info=True)
     return _status()
 
 
@@ -578,6 +598,7 @@ def connect(req: ConnectRequest):
     # CanManager.connect -> self.disconnect()), which would silently orphan
     # an in-progress recording's file handle -- flush and close it first.
     log_service.stop()
+    serial_service.stop_logging()
     try:
         return can_manager.connect(
             req.interface,
@@ -596,6 +617,8 @@ def disconnect():
     test_runner_service.stop()
     replay_service.stop()
     log_service.stop()
+    serial_service.stop_logging()
+    serial_service.close_all()
     tx_scheduler.stop()
     tx_scheduler.stop_auto()
     can_manager.disconnect()
@@ -607,13 +630,22 @@ def log_start():
     if not can_manager.connected:
         raise HTTPException(status_code=400, detail="CAN bus is not connected")
     try:
-        return log_service.start()
+        result = log_service.start()
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+    # Serial sidecar logs (2 files) ride along with CAN logging -- a serial
+    # failure must never break the CAN log, so failures stay silent here
+    # (visible via status.serial.logging).
+    try:
+        serial_service.start_logging()
+    except Exception:
+        logger.warning("serial_service.start_logging() failed", exc_info=True)
+    return result
 
 
 @app.post("/api/log/stop")
 def log_stop():
+    serial_service.stop_logging()
     return log_service.stop()
 
 
@@ -1742,6 +1774,10 @@ def shutdown_server():
             audio_service.shutdown()
         except Exception:
             shutdown_logger.warning("audio_service.shutdown() failed", exc_info=True)
+        try:
+            serial_service.shutdown()
+        except Exception:
+            shutdown_logger.warning("serial_service.shutdown() failed", exc_info=True)
         shutdown_logger.info("terminating process now")
         os.kill(os.getpid(), signal.SIGTERM)
 
@@ -1872,6 +1908,53 @@ def audio_record_stop():
 def audio_recording_stop():
     """테스트 Sequence 실행기에서 러너가 시작한 녹음(owner='recording')을 위젯에서 Stop."""
     return audio_service.stop()
+
+
+# ---- Serial Monitor (dual-port UART RX) ------------------------------------
+#
+# 포트별 {port, baud} 설정(8N1 고정)은 Serial Monitor 위젯이 저장하고,
+# CAN Start 시 자동 open, Stop/disconnect 시 자동 close된다 (위젯에 별도
+# open/close 버튼 없음). CAN 로깅 시작 시 포트별 텍스트 로그 2개가 함께
+# 기록된다 (serial_A_<ts>.log / serial_B_<ts>.log).
+
+
+class SerialPortConfig(BaseModel):
+    port: str = ""
+    baud: int = 115200
+
+
+class SerialConfigRequest(BaseModel):
+    a: SerialPortConfig = SerialPortConfig()
+    b: SerialPortConfig = SerialPortConfig()
+
+
+@app.get("/api/serial/ports")
+def serial_ports():
+    """연결 가능한 시리얼 포트 목록 (Windows COMx / /dev/tty*)."""
+    return serial_service.list_ports()
+
+
+@app.post("/api/serial/config")
+def serial_config(req: SerialConfigRequest):
+    """두 포트의 {port, baud} 설정을 저장한다 (Start 시 자동 open의 근거)."""
+    try:
+        return serial_service.set_config(req.a.port, req.a.baud, req.b.port, req.b.baud)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.get("/api/serial/status")
+def serial_status():
+    return serial_service.status()
+
+
+@app.get("/api/serial/lines")
+def serial_lines(port: str = "a", since_ms: float = 0.0, limit: int = 500):
+    """스크롤백 조회: port=a|b, since_ms(epoch ms) 이후, 최대 limit건."""
+    try:
+        return serial_service.lines(port, since_ms, limit)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
 
 @app.post("/api/testrunner/golden/upload")

@@ -310,6 +310,16 @@ export const api = {
       `/api/audio/waveform?from_ms=${fromMs}&to_ms=${toMs}&max_points=${maxPoints}`,
     ),
 
+  // Serial Monitor (dual-port UART RX -- backend/serial_service.py)
+  serialPorts: () => request<import('../types').SerialPortList>('/api/serial/ports'),
+  serialConfig: (a: { port: string; baud: number }, b: { port: string; baud: number }) =>
+    post<import('../types').SerialStatus>('/api/serial/config', { a, b }),
+  serialStatus: () => request<import('../types').SerialStatus>('/api/serial/status'),
+  serialLines: (port: 'a' | 'b', sinceMs: number, limit: number) =>
+    request<{ port: string; lines: import('../types').SerialLine[] }>(
+      `/api/serial/lines?port=${port}&since_ms=${sinceMs}&limit=${limit}`,
+    ),
+
   listLayouts: () => request<{ layouts: string[] }>('/api/layouts'),
   getLayout: (name: string) => request(`/api/layouts/${encodeURIComponent(name)}`),
   saveLayout: (name: string, body: unknown) =>

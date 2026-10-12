@@ -19,7 +19,8 @@ import { canStore, useCanVersion } from './store/canStore';
 import { AppContext } from './store/appContext';
 import { WIDGET_REGISTRY } from './widgets/registry';
 import { WidgetFrame } from './widgets/WidgetFrame';
-import type { DbcSummary, MultiCell, WidgetConfig, WidgetType } from './types';
+import { backfillExtraBinding } from './widgets/MessageOptions';
+import type { DbcSummary, ExtraBinding, MultiCell, WidgetConfig, WidgetType } from './types';
 import { APP_VERSION } from './version';
 
 interface Page {
@@ -570,15 +571,46 @@ export default function App() {
       if (saved.canConfig) setCanConfig(saved.canConfig);
       // legacy saves (before multi-page tabs) have no `pages` key -- wrap
       // their single layout/widgets pair into one page
-      const loadedPages: Page[] =
+      const rawPages: Page[] =
         saved.pages && saved.pages.length > 0
           ? saved.pages
           : [{ ...makePage('p1', 'Page 1'), widgets: saved.widgets ?? [], layout: saved.layout ?? [] }];
+      // 구 저장행 1회성 수리: value 없이 text만 남은 버튼/체크박스 행에 값을
+      // 복원한다 (stale-closure 경합 시절에 깨져 저장된 레이아웃 대응).
+      // 복원분은 메모리에만 반영되고 다음 레이아웃 저장 때 파일에 기록된다.
+      let repaired = 0;
+      const loadedPages: Page[] = rawPages.map((p) => ({
+        ...p,
+        widgets: p.widgets.map((w) => {
+          const options = { ...(w.options as Record<string, unknown>) };
+          const eb = options.extraBindings;
+          if (Array.isArray(eb)) {
+            options.extraBindings = (eb as ExtraBinding[]).map((r) => {
+              const b = backfillExtraBinding(r);
+              if (b !== r) repaired++;
+              return b;
+            });
+          }
+          const cells = options.cells;
+          if (Array.isArray(cells)) {
+            options.cells = (cells as MultiCell[]).map((c) => {
+              if (!Array.isArray(c.extraBindings)) return c;
+              const n = c.extraBindings.map((r) => {
+                const b = backfillExtraBinding(r);
+                if (b !== r) repaired++;
+                return b;
+              });
+              return { ...c, extraBindings: n };
+            });
+          }
+          return { ...w, options };
+        }),
+      }));
       setPages(loadedPages);
       setActivePageId(loadedPages[0].id);
       setZOrder({});
       setLayoutName(name);
-      notify(`레이아웃 "${name}" 불러옴`);
+      notify(`레이아웃 "${name}" 불러옴${repaired > 0 ? ` (전송값 ${repaired}건 복원 — 저장하면 파일에 반영)` : ''}`);
     } catch (e) {
       notify(`불러오기 실패: ${(e as Error).message}`);
     }

@@ -26,6 +26,7 @@ import { CanAudioLatencyWidget } from './CanAudioLatencyWidget';
 import { SysLogAnalysisWidget } from './SysLogAnalysisWidget';
 import { CanLogAnalysisWidget } from './CanLogAnalysisWidget';
 import SysLogUploadWidget from './SysLogUploadWidget';
+import { SerialMonitorWidget } from './SerialMonitorWidget';
 
 interface WidgetMeta {
   label: string;
@@ -172,6 +173,11 @@ export const WIDGET_REGISTRY: Record<WidgetType, WidgetMeta> = {
   sysLogUpload: {
     label: 'sysLog 취득',
     component: SysLogUploadWidget,
+    defaultSize: { w: 12, h: 14, minW: 4, minH: 3 },
+  },
+  serialMonitor: {
+    label: '시리얼 모니터',
+    component: SerialMonitorWidget,
     defaultSize: { w: 12, h: 14, minW: 4, minH: 3 },
   },
   powerControl: {

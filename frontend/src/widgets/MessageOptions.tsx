@@ -447,6 +447,35 @@ export function parsePhysicalValue(input: string): number | null {
   return null;
 }
 
+/** 구 저장행 1회성 수리: value 없이 text만 있는 행에 값을 복원한다.
+ * 구 FlexibleValueInput의 onValue/onText 2회 분리 호출이 ExtraBindingsEditor의
+ * stale-closure 경합으로 value를 소실시킨 채 text만 저장된 레이아웃이 존재한다
+ * (모달에는 text가 보여 정상으로 보이나, 전송은 `?? 1` 폴백으로 전부 1이 됨).
+ * 파싱 불가 text는 그대로 둔다. DBC 범위 클램프는 하지 않는다 — 전송 경로가
+ * live DBC로 클램프하므로 여기서는 파싱값 그대로 복원한다. */
+export function backfillExtraBinding<T extends ExtraBinding>(row: T): T {
+  const pairs: (readonly ['value' | 'onValue' | 'offValue', 'text' | 'onText' | 'offText'])[] = [
+    ['value', 'text'],
+    ['onValue', 'onText'],
+    ['offValue', 'offText'],
+  ];
+  let out: ExtraBinding = row;
+  let copied = false;
+  for (const [vKey, tKey] of pairs) {
+    if (typeof out[vKey] === 'number') continue;
+    const t = out[tKey];
+    if (typeof t !== 'string' || t.trim() === '') continue;
+    const n = parsePhysicalValue(t);
+    if (n === null) continue;
+    if (!copied) {
+      out = { ...row };
+      copied = true;
+    }
+    out[vKey] = n;
+  }
+  return (copied ? out : row) as T;
+}
+
 /** 전송값 텍스트 입력 (dec/0x/0b 표기, 물리값 의미): 입력 중 텍스트 유지,
  * 파싱 성공 시 범위 클램프 후 전파, 실패 시 빨간 테두리+타이틀 안내만
  * (1라인 유지를 위해 별도 에러행 없음). 바인딩 변경 시 텍스트 리셋.
@@ -461,6 +490,7 @@ export function FlexibleValueInput({
   placeholder,
   savedText,
   onText,
+  onValueText,
 }: {
   dbc: DbcSummary;
   binding: SignalBinding | undefined;
@@ -469,6 +499,11 @@ export function FlexibleValueInput({
   placeholder?: string;
   savedText?: string;
   onText?: (t: string) => void;
+  /** 원자적 커밋: 파싱 성공 시 value+text를 1회 패치로 전달한다.
+   * 제공되면 onValue/onText 개별 호출 대신 이것만 호출된다.
+   * (2회 분리 호출은 ExtraBindingsEditor의 stale-closure 경합으로
+   *  한쪽 업데이트가 소실될 수 있어 버튼 다중신호 값이 1로 굳는 버그 유발) */
+  onValueText?: (v: number, t: string) => void;
 }) {
   const bound = findSignal(dbc, binding);
   const lo = bound ? (bound.signal.minimum ?? signalBitMin(bound.signal)) : undefined;
@@ -489,7 +524,13 @@ export function FlexibleValueInput({
     }
     const n = parsePhysicalValue(t);
     if (n !== null) {
-      onValue(bound ? Math.min(hi!, Math.max(lo!, n)) : n);
+      const clamped = bound ? Math.min(hi!, Math.max(lo!, n)) : n;
+      // 원자적 커밋 우선: value+text를 한 번에 (분리 2회 호출 시 경합으로 소실됨)
+      if (onValueText) {
+        onValueText(clamped, t);
+        return;
+      }
+      onValue(clamped);
       onText?.(t);
     }
   };

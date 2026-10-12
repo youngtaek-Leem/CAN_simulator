@@ -75,7 +75,8 @@ function parseSeqLines(dataHex: string): { lines: SeqLine[]; error: string | nul
       lines.push({ kind: 'delay', lineNo, ms: Number(delayMatch[1]) });
       return;
     }
-    if (/^27\s+11(\s|$)/i.test(part)) {
+    // 27 11 자동 ASK: 바이트 사이 공백은 필수가 아니다 ("27 11", "2711" 모두).
+    if (/^27\s*11(\s|$)/i.test(part)) {
       lines.push({ kind: 'secacc', lineNo });
       return;
     }
@@ -448,7 +449,7 @@ export function IsoTpBox({ config }: { config: WidgetConfig }) {
             ref={textareaRef}
             className="mono isotp-data-input"
             value={dataHex}
-            placeholder={'01 02 03\n# 주석은 전송 안 함\n02 10 01 // 인라인 주석도 가능\ndelay 100 // ex: 100ms delay 가능\n27 11 //ASK sequence 자동 실행'}
+            placeholder={'01 02 03\n# 주석은 전송 안 함\n02 10 01 // 인라인 주석도 가능\ndelay 100 // ex: 100ms delay 가능\n27 11 // ASK 자동 실행 (2711도 가능)'}
             onChange={(e) => {
               setOpt({ dataHex: e.target.value });
               requestAnimationFrame(updateCursorLine);

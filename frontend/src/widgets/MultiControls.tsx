@@ -16,6 +16,7 @@ import {
   FlexibleValueInput,
   SendTypeSelect,
   SignalPicker,
+  backfillExtraBinding,
 } from './MessageOptions';
 import type { ExtraBinding, MultiCell, SignalBinding, WidgetConfig } from '../types';
 
@@ -793,7 +794,14 @@ function CellEditModal({
   onClose: () => void;
 }) {
   const { dbc, refreshDbc } = useApp();
-  const [draft, setDraft] = useState<MultiCell>({ ...cell });
+  // 구 저장행 수리: value 없이 text만 남은 셀 추가행은 열어보자마자 복원
+  // (MessageOptions.backfillExtraBinding) — 저장 시 올바른 값이 기록된다.
+  const [draft, setDraft] = useState<MultiCell>(() => ({
+    ...cell,
+    ...(Array.isArray(cell.extraBindings)
+      ? { extraBindings: cell.extraBindings.map(backfillExtraBinding) }
+      : null),
+  }));
   const bound = findSignal(dbc, draft.binding);
   const kindLabel = {
     button: '버튼',
@@ -879,7 +887,10 @@ function CellEditModal({
                   dbc={dbc}
                   binding={b.signal ? b : undefined}
                   value={b.value ?? 1}
+                  savedText={b.text}
+                  onText={(t) => patch({ text: t })}
                   onValue={(v) => patch({ value: v })}
+                  onValueText={(v, t) => patch({ value: v, text: t })}
                 />
               </>
             )}
@@ -913,7 +924,10 @@ function CellEditModal({
                       binding={b.signal ? b : undefined}
                       value={b.onValue}
                       placeholder="On Value"
+                      savedText={b.onText}
+                      onText={(t) => patch({ onText: t })}
                       onValue={(v) => patch({ onValue: v })}
+                      onValueText={(v, t) => patch({ onValue: v, onText: t })}
                     />
                   </span>
                   <span title="OFF값">
@@ -922,7 +936,10 @@ function CellEditModal({
                       binding={b.signal ? b : undefined}
                       value={b.offValue}
                       placeholder="Off Value"
+                      savedText={b.offText}
+                      onText={(t) => patch({ offText: t })}
                       onValue={(v) => patch({ offValue: v })}
+                      onValueText={(v, t) => patch({ offValue: v, offText: t })}
                     />
                   </span>
                 </>

@@ -1154,6 +1154,12 @@ select.tx-signal-input {
   font-size: 13px;
 }
 
+/* 툴바 전체 맞춤(⟲) 버튼만 50% 확대 — 나머지 툴바 아이콘은 현행 유지 */
+.graph-toolbar .icon-btn.graph-fit-btn {
+  padding: 0 6px;
+  font-size: 20px;
+}
+
 .graph-xwindow {
   font-size: 10px;
   color: var(--text-dim);
@@ -2147,3 +2153,109 @@ select.tx-signal-input {
   color: var(--text-dim);
 }
 
+
+/* Serial Monitor widget: toolbar + draggable split panes + mono log views */
+.serial-widget {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  gap: 4px;
+}
+.serial-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.serial-port-field {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.serial-port-field input {
+  width: 110px;
+}
+.serial-port-field select {
+  width: 84px;
+}
+.serial-split {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+  gap: 0;
+}
+.serial-split-col {
+  flex-direction: row;
+}
+.serial-split-row {
+  flex-direction: column;
+}
+.serial-split-first {
+  flex: none;
+  min-width: 60px;
+  min-height: 60px;
+  display: flex;
+}
+.serial-split-second {
+  flex: 1 1 auto;
+  min-width: 60px;
+  min-height: 60px;
+  display: flex;
+}
+.serial-split-drag {
+  flex: none;
+  display: flex;
+  align-items: stretch;
+  justify-content: center;
+}
+.serial-split-col .serial-split-drag {
+  width: 9px;
+  cursor: col-resize;
+}
+.serial-split-row .serial-split-drag {
+  height: 9px;
+  cursor: row-resize;
+}
+.serial-split-drag::after {
+  content: '';
+  background: var(--border);
+  border-radius: 2px;
+  margin: auto;
+}
+.serial-split-col .serial-split-drag::after {
+  width: 3px;
+  height: 100%;
+}
+.serial-split-row .serial-split-drag::after {
+  height: 3px;
+  width: 100%;
+}
+.serial-split-drag:hover::after {
+  background: var(--accent);
+}
+.serial-pane {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  gap: 2px;
+}
+.serial-pane-header {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+}
+.serial-log {
+  flex: 1 1 auto;
+  min-height: 60px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+  font-size: 12px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 4px 6px;
+}

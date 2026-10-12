@@ -222,6 +222,82 @@ export function GraphWidget({ config }: { config: WidgetConfig }) {
     notifyChange();
   };
   const [resetToken, setResetToken] = useState(0);
+  // ⟲ 전체 맞춤(fit) 상태: 공유 X를 history span에 고정 + 차트별 Y를 전체
+  // 데이터 min/max에 고정. fitYRef/fitKeysRef는 resetToken effect가 각 차트에
+  // 전달하는 페이로드이며, 새 데이터가 fit 구간을 벗어나면 live로 자동 복귀한다.
+  const fitYRef = useRef<Record<string, { yMin: number; yMax: number }>>({});
+  const fitKeysRef = useRef<Set<string>>(new Set());
+  const fitPinnedRef = useRef(false);
+
+  // 신호 history 전체의 Y 범위 (데이터 min/max + 가시구간 폴백과 동일 패딩).
+  // 데이터가 없으면 null.
+  const historyYRange = (key: string): { yMin: number; yMax: number } | null => {
+    const points = canStore.signalHistory.get(key) ?? [];
+    if (points.length === 0) return null;
+    let lo = Infinity;
+    let hi = -Infinity;
+    for (const p of points) {
+      if (p.value < lo) lo = p.value;
+      if (p.value > hi) hi = p.value;
+    }
+    const pad = (hi - lo) * 0.1 || Math.abs(hi) * 0.1 || 1;
+    return { yMin: Math.max(0, lo - pad), yMax: hi + pad };
+  };
+
+  // 지정 신호들의 history 전체 X span. 데이터가 없으면 null.
+  const historySpan = (keys: string[]): { xMin: number; xMax: number } | null => {
+    let start = Infinity;
+    let hasData = false;
+    for (const k of keys) {
+      const points = canStore.signalHistory.get(k) ?? [];
+      if (points.length === 0) continue;
+      hasData = true;
+      for (const p of points) {
+        const x = canStore.relMs(p.ts);
+        if (x < start) start = x;
+      }
+    }
+    if (!hasData) return null;
+    let xMax = Math.max(0, canStore.nowMs());
+    let xMin = Math.max(0, start);
+    if (!(xMax > xMin)) xMax = xMin + 1000;
+    return { xMin, xMax };
+  };
+
+  // 전체 fit: 공유 X를 전체 span에 고정 + 전 차트 Y를 데이터 범위에 고정.
+  const fitAll = () => {
+    const keys = series.map(seriesKey);
+    const span = historySpan(keys);
+    if (!span) {
+      sharedXRef.current = { xMin: null, xMax: null };
+      fitYRef.current = {};
+      fitKeysRef.current = new Set();
+      fitPinnedRef.current = false;
+      setResetToken((n) => n + 1);
+      notifyChange();
+      return;
+    }
+    sharedXRef.current = { ...span };
+    const entries: Record<string, { yMin: number; yMax: number }> = {};
+    const fitted = new Set<string>();
+    for (const k of keys) {
+      const r = historyYRange(k);
+      if (r) {
+        entries[k] = r;
+        fitted.add(k);
+      }
+    }
+    fitYRef.current = entries;
+    fitKeysRef.current = fitted;
+    fitPinnedRef.current = true;
+    setResetToken((n) => n + 1);
+    notifyChange();
+  };
+
+  // 수동 줌/팬/드래그 시 fit 고정 해제 (사용자가 직접 조종 중).
+  const markManualView = () => {
+    fitPinnedRef.current = false;
+  };
 
   const togglePause = () => {
     if (!paused) {
@@ -230,24 +306,52 @@ export function GraphWidget({ config }: { config: WidgetConfig }) {
     } else {
       frozenXMaxRef.current = null;
       sharedXRef.current = { xMin: null, xMax: null };
+      fitPinnedRef.current = false;
       setPaused(false);
       notifyChange();
     }
   };
+  // ⟲ = 전체 맞춤(fit): 기록된 전체 history가 한 화면에 들어오도록 고정.
+  // fit 중 새 데이터가 구간을 벗어나면 live 추적으로 자동 복귀한다.
   const resetSharedX = () => {
-    sharedXRef.current = { xMin: null, xMax: null };
-    setResetToken((n) => n + 1);
-    notifyChange();
+    fitAll();
   };
 
-  // 라이브 롤링 — 공유 X가 auto일 때만 tick, Pause 시 정지
+  // 라이브 롤링 — 공유 X가 auto일 때만 tick, Pause 시 정지.
+  // fit 고정 중에는 새 데이터가 fit 구간을 벗어나는지 감시하다가
+  // 벗어나면 고정을 풀고 live 추적으로 자동 복귀한다.
   useEffect(() => {
     if (paused) return;
     const id = setInterval(() => {
-      if (sharedXRef.current.xMin === null) notifyChange();
+      if (sharedXRef.current.xMin === null) {
+        notifyChange();
+        return;
+      }
+      if (!fitPinnedRef.current) return;
+      const pinnedMax = sharedXRef.current.xMax;
+      if (pinnedMax === null) {
+        fitPinnedRef.current = false;
+        return;
+      }
+      let newest = -Infinity;
+      for (const s of series) {
+        const points = canStore.signalHistory.get(seriesKey(s)) ?? [];
+        if (points.length > 0) {
+          const x = canStore.relMs(points[points.length - 1].ts);
+          if (x > newest) newest = x;
+        }
+      }
+      if (newest > pinnedMax) {
+        sharedXRef.current = { xMin: null, xMax: null };
+        fitYRef.current = {};
+        fitKeysRef.current = new Set();
+        fitPinnedRef.current = false;
+        setResetToken((n) => n + 1);
+        notifyChange();
+      }
     }, LIVE_TICK_MS);
     return () => clearInterval(id);
-  }, [paused]);
+  }, [paused, series]);
 
   const rxNode = canStore.getRxNode();
   const searchLower = search.trim().toLowerCase();
@@ -344,7 +448,7 @@ export function GraphWidget({ config }: { config: WidgetConfig }) {
             {`: Δ ${fmtDelta(cursorDeltaMs)}`}
           </span>
         )}
-        <button className="icon-btn" title="모든 그래프 X/Y 리셋" onClick={resetSharedX}>
+        <button className="icon-btn graph-fit-btn" title="모든 그래프 전체 맞춤 (기록 전체가 한 화면에) — 새 데이터 수신 시 live 추적 자동 재개" onClick={resetSharedX}>
           ⟲
         </button>
       </div>
@@ -476,6 +580,9 @@ export function GraphWidget({ config }: { config: WidgetConfig }) {
                 graphIndex={i}
                 cursor={cursor}
                 resetToken={resetToken}
+                fitYRef={fitYRef}
+                fitKeysRef={fitKeysRef}
+                onManualView={markManualView}
                 globalValueMode={globalValueMode}
                 globalValueVersion={globalValueVersion}
                 onRemove={() => removeSeries(seriesKey(s))}
@@ -583,6 +690,9 @@ function SignalChart({
   graphIndex,
   cursor,
   resetToken,
+  fitYRef,
+  fitKeysRef,
+  onManualView,
   globalValueMode,
   globalValueVersion,
   onRemove,
@@ -610,6 +720,9 @@ function SignalChart({
   graphIndex: number;
   cursor: DiffCursorState;
   resetToken: number;
+  fitYRef: MutableRefObject<Record<string, { yMin: number; yMax: number }>>;
+  fitKeysRef: MutableRefObject<Set<string>>;
+  onManualView: () => void;
   globalValueMode: 'dec' | 'hex' | 'desc';
   globalValueVersion: number;
   onRemove: () => void;
@@ -690,7 +803,18 @@ function SignalChart({
   }, []);
 
   useEffect(() => {
+    // fit 토큰이면 해당 차트의 전체 데이터 Y 범위를 적용하고,
+    // 그 외(자동 복귀 등)에는 Y 오버라이드를 지워 기본 로직으로 되돌린다.
+    if (fitKeysRef.current.has(key)) {
+      const fit = fitYRef.current[key];
+      if (fit) {
+        yViewRef.current = { yMin: fit.yMin, yMax: fit.yMax };
+        return;
+      }
+    }
     yViewRef.current = { yMin: null, yMax: null };
+    // fit payload는 ref 경유 전달이므로 dep에 넣지 않는다 (아래 MultiControls와 동일 관례).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [resetToken]);
 
   const zoomXButton = (factor: number) => {
@@ -701,6 +825,7 @@ function SignalChart({
     const halfWidth = ((xMax - xMin) / 2) * factor;
     xViewRef.current.xMin = center - halfWidth;
     xViewRef.current.xMax = center + halfWidth;
+    onManualView();
     notifyChange();
   };
   const zoomYButton = (factor: number) => {
@@ -712,6 +837,7 @@ function SignalChart({
     const halfHeight = ((yMax - yMin) / 2) * factor;
     v.yMin = center - halfHeight;
     v.yMax = center + halfHeight;
+    onManualView();
     notifyChange();
   };
 
@@ -912,6 +1038,7 @@ function SignalChart({
       const xMax = xViewRef.current.xMax ?? g.xMax;
       xViewRef.current.xMin = cursorX - (cursorX - xMin) * factor;
       xViewRef.current.xMax = cursorX + (xMax - cursorX) * factor;
+      onManualView();
       notifyChange();
       return;
     }
@@ -921,6 +1048,7 @@ function SignalChart({
       const yMax = yViewRef.current.yMax ?? g.yMax;
       yViewRef.current.yMin = cursorY - (cursorY - yMin) * factor;
       yViewRef.current.yMax = cursorY + (yMax - cursorY) * factor;
+      onManualView();
       notifyChange();
     }
   };
@@ -977,6 +1105,7 @@ function SignalChart({
         yMin: drag.yView.yMin! + dataDy,
         yMax: drag.yView.yMax! + dataDy,
       };
+      onManualView();
       notifyChange();
       return;
     }
@@ -1030,9 +1159,6 @@ function SignalChart({
         </button>
         <button className="icon-btn" title="Y축 축소" onClick={() => zoomYButton(BUTTON_ZOOM_FACTOR)}>
           Y−
-        </button>
-        <button className="icon-btn" title="X/Y 리셋 (공유 X)" onClick={() => { yViewRef.current = { yMin: null, yMax: null }; xViewRef.current = { xMin: null, xMax: null }; notifyChange(); }}>
-          ⟲
         </button>
         <button className="icon-btn" title="위로 이동" disabled={!canMoveUp} onClick={onMoveUp}>
           ▲

@@ -17,6 +17,8 @@ export function connectWebSocket(): void {
     const msg = JSON.parse(event.data as string);
     if (msg.type === 'rx') {
       canStore.ingestFrames(msg.frames as RxFrame[]);
+    } else if (msg.type === 'serial') {
+      canStore.ingestSerial(msg.a ?? [], msg.b ?? []);
     } else if (msg.type === 'status') {
       canStore.ingestStatus(msg as unknown as BackendStatus);
     }

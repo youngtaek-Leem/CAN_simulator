@@ -4305,3 +4305,30 @@ DID 크기 상한 16MB 캡. pytest 4개
 (`tests/test_syslog_upload_manager.py`: 가상 ECU 전 sequence 시뮬레이션,
 Security OFF 스킵, 크기 0 실패, 전송 중 Stop) + 전체 백엔드 회귀 통과,
 `npm run build` 통과. 실차(1MB) 수신은 사용자 환경에서 확인 필요.
+
+## "Serial 모니터" 위젯 (사용자 요청 — 개발 완료, 검증 통과)
+
+2포트 UART RX 모니터 위젯 (`frontend/src/widgets/SerialMonitorWidget.tsx`,
+registry `serialMonitor`). 포트별 {port, baud} 설정(8N1 고정), 위젯 창
+가로(상·하)/세로(좌·우) 분할 선택 + 드래그 비율 조절, 포트별 ASCII(기본)/
+HEX 표시 토글. 설정은 `config.options`에 저장되어 레이아웃 영속.
+
+백엔드 `backend/serial_service.py` (pyserial optional-import, 미설치 시
+graceful): 포트별 reader 스레드 + arrival 타임스탬프(ms) 버퍼(포트당
+scrollback 5000 + WS drain). CAN Start 시 설정된 포트 자동 open, Stop/
+disconnect 시 close. CAN 로깅 시작 시 `serial_A_<ts>.log` /
+`serial_B_<ts>.log` 2개 파일 병행 기록 (라인 형식
+`[YYYY-MM-DD HH:MM:SS.mmm] <HEX>  | <ASCII>`). 실시간은 기존 WS에
+`{type:"serial"}` 브로드캐스트 추가 + `GET /api/serial/lines` scrollback.
+REST: `/api/serial/ports|config|status|lines`. MCP 도구 제외(사용자 결정).
+
+### 검증
+
+- `backend/tests/test_serial_service.py` 8개 (loop:// 가상포트 — open/수신/
+  drain/scroll백/로깅 2파일/타임스탬프 ms/REST 배선, 하드웨어 불필요) +
+  전체 백엔드 476개 회귀 통과. 검증 중 float 정밀도 버그 1건 발견·수정
+  (epoch-ms/divmod float 연산 시 ms 소실 → 정수 연산으로 변경).
+- TestClient 종단 검증: config(loop://) → connect → run_start 자동open →
+  수신 → log_start 2파일 생성·기록 → run_stop close 확인.
+- `npm run build` + `lint` 통과 (신규 코드 경고 없음).
+- Windows COM 포트 실기 open→Start→수신→로깅은 사용자 환경에서 확인 필요.

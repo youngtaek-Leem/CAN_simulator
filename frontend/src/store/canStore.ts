@@ -14,6 +14,7 @@ import type {
   DbcSummary,
   FrameEntry,
   RxFrame,
+  SerialLine,
   TestRunnerEvent,
 } from '../types';
 
@@ -38,6 +39,7 @@ const TESTRUNNER_POLL_MS = 400; // matches TestRunnerBox's own poll cadence
 // revealedTrace()/tick()). A paused snapshot or the fixed-by-ID table are
 // unaffected -- both already show the true, unpaced data.
 const TRACE_REVEAL_PER_TICK = 80;
+const SERIAL_LINES_CAP = 2000; // live lines kept per serial port (older = backend scrollback)
 
 export interface HistoryPoint {
   ts: number; // effective backend timestamp (seconds, PCAN skew-corrected)
@@ -105,6 +107,9 @@ class CanStore {
   private lastRxWallMs: number | null = null;
   status: BackendStatus | null = null;
   wsConnected = false;
+  // Serial Monitor live lines per port (WS {type:"serial"} ingest).
+  // Bounded client-side; full scrollback lives on the backend (lines REST).
+  serialLines: { a: SerialLine[]; b: SerialLine[] } = { a: [], b: [] };
 
   // Widget/test-runner activity log (see TextDisplay widget).
   activityLog: ActivityEntry[] = [];
@@ -527,6 +532,24 @@ class CanStore {
     this.trace = [];
     this._revealedCount = 0;
     for (const key of this.signalHistory.keys()) this.signalHistory.set(key, []);
+    this.markDirty();
+  }
+
+  ingestSerial(a: SerialLine[], b: SerialLine[]) {
+    if (a.length > 0) {
+      const next = this.serialLines.a.concat(a);
+      this.serialLines.a = next.length > SERIAL_LINES_CAP ? next.slice(-SERIAL_LINES_CAP) : next;
+    }
+    if (b.length > 0) {
+      const next = this.serialLines.b.concat(b);
+      this.serialLines.b = next.length > SERIAL_LINES_CAP ? next.slice(-SERIAL_LINES_CAP) : next;
+    }
+    if (a.length > 0 || b.length > 0) this.markDirty();
+  }
+
+  clearSerialLines(port: 'a' | 'b' | 'all') {
+    if (port === 'a' || port === 'all') this.serialLines.a = [];
+    if (port === 'b' || port === 'all') this.serialLines.b = [];
     this.markDirty();
   }
 

@@ -13,6 +13,7 @@ import {
   FlexibleValueInput,
   SendTypeSelect,
   SignalPicker,
+  backfillExtraBinding,
 } from './MessageOptions';
 import type { ExtraBinding, SignalBinding, WidgetConfig } from '../types';
 
@@ -66,10 +67,17 @@ export function WidgetFrame({ config, children }: { config: WidgetConfig; childr
 
 function ConfigModal({ config, onClose }: { config: WidgetConfig; onClose: () => void }) {
   const { dbc, updateWidget, refreshDbc, pages, moveWidgetToPage } = useApp();
-  const [draft, setDraft] = useState<WidgetConfig>({
+  const [draft, setDraft] = useState<WidgetConfig>(() => ({
     ...config,
-    options: { ...config.options },
-  });
+    options: {
+      ...config.options,
+      // 구 저장행 수리: value 없이 text만 남은 행은 여기서 복원해 둔다
+      // (열어보자마자 올바른 값이 저장되도록 — MessageOptions.backfillExtraBinding)
+      ...(Array.isArray(config.options.extraBindings)
+        ? { extraBindings: (config.options.extraBindings as ExtraBinding[]).map(backfillExtraBinding) }
+        : null),
+    },
+  }));
   // Page-move target (the widget's own current page isn't known here, but
   // moveWidgetToPage no-ops when source === target, so listing all pages
   // is safe). Shown only when there are 2+ pages.
@@ -251,6 +259,7 @@ function ConfigModal({ config, onClose }: { config: WidgetConfig; onClose: () =>
                     savedText={b.text}
                     onText={(t) => patch({ text: t })}
                     onValue={(v) => patch({ value: v })}
+                    onValueText={(v, t) => patch({ value: v, text: t })}
                   />
                 </>
               )}
@@ -379,6 +388,7 @@ function ConfigModal({ config, onClose }: { config: WidgetConfig; onClose: () =>
                       savedText={b.onText}
                       onText={(t) => patch({ onText: t })}
                       onValue={(v) => patch({ onValue: v })}
+                      onValueText={(v, t) => patch({ onValue: v, onText: t })}
                     />
                   </span>
                   <span title="OFF값">
@@ -390,6 +400,7 @@ function ConfigModal({ config, onClose }: { config: WidgetConfig; onClose: () =>
                       savedText={b.offText}
                       onText={(t) => patch({ offText: t })}
                       onValue={(v) => patch({ offValue: v })}
+                      onValueText={(v, t) => patch({ offValue: v, offText: t })}
                     />
                   </span>
                 </>

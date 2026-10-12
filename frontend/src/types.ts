@@ -106,6 +106,7 @@ export interface BackendStatus {
   ota_tester: OtaTesterStatus;
   power: PowerStatus;
   audio: AudioStatus;
+  serial: SerialStatus;
   log: LogStatus;
 }
 
@@ -186,6 +187,32 @@ export interface AudioWaveformPoint {
 export interface AudioWaveformChannel {
   index: number;
   points: AudioWaveformPoint[];
+}
+
+// Serial Monitor widget (dual-port UART RX): backend serial_service.py.
+export interface SerialPortSetting {
+  port: string;
+  baud: number;
+}
+
+export interface SerialLine {
+  ts: number; // epoch ms
+  data: string; // uppercase hex, no spaces
+}
+
+export interface SerialStatus {
+  available: boolean;
+  error: string | null;
+  config: { a: SerialPortSetting; b: SerialPortSetting };
+  open: { a: boolean; b: boolean };
+  errors: { a: string | null; b: string | null };
+  logging: { active: boolean; files: { a: string | null; b: string | null }; counts: { a: number; b: number } };
+}
+
+export interface SerialPortList {
+  available: boolean;
+  ports: { device: string; description: string }[];
+  error: string | null;
 }
 
 export interface AudioWaveform {
@@ -489,7 +516,8 @@ export type WidgetType =
   | 'canAudioLatency'
   | 'sysLogAnalysis'
   | 'canLogAnalysis'
-  | 'sysLogUpload';
+  | 'sysLogUpload'
+  | 'serialMonitor';
 
 export interface SignalBinding {
   message: string;
