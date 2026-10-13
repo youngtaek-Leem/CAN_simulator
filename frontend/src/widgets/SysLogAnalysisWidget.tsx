@@ -21,7 +21,7 @@
 // SysLogService), 이 위젯의 여러 인스턴스가 같은 데이터를 공유한다 -- 새로 업로드하면
 // 이전 파일을 덮어쓴다. 선택된 ID 목록만 위젯별로 config.options.selectedIds에 저장된다.
 
-import { useEffect, useRef, useState, type MutableRefObject } from 'react';
+import { useEffect, useMemo, useRef, useState, type MutableRefObject } from 'react';
 import { api } from '../api/client';
 import { useApp } from '../store/appContext';
 import { niceTicks, orFallback, type AudioChartXView, type Geom } from './AudioWaveformChart';
@@ -33,6 +33,7 @@ import {
   type DiffCursorState,
 } from './DiffCursor';
 import type {
+  DbcSummary,
   SysLogIdInfo,
   SysLogPoint,
   SysLogScriptResult,
@@ -104,6 +105,16 @@ function plotXToAbsMs(segments: SysLogTimelineSegment[], x: number): number {
   return seg.abs_ms_start + (x - seg.plot_x_start);
 }
 
+/** plot_x가 속한 세그먼트 인덱스 (0-based, 표시 시 +1). plotXToAbsMs와 동일 규칙. */
+function plotXToSegIndex(segments: SysLogTimelineSegment[], x: number): number {
+  let idx = 0;
+  for (let i = 0; i < segments.length; i++) {
+    if (segments[i].plot_x_start <= x) idx = i;
+    else break;
+  }
+  return idx;
+}
+
 /** 절대ms -> "D<day> HH:MM:SS.mmm" (디코딩한 day/hour/min/millisec 표현). */
 function fmtAbsTime(absMs: number): string {
   const sign = absMs < 0 ? '-' : '';
@@ -133,12 +144,49 @@ function findHeldPoint(points: SysLogPoint[], plotX: number): SysLogPoint | null
   return held;
 }
 
-function fmtValue(v: number, mode: 'hex' | 'dec' | 'float', decimals: number = 2): string {
+function fmtValue(
+  v: number,
+  mode: 'hex' | 'dec' | 'float' | 'desc',
+  decimals: number = 2,
+  choices: Record<string, string> | null = null,
+): string {
   if (mode === 'float') return v.toFixed(decimals);
   const n = Math.round(v);
-  if (mode === 'dec') return n.toString();
+  // DESC: 로드된 CAN-DB 신호명과 매칭된 VAL_ 설명 표시 (GraphWidget과 동일
+  // 형식). 매칭 없거나 해당 값에 라벨이 없으면 DEC와 동일하게 숫자 표시.
+  if (mode === 'desc' && choices) {
+    const lbl = choices[String(n)];
+    if (lbl !== undefined) return `${lbl} (${n})`;
+    return n.toString();
+  }
+  if (mode === 'dec' || mode === 'desc') return n.toString();
   const abs = Math.abs(n).toString(16).toUpperCase();
   return n < 0 ? `-0x${abs}` : `0x${abs}`;
+}
+
+/** sysLog 시리즈명과 대소문자 구분 없이 매칭되는 DBC 신호의 VAL_ 선택지
+ * 반환. 정확 일치 우선, 없으면 prefix 유일 후보 1개 (백엔드
+ * syslog_script_generator.py 매처의 case-insensitive 버전). */
+function findDbcChoices(dbc: DbcSummary, seriesName: string): Record<string, string> | null {
+  const messages = dbc.messages;
+  if (!messages || seriesName.trim() === '') return null;
+  const want = seriesName.trim().toLowerCase();
+  for (const m of messages) {
+    for (const s of m.signals) {
+      if (s.name.toLowerCase() === want) return s.choices ?? null;
+    }
+  }
+  let prefixHit: Record<string, string> | null | undefined = undefined;
+  let prefixCount = 0;
+  for (const m of messages) {
+    for (const s of m.signals) {
+      if (s.name.toLowerCase().startsWith(want)) {
+        prefixHit = s.choices ?? null;
+        prefixCount++;
+      }
+    }
+  }
+  return prefixCount === 1 ? (prefixHit ?? null) : null;
 }
 
 /** 커서 간격(Δ) 표시용 -- plot_x 차이를 실제 경과 시간처럼 day/hour/min/sec로 분해. */
@@ -916,8 +964,12 @@ function SysLogChart({
   const yViewRef = useRef<YView>({ yMin: null, yMax: null });
   const dragRef = useRef<{ x: number; y: number; xView: SharedXView; yView: YView } | null>(null);
   const cursorDragRef = useRef<'a' | 'b' | null>(null);
-  const [valueMode, setValueMode] = useState<'hex' | 'dec' | 'float'>('hex');
+  const [valueMode, setValueMode] = useState<'hex' | 'dec' | 'desc' | 'float'>('hex');
   const mode = isPairedFloatId(id) ? 'float' : valueMode;
+  // DBC 매칭 VAL_ 선택지: 시리즈명과 신호명이 대소문자 구분 없이 일치할 때만
+  // DESC 표시 (미매칭이면 DESC 선택 시에도 숫자 표시 — GraphWidget과 동일).
+  const { dbc } = useApp();
+  const dbcChoices = useMemo(() => findDbcChoices(dbc, series.name), [dbc, series.name]);
   const lastGeomRef = useRef<Geom>({
     xMin: 0,
     xMax: 1,
@@ -1061,7 +1113,7 @@ function SysLogChart({
       ctx.moveTo(plotLeft, py);
       ctx.lineTo(plotLeft + plotW, py);
       ctx.stroke();
-      ctx.fillText(fmtValue(t, mode), 2, py + 3);
+      ctx.fillText(fmtValue(t, mode, 2, dbcChoices), 2, py + 3);
     }
     ctx.strokeStyle = '#4b5160';
     ctx.strokeRect(plotLeft, plotTop, plotW, plotH);
@@ -1145,7 +1197,9 @@ function SysLogChart({
       const px = xToPx(hoverPlotX);
       const plotX = hoverPlotX;
       const heldPoint = findHeldPoint(points, plotX);
-      const tipLines = [`${fmtAbsTime(plotXToAbsMs(segments, plotX))}  ${heldPoint ? fmtValue(heldPoint.value, mode) : '-'}`];
+      // 구간 번호는 맨앞에 (1-based, 구간이 2개 이상일 때만).
+      const segTag = segments.length > 1 ? `[구간${plotXToSegIndex(segments, plotX) + 1}] ` : '';
+      const tipLines = [`${segTag}${fmtAbsTime(plotXToAbsMs(segments, plotX))}  ${heldPoint ? fmtValue(heldPoint.value, mode, 2, dbcChoices) : '-'}`];
       if (heldPoint?.raw) tipLines.push(heldPoint.raw);
       if (heldPoint?.raw2) tipLines.push(heldPoint.raw2);
       ctx.font = '10px monospace';
@@ -1292,12 +1346,13 @@ function SysLogChart({
         <span className="spacer" />
         <button
           className="icon-btn"
-          title="Y값 표시 형식(16진수/10진수/실수) 전환"
+          title="Y값 표시 형식(16진수/10진수/설명/실수) 전환 — DESC는 DBC 신호명과 매칭될 때 VAL_ 설명 표시"
           onClick={() => {
-            if (!isPairedFloatId(id)) setValueMode((m) => (m === 'hex' ? 'dec' : 'hex'));
+            if (!isPairedFloatId(id))
+              setValueMode((m) => (m === 'hex' ? 'dec' : m === 'dec' ? 'desc' : 'hex'));
           }}
         >
-          {mode === 'float' ? 'FLOAT' : valueMode === 'hex' ? 'HEX' : 'DEC'}
+          {mode === 'float' ? 'FLOAT' : valueMode === 'hex' ? 'HEX' : valueMode === 'dec' ? 'DEC' : 'DESC'}
         </button>
         <button className="icon-btn" title="Y축 확대" onClick={() => zoomY(1 / BUTTON_ZOOM_FACTOR)}>
           Y+
