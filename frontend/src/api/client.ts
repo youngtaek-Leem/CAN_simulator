@@ -220,6 +220,8 @@ export const api = {
     request<{ filename: string; content: string } | { loaded: false }>('/api/testrunner/script/raw'),
   uploadTestLogfile: (file: File) => upload('/api/testrunner/logfile/upload', file),
   uploadTestGolden: (file: File) => upload('/api/testrunner/golden/upload', file),
+  clearTestGolden: () =>
+    request<{ active_golden: string | null }>('/api/testrunner/golden/active', { method: 'DELETE' }),
   testRunnerStart: () => post('/api/testrunner/start'),
   testRunnerPause: () => post('/api/testrunner/pause'),
   testRunnerResume: () => post('/api/testrunner/resume'),
@@ -310,6 +312,27 @@ export const api = {
       `/api/audio/waveform?from_ms=${fromMs}&to_ms=${toMs}&max_points=${maxPoints}`,
     ),
 
+  // 오디오 파형비교 (backend/wav_compare_service.py)
+  wavcmpUploadA: (file: File) => upload<import('../types').WavCompareFileMeta>('/api/wavcmp/upload_a', file),
+  wavcmpUploadB: (file: File) => upload<import('../types').WavCompareFileMeta>('/api/wavcmp/upload_b', file),
+  wavcmpStatus: () => request<import('../types').WavCompareStatus>('/api/wavcmp/status'),
+  wavcmpGetParams: () => request<import('../types').WavcmpParams>('/api/wavcmp/params'),
+  wavcmpSetParams: (params: Partial<import('../types').WavcmpParams>) =>
+    post<import('../types').WavcmpParams>('/api/wavcmp/params', params),
+  wavcmpLastResult: () =>
+    request<import('../types').WavCompareLastResult>('/api/wavcmp/last_result'),
+  wavcmpCompare: (params: {
+    algorithm: string;
+    threshold: number;
+    segment_ms: number;
+    align: boolean;
+    channel: string;
+  }) => post<import('../types').WavCompareResult>('/api/wavcmp/compare', params),
+  wavcmpSeries: (which: 'a' | 'b', maxPoints: number, channel: string) =>
+    request<import('../types').WavCompareSeries>(
+      `/api/wavcmp/series?which=${which}&max_points=${maxPoints}&channel=${encodeURIComponent(channel)}`,
+    ),
+
   // Serial Monitor (dual-port UART RX -- backend/serial_service.py)
   serialPorts: () => request<import('../types').SerialPortList>('/api/serial/ports'),
   serialConfig: (a: { port: string; baud: number }, b: { port: string; baud: number }) =>
@@ -376,9 +399,10 @@ export const api = {
   syslogUploadDb: (file: File) => upload<import('../types').SysLogStatus>('/api/syslog/db/upload', file),
   syslogStatus: () => request<import('../types').SysLogStatus>('/api/syslog/status'),
   syslogTimeline: () => request<import('../types').SysLogTimeline>('/api/syslog/timeline'),
-  syslogGenerateScript: (checkedSegments: number[]) =>
+  syslogGenerateScript: (checkedSegments: number[], range?: { a_ms: number; b_ms: number } | null) =>
     post<import('../types').SysLogScriptResult>('/api/syslog/generate_script', {
       checked_segments: checkedSegments,
+      ...(range ? { range } : {}),
     }),
   // segmentIndices를 주면(체크된 시간 구간 인덱스) 각 ID의 count가 그 구간
   // 안의 레코드 수로만 계산된다. 생략하면 전체 개수(필터 없음). 빈 배열이면

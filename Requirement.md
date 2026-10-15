@@ -542,8 +542,8 @@ Event 규칙과 동일), `CANResp`(timeout 내 기대값 수신 대기/판정), 
    CANEv를 완전히 동일하게 처리한다. Periodic 신호는 기존 위젯과 동일하게 auto_entries로
    계속 재전송되다가, 시나리오 실행이 끝나면(정상 종료·중단 모두) `tx_scheduler.stop_auto()`
    로 정리된다 — 전역 Start/Stop의 auto_entries 클리어와 동일한 패턴.
-4. **원시값(raw) 기준 처리**: JSON의 `Value`는 물리값이 아니라 원시 16진수 비트 패턴이므로,
-   CANReq/CANEv는 `raw*scale+offset`으로 물리값 변환 후 전송하고, CANResp는 `decode_raw()`
+4. **원시값(raw) 기준 처리**: JSON의 `Value`는 물리값이 아니라 원시 정수 비트 패턴이므로,
+    CANReq/CANEv는 `raw*scale+offset`으로 물리값 변환 후 전송하고, CANResp는 `decode_raw()`
    (스케일·VAL_ 라벨 없이 원시값만 디코딩하는 신규 메서드)로 비교해 신호의 scale이나
    선택형 여부와 무관하게 항상 정확히 비교되도록 했다 — AppTest.py 원본은 이 변환이 없어
    scale≠1인 신호에서는 값이 어긋날 수 있는 잠재 버그가 있었다.
@@ -559,8 +559,16 @@ Event 규칙과 동일), `CANResp`(timeout 내 기대값 수신 대기/판정), 
    `{"type": "CANStop"}`은 이번 실행의 CANStart가 arm한 메시지만 정지한다(TxBox 행·
    Random 전송·수동 Enable Msg분은 유지 — `tx_scheduler.stop_started()`).
    arm 실패분은 로그에 남기고 1건도 성공 없으면 Fail. Excel(`xlsx_to_script.py`,
-   `STEP_TYPES`)에서는 B열 `CANStart`(D열 비우면 전체, 노드명 입력 시 제외)/
-   `CANStop`(입력 불필요)으로 입력한다.
+    `STEP_TYPES`)에서는 B열 `CANStart`(D열 비우면 전체, 노드명 입력 시 제외)/
+    `CANStop`(입력 불필요)으로 입력한다.
+8. **파일명 없는 bare compWAV 연속 비교**: `{"type": "Audio", "command": "compWAV"}`
+    (golden 없이)는 run 동안 성공한 StartREC 파일명을 누적해 항상 최근 2개(직전/
+    현재 녹음)를 직접 비교한다(슬라이딩, 소진 없음, 아래 "알고리즘 통합" 절의
+    동일 엔진). 녹음이 2개 미만이면(첫 스텝 등) `실패: 비교파일없음`으로 Fail.
+    `golden` 지정 시 golden 비교 동작 그대로. `threshold`는 두 경로 모두
+    `block.threshold` 없으면 공유 설정값. 실행 로그에는 `msg` 한 줄로 비교 파일명·
+    채널별 유사도·임계값·Pass/Fail 이유를 남긴다(threshold 최적화용). Excel Audio
+    행은 D열 command만 전달하므로 bare `compWAV`는 그대로 입력하면 된다.
 
 ### Phase 2 모듈 분해 — 개발 완료 (2026-07-11, 검증 통과)
 
@@ -4332,3 +4340,80 @@ REST: `/api/serial/ports|config|status|lines`. MCP 도구 제외(사용자 결�
   수신 → log_start 2파일 생성·기록 → run_stop close 확인.
 - `npm run build` + `lint` 통과 (신규 코드 경고 없음).
 - Windows COM 포트 실기 open→Start→수신→로깅은 사용자 환경에서 확인 필요.
+
+## "오디오 파형비교" 위젯 (사용자 요청 — 개발 완료, 검증 통과)
+
+2개 WAV 로딩 → 알고리즘 선택 → 파라미터 설정 → 시작점 매칭 + 구간별
+종합 비교 → 결과(판정·구간표·파형) 출력 위젯
+(`frontend/src/widgets/WavCompareWidget.tsx`, registry `wavCompare`).
+
+### 핵심 설계
+
+- **파일 보관**: A/B 슬롯에 .wav 업로드 후 서버 보관
+  (`backend/wav_compare_service.py`, workdir `uploads/wavcmp`,
+  syslog/canlog 세션 패턴). 서로 다른 샘플레이트는 librosa.resample로 통일
+  (audio_service._compare_wav_files는 두 번째 sr 무시 — 여기서 해결).
+- **시작점 매칭**: 정규화 상호상관 full-lag 전역 탐색으로 B 지연 검출
+  (양수=B 지연 ms). 연산량 제한용 decimation(coarse) 후 원래 스케일 환산.
+- **구간별 비교**: 정렬 신호를 segment_ms(기본 100ms)로 분할, 구간마다
+  Amplitude(RMS 상대 유사도) + Shape(MFCC-DTW·상호상관) +
+  주파수(전체/대역 FFT 상관·centroid·ZCR) 7종을 0~1 유사도로 정규화해
+  종합 점수(평균)로 판정. 개별 지표 단독 선택도 가능.
+- **구현 중 발견**: audio_service._mfcc_dtw_similarity는 librosa dtw 규격
+  (특징, 프레임)과 뒤집힌 (프레임, 13) 방향으로 호출하는 잠재 버그 —
+  프레임이 13개 이상인 전체 신호에서는 우연히 동작하나 100ms 구간에서는
+  IndexError. 기존 golden 비교 동작에 영향주지 않도록 audio_service는
+  그대로 두고, 이 서비스에서만 올바른 방향의 _mfcc_dtw_similarity_fixed 사용.
+- **결과**: offset_ms, 전체 Pass/Fail, 구간 통과율, 구간별 {시간·판정·대표값·
+  7지표}(hover 툴팁), A/B 파형 정렬 표시 + 실패 구간 음영. 설정은
+  `config.options` 영속. REST: `/api/wavcmp/upload_a|upload_b|status|
+  compare|series`.
+
+### 검증
+
+- `backend/tests/test_wav_compare_service.py` 11개 (동일신호 Pass, 무음
+  Fail, 지연파일 정렬+offset 검출, 미정렬 시 Fail, sr 상이 리샘플 비교,
+  개별지표(RMS는 Fail·MFCC는 Pass), 에러 케이스, series 다운샘플) +
+  `tests/test_api.py` 업로드→비교 왕복 1개 + 전체 백엔드 498개 회귀 통과,
+  `npm run build` 통과.
+
+## 테스트 Sequence 실행기 ↔ 오디오 파형비교 알고리즘 통합 (사용자 요청 — 개발 완료, 검증 통과)
+
+두 위젯이 동일한 비교 알고리즘(`wav_compare_service`)을 사용한다. 달라지는
+점 3건에 대한 구현:
+
+1. **실행기는 파일 내부 전채널 비교**: 실행기 compWAV(golden/bare 모두)는
+   항상 `channel="all"` — 채널별 독립 비교 후 전체 AND. 스테레오면 두 채널
+   모두 비교한다. `per_channel[]`에 채널별 판정을 싣고, 구간 상세는 첫 실패
+   채널(전부 통과면 ch0) 대표로 포함. 위젯의 channel(mix/개별)은 표시용
+   로컬 값으로 유지, 동기화 대상 아님.
+2. **실행기 오디오 장치선택 오른쪽에 설정 UI**: 알고리즘 드롭다운 +
+   임계값/구간ms 입력(Enter·포커스아웃 커밋) + 시작점매칭 체크박스.
+   `WavCompareService`가 4종(algorithm/threshold/segment_ms/align)을 단일
+   진실로 보관(`GET/POST /api/wavcmp/params`, 값 검증)하고 양 위젯이
+   조회·수정한다 (실행기는 2초 폴링, 파형비교 위젯은 1초 폴링으로 상대방
+   변경 반영). 시나리오 JSON Audio 스텝에서 `algorithm/threshold/
+   segment_ms/align` 재지정 가능 (없으면 공유값, 스텝 재지정은 공유값에
+   영향 없음). XLSX는 command만 전달하므로 공유값 적용.
+3. **실행기 비교 → 파형비교 위젯 출력**: `compare_files()`가 비교한 2파일을
+   A/B 슬롯에 복사 + `_last_result` 저장. 파형비교 위젯은 status 폴링으로
+   새 결과(ts 변경)를 감지해 파형·파일명·결과를 자동 표시, 다음 비교 시
+   갱신된다. 위젯 자체 비교도 동일 구조로 저장된다. REST 추가:
+   `/api/wavcmp/params|last_result` (status 응답에 `params`·`last` 요약 포함).
+4. **bare compWAV + 업로드 gold 연동**: `POST /api/testrunner/golden/upload`
+   성공 시 파일명을 `audio_service.active_golden`으로 기억 (교체·해제 전까지
+   유지, `DELETE /api/testrunner/golden/active`로 해제, `GET /api/audio/status`
+   응답에 포함). 스텝에 `golden` 필드 없는 bare `compWAV`는 기억된 gold가
+   있으면 최근 녹음 1개와 gold를 비교하고, 없으면(미업로드·해제·파일삭제)
+   기존대로 직전/현재 녹음을 비교한다. 스텝 `golden` 명시가 최우선.
+   실행기 UI에 `🥇 gold: 파일명` 표시 + 해제(✕) 버튼.
+
+### 검증
+
+- `test_wav_compare_service.py` 7개 추가 (전채널 Pass/일부채널 Fail 식별,
+  compare_files 슬롯 게시+last_result, 위젯 비교 저장, 공유 params 검증).
+- `test_test_runner_service.py` 오디오 8개 재작성 (FakeWavCompare 기반:
+  golden/bare 호출 인자·전채널 고정, 스텝 재지정+공유값 불변, 서비스 없음·
+  파일 없음 Fail, reason 전파).
+- `test_api.py` params get/set 왕복 1개. 전체 백엔드 508개 회귀 통과,
+  `npm run build`·`lint` 통과 (신규 코드 경고 없음).

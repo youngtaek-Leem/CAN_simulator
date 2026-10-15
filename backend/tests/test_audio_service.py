@@ -170,6 +170,37 @@ def test_compare_returns_all_seven_metrics(dirs):
     }
 
 
+def test_compare_recordings_identical_passes(dirs):
+    rec_dir, golden_dir = dirs
+    sig = tone(440)
+    wav_write(str(rec_dir / "prev.wav"), SR, stereo(sig))
+    wav_write(str(rec_dir / "curr.wav"), SR, stereo(sig))
+
+    svc = AudioService(rec_dir, golden_dir)
+    result = svc.compare_recordings("prev.wav", "curr.wav", threshold=0.8)
+    assert result["ok"] is True
+    assert result["channels"]["ch0"]["mfcc_dtw_similarity"] > 0.99
+
+
+def test_compare_recordings_silence_vs_tone_fails(dirs):
+    rec_dir, golden_dir = dirs
+    wav_write(str(rec_dir / "prev.wav"), SR, stereo(tone(440)))
+    wav_write(str(rec_dir / "curr.wav"), SR, stereo(np.zeros(SR * 2, dtype=np.int16)))
+
+    svc = AudioService(rec_dir, golden_dir)
+    result = svc.compare_recordings("prev.wav", "curr.wav", threshold=0.8)
+    assert result["ok"] is False
+    assert "유사도 기준 미달" in result["reason"]
+
+
+def test_compare_recordings_missing_file_reports_reason(dirs):
+    rec_dir, golden_dir = dirs
+    svc = AudioService(rec_dir, golden_dir)
+    r = svc.compare_recordings("missing.wav", "also_missing.wav")
+    assert r["ok"] is False
+    assert "reason" in r
+
+
 def test_save_as_golden_copies_file(dirs):
     rec_dir, golden_dir = dirs
     wav_write(str(rec_dir / "rec.wav"), SR, stereo(tone(440)))
@@ -184,6 +215,21 @@ def test_save_as_golden_missing_source(dirs):
     svc = AudioService(rec_dir, golden_dir)
     r = svc.save_as_golden("nope.wav", "golden.wav")
     assert r["ok"] is False
+
+
+def test_active_golden_set_get_clear(dirs):
+    rec_dir, golden_dir = dirs
+    svc = AudioService(rec_dir, golden_dir)
+    assert svc.get_active_golden() is None
+    assert svc.info()["active_golden"] is None
+    # 파일이 없어도 기억은 되지만 get은 None (존재 검증)
+    assert svc.set_active_golden("g.wav") == "g.wav"
+    assert svc.get_active_golden() is None
+    (golden_dir / "g.wav").write_bytes(b"RIFF....WAVEfmt ")
+    assert svc.get_active_golden() == "g.wav"
+    assert svc.info()["active_golden"] == "g.wav"
+    assert svc.set_active_golden(None) is None
+    assert svc.get_active_golden() is None
 
 
 # ---- 오디오 신호 모니터 (live level monitor) ------------------------------------

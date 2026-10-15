@@ -1982,6 +1982,53 @@ select.tx-signal-input {
   overflow: hidden;
 }
 
+.testrunner-split-drag {
+  flex: none;
+  width: 9px;
+  cursor: col-resize;
+  display: flex;
+  align-items: stretch;
+  justify-content: center;
+}
+.testrunner-split-drag::after {
+  content: '';
+  background: var(--border);
+  border-radius: 2px;
+  margin: auto;
+  width: 3px;
+  height: 100%;
+}
+.testrunner-split-drag:hover::after {
+  background: var(--accent);
+}
+
+/* 테스트 실행기 파형비교옵션 팝오버 */
+.testrunner-wavcmp-wrap {
+  position: relative;
+  display: inline-flex;
+}
+.testrunner-wavcmp-panel {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 4px);
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 12px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+  white-space: nowrap;
+}
+.testrunner-wavcmp-panel label {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+
 .testrunner-section-title {
   padding: 4px 8px;
   font-size: 11px;
@@ -2258,4 +2305,92 @@ select.tx-signal-input {
   border: 1px solid var(--border);
   border-radius: 4px;
   padding: 4px 6px;
+}
+
+/* 오디오 파형비교 위젯 */
+.wavcmp-widget {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  height: 100%;
+  overflow-y: auto;
+}
+.wavcmp-params {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  font-size: 12px;
+}
+.wavcmp-params label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.wavcmp-verdict {
+  font-weight: 700;
+  font-size: 14px;
+}
+.wavcmp-verdict.ok {
+  color: var(--ok);
+}
+.wavcmp-verdict.fail {
+  color: var(--bad);
+}
+.wavcmp-summary {
+  font-size: 12px;
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: baseline;
+}
+.wavcmp-sims {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  color: var(--text-dim);
+}
+.wavcmp-charts {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.wavcmp-chart-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-dim);
+}
+.wavcmp-canvas {
+  width: 100%;
+  height: 140px;
+  display: block;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+.wavcmp-section-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-dim);
+  padding: 2px 0;
+}
+.wavcmp-segment-list {
+  max-height: 220px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+.wavcmp-segment-row {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  padding: 2px 8px;
+  font-size: 11px;
+  border-bottom: 1px solid var(--border);
+}
+.wavcmp-segment-row.ok {
+  color: var(--text-dim);
+}
+.wavcmp-segment-row.fail {
+  color: var(--bad);
+  background: rgba(255, 60, 60, 0.07);
 }

@@ -70,9 +70,16 @@ def generate_can_test_script(
     log_db: dict[int, str],
     dbc_messages: list[dict],
     signal_send_type: Callable[[str, str], str],
+    x_range: tuple[int, int] | None = None,  # (a, b) plot_x 구간 -- None이면 전체, 아니면 [a,b]와 체크구간의 교집합만
 ) -> ScriptGenerationResult:
     signal_index = build_signal_index(dbc_messages)
     starts = [seg["plot_x_start"] for seg in segments]
+
+    # 커서 범위 정규화 (A/B 순서 무관)
+    range_a = range_b = None
+    if x_range is not None:
+        range_a = min(x_range[0], x_range[1])
+        range_b = max(x_range[0], x_range[1])
 
     def segment_index_for(x: int) -> int:
         return max(0, bisect.bisect_right(starts, x) - 1)
@@ -95,6 +102,8 @@ def generate_can_test_script(
             continue
         x = plot_x_by_seq.get(rec.seq)
         if x is None:
+            continue
+        if range_a is not None and not (range_a <= x <= range_b):
             continue
         seg_idx = segment_index_for(x)
         if seg_idx not in checked_segment_indices:

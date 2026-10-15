@@ -306,3 +306,49 @@ def test_service_generate_test_script_end_to_end_with_real_syslog():
     assert all(s["Message"] == "CLU_AMP_01_200ms" for s in tiktok_steps)
     assert not any(w["log_id"] == 49 for w in result["warnings"])  # 정확 일치라 경고 대상 아님
     assert result["matched_count"] >= 1
+
+
+# ---- x_range (커서 A-B) 필터 -------------------------------------------------
+
+
+def test_generate_script_x_range_filters_to_cursor_interval():
+    records = [
+        _mk(0, day=1, hour=0, minute=0, ms=0, log_id=1, value=1),
+        _mk(1, day=1, hour=0, minute=0, ms=500, log_id=1, value=2),
+        _mk(2, day=1, hour=0, minute=1, ms=0, log_id=1, value=3),
+    ]
+    plot_x_by_seq, segments = build_global_timeline(records)
+    log_db = {1: "Sig"}
+    dbc_messages = [{"name": "M", "signals": [{"name": "Sig"}]}]
+    checked = set(range(len(segments)))
+    x1 = plot_x_by_seq[1]
+
+    full = generate_can_test_script(records, plot_x_by_seq, segments, checked, log_db, dbc_messages, _fixed_send_type({}))
+    ranged = generate_can_test_script(
+        records, plot_x_by_seq, segments, checked, log_db, dbc_messages, _fixed_send_type({}),
+        x_range=(x1, x1),
+    )
+    assert len(full.steps) > len(ranged.steps)
+    assert len(ranged.steps) == 1  # 두 번째 레코드만
+    assert ranged.steps[0]["Value"] == "0x2"
+
+
+def test_generate_script_x_range_endpoints_are_order_insensitive():
+    records = [
+        _mk(0, day=1, hour=0, minute=0, ms=0, log_id=1, value=1),
+        _mk(1, day=1, hour=0, minute=0, ms=500, log_id=1, value=2),
+    ]
+    plot_x_by_seq, segments = build_global_timeline(records)
+    log_db = {1: "Sig"}
+    dbc_messages = [{"name": "M", "signals": [{"name": "Sig"}]}]
+    checked = set(range(len(segments)))
+    x0, x1 = plot_x_by_seq[0], plot_x_by_seq[1]
+    fwd = generate_can_test_script(
+        records, plot_x_by_seq, segments, checked, log_db, dbc_messages, _fixed_send_type({}),
+        x_range=(x0, x1),
+    )
+    rev = generate_can_test_script(
+        records, plot_x_by_seq, segments, checked, log_db, dbc_messages, _fixed_send_type({}),
+        x_range=(x1, x0),
+    )
+    assert fwd.steps == rev.steps

@@ -884,13 +884,101 @@ def test_testrunner_golden_upload():
             files={"file": ("case1_golden.wav", b"RIFF....WAVEfmt ")},
         )
         assert r.status_code == 200
-        assert r.json() == {"saved": "case1_golden.wav"}
+        assert r.json() == {"saved": "case1_golden.wav", "active_golden": "case1_golden.wav"}
 
         r = client.post(
             "/api/testrunner/golden/upload",
             files={"file": ("not_a_wav.txt", b"nope")},
         )
         assert r.status_code == 400
+
+
+def test_testrunner_golden_active_clear():
+    with make_client() as client:
+        r = client.post(
+            "/api/testrunner/golden/upload",
+            files={"file": ("g.wav", b"RIFF....WAVEfmt ")},
+        )
+        assert r.status_code == 200
+        assert client.get("/api/audio/status").json()["active_golden"] == "g.wav"
+        r = client.delete("/api/testrunner/golden/active")
+        assert r.status_code == 200
+        assert r.json() == {"active_golden": None}
+        assert client.get("/api/audio/status").json()["active_golden"] is None
+
+
+def _sine_wav_bytes(freq: float = 440.0, duration_s: float = 0.5, sr: int = 22050) -> bytes:
+    import io
+
+    import numpy as np
+    from scipy.io.wavfile import write as wav_write
+
+    t = np.linspace(0, duration_s, int(sr * duration_s), endpoint=False)
+    mono = (0.5 * np.sin(2 * np.pi * freq * t) * 32767).astype(np.int16)
+    buf = io.BytesIO()
+    wav_write(buf, sr, np.stack([mono, mono], axis=1))
+    return buf.getvalue()
+
+
+def test_wavcmp_upload_compare_roundtrip():
+    wav = _sine_wav_bytes()
+    with make_client() as client:
+        for slot in ("a", "b"):
+            r = client.post(
+                f"/api/wavcmp/upload_{slot}",
+                files={"file": (f"{slot}.wav", wav)},
+            )
+            assert r.status_code == 200
+            assert r.json()["filename"] == f"{slot}.wav"
+
+        r = client.get("/api/wavcmp/status")
+        assert r.status_code == 200
+        assert r.json()["a"]["filename"] == "a.wav"
+
+        r = client.get("/api/wavcmp/series", params={"which": "a", "max_points": 50})
+        assert r.status_code == 200
+        assert len(r.json()["points"]) == 50
+
+        r = client.post("/api/wavcmp/compare", json={"algorithm": "comprehensive"})
+        assert r.status_code == 200
+        body = r.json()
+        assert body["overall_pass"] is True
+        assert body["segment_count"] == 5  # 0.5s / 100ms
+
+        r = client.post("/api/wavcmp/compare", json={"algorithm": "nope"})
+        assert r.status_code == 400
+
+        r = client.post("/api/wavcmp/upload_a", files={"file": ("x.txt", b"nope")})
+        assert r.status_code == 400
+
+
+def test_wavcmp_shared_params_roundtrip():
+    with make_client() as client:
+        r = client.get("/api/wavcmp/params")
+        assert r.status_code == 200
+        assert r.json()["algorithm"] == "comprehensive"
+
+        r = client.post("/api/wavcmp/params", json={"algorithm": "mfcc_dtw", "threshold": 0.5})
+        assert r.status_code == 200
+        assert r.json() == {
+            "algorithm": "mfcc_dtw", "threshold": 0.5,
+            "segment_ms": 100, "align": True,
+        }
+
+        r = client.post("/api/wavcmp/params", json={"algorithm": "nope"})
+        assert r.status_code == 400
+        r = client.post("/api/wavcmp/params", json={"threshold": 2.0})
+        assert r.status_code == 400
+
+        # 되돌리기 (다른 테스트·실사용 기본값 오염 방지)
+        r = client.post(
+            "/api/wavcmp/params",
+            json={"algorithm": "comprehensive", "threshold": 0.8, "segment_ms": 100, "align": True},
+        )
+        assert r.status_code == 200
+
+        r = client.get("/api/wavcmp/last_result")
+        assert r.status_code in (200, 404)
 
 
 def test_send_type_override_api():

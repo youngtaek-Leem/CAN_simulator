@@ -57,6 +57,7 @@ from serial_service import SerialService
 from syslog_service import SysLogService
 from can_log_service import CanLogService
 from test_runner_service import TestRunnerService
+from wav_compare_service import ALGORITHMS, DEFAULT_SEGMENT_MS, WavCompareService
 from tx_scheduler import TxScheduler
 from uds_core import generate_key as _dummy_generate_key
 from uds_download_manager import MultiUdsDownloadManager
@@ -163,6 +164,7 @@ power_supply_service = PowerSupplyService()
 audio_service = AudioService(TESTRUNNER_AUDIO_DIR, TESTRUNNER_GOLDEN_DIR)
 syslog_service = SysLogService()
 can_log_service = CanLogService(dbc_service)
+wav_compare_service = WavCompareService(UPLOAD_DIR / "wavcmp")
 test_runner_service = TestRunnerService(
     can_manager,
     dbc_service,
@@ -172,6 +174,7 @@ test_runner_service = TestRunnerService(
     TESTRUNNER_RESULT_DIR,
     power_service=power_supply_service,
     audio_service=audio_service,
+    wav_compare_service=wav_compare_service,
 )
 
 seedkey_service = SeedKeyService()
@@ -1964,7 +1967,121 @@ async def testrunner_upload_golden(file: UploadFile):
         raise HTTPException(status_code=400, detail="only .wav is supported")
     dest = TESTRUNNER_GOLDEN_DIR / _safe_upload_filename(file.filename, "golden.wav")
     dest.write_bytes(await file.read())
-    return {"saved": dest.name}
+    active = audio_service.set_active_golden(dest.name)
+    return {"saved": dest.name, "active_golden": active}
+
+
+@app.delete("/api/testrunner/golden/active")
+def testrunner_clear_golden():
+    return {"active_golden": audio_service.set_active_golden(None)}
+
+
+# ---- 오디오 파형비교 --------------------------------------------------------
+
+
+def _wavcmp_upload(which: str, file: UploadFile, data: bytes) -> dict:
+    suffix = Path(file.filename or "").suffix.lower()
+    if suffix != ".wav":
+        raise HTTPException(status_code=400, detail="only .wav is supported")
+    try:
+        return wav_compare_service.upload(which, data, file.filename or f"{which}.wav")
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/api/wavcmp/upload_a")
+async def wavcmp_upload_a(file: UploadFile):
+    return _wavcmp_upload("a", file, await file.read())
+
+
+@app.post("/api/wavcmp/upload_b")
+async def wavcmp_upload_b(file: UploadFile):
+    return _wavcmp_upload("b", file, await file.read())
+
+
+@app.get("/api/wavcmp/status")
+def wavcmp_status():
+    return wav_compare_service.status()
+
+
+class WavCompareRequest(BaseModel):
+    algorithm: str = "comprehensive"
+    threshold: float = 0.8
+    segment_ms: int = DEFAULT_SEGMENT_MS
+    align: bool = True
+    channel: str = "mix"  # "mix" 또는 채널 인덱스 문자열
+
+
+@app.post("/api/wavcmp/compare")
+def wavcmp_compare(req: WavCompareRequest):
+    if req.algorithm not in ALGORITHMS:
+        raise HTTPException(status_code=400, detail=f"unknown algorithm: {req.algorithm}")
+    channel: str | int = req.channel
+    if isinstance(channel, str) and channel != "mix":
+        try:
+            channel = int(channel)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="channel must be 'mix' or an integer index")
+    try:
+        return wav_compare_service.compare(
+            algorithm=req.algorithm,
+            threshold=req.threshold,
+            segment_ms=req.segment_ms,
+            align=req.align,
+            channel=channel,
+        )
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+class WavCompareParams(BaseModel):
+    algorithm: Optional[str] = None
+    threshold: Optional[float] = None
+    segment_ms: Optional[int] = None
+    align: Optional[bool] = None
+
+
+@app.get("/api/wavcmp/params")
+def wavcmp_get_params():
+    return wav_compare_service.get_params()
+
+
+@app.post("/api/wavcmp/params")
+def wavcmp_set_params(req: WavCompareParams):
+    try:
+        return wav_compare_service.set_params(req.model_dump(exclude_none=True))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.get("/api/wavcmp/last_result")
+def wavcmp_last_result():
+    try:
+        return wav_compare_service.last_result()
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
+@app.get("/api/wavcmp/series")
+def wavcmp_series(which: str = "a", max_points: int = 2000, channel: str = "mix"):
+    ch: str | int = channel
+    if channel != "mix":
+        try:
+            ch = int(channel)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="channel must be 'mix' or an integer index")
+    try:
+        return wav_compare_service.series(which, max_points=max_points, channel=ch)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
 
 # ---- sysLog 분석 ----------------------------------------------------------
@@ -2030,15 +2147,25 @@ def syslog_series(ids: str = ""):
 
 class SysLogScriptRequest(BaseModel):
     checked_segments: list[int]
+    range: Optional[dict] = None  # {"a_ms": int, "b_ms": int} | None (커서 A/B plot_x 구간)
 
 
 @app.post("/api/syslog/generate_script")
 def syslog_generate_script(req: SysLogScriptRequest):
     if not dbc_service.loaded:
         raise HTTPException(status_code=400, detail="DBC가 로드되지 않았습니다. 먼저 DBC를 업로드하세요.")
+    x_range = None
+    if req.range is not None:
+        try:
+            x_range = (int(req.range.get("a_ms", 0)), int(req.range.get("b_ms", 0)))
+        except Exception:
+            raise HTTPException(status_code=400, detail="range must contain a_ms and b_ms integers")
+        if x_range[0] == x_range[1]:
+            raise HTTPException(status_code=400, detail="커서 구간을 설정하세요 (A와 B가 같은 위치입니다)")
     dbc_summary = dbc_service.summary()
     return syslog_service.generate_test_script(
-        req.checked_segments, dbc_summary["messages"], dbc_service.signal_send_type
+        req.checked_segments, dbc_summary["messages"], dbc_service.signal_send_type,
+        x_range=x_range,
     )
 
 

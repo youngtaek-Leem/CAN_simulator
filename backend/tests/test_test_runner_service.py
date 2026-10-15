@@ -1,6 +1,8 @@
 import json
 import time
 
+from pathlib import Path
+
 import can
 import pytest
 from conftest import SAMPLES_DIR
@@ -328,8 +330,9 @@ class FakeAudio:
     def __init__(self):
         self.started = []
         self.stopped = 0
-        self.compared = []
         self.saved_golden = []
+        self.active_golden = None
+        self.missing_goldens = set()
 
     def start(self, filename):
         self.started.append(filename)
@@ -339,13 +342,76 @@ class FakeAudio:
         self.stopped += 1
         return {"ok": True, "filename": self.started[-1] if self.started else None}
 
-    def compare(self, filename, golden, threshold):
-        self.compared.append((filename, golden, threshold))
-        return {"ok": True, "channels": {}}
+    def rec_path(self, filename):
+        return Path("rec") / filename
+
+    def golden_path(self, golden_name):
+        return Path("golden") / golden_name
+
+    def get_active_golden(self):
+        if self.active_golden and self.active_golden not in self.missing_goldens:
+            return self.active_golden
+        return None
 
     def save_as_golden(self, filename, golden):
         self.saved_golden.append((filename, golden))
         return {"ok": True, "saved": golden}
+
+
+def _wavcmp_result(overall_pass=True, passed=10, total=10, threshold=0.8, per_channel=None):
+    segments = [
+        {
+            "index": i, "t_start_ms": float(i * 100), "t_end_ms": float((i + 1) * 100),
+            "pass": i < passed, "value": 0.95 if i < passed else 0.5,
+            "sims": {"mfcc_dtw": 0.95, "fft": 0.9, "fft_band": 0.9, "xcorr": 0.9,
+                     "rms": 0.9, "zcr": 0.9, "centroid": 0.9},
+        }
+        for i in range(total)
+    ]
+    result = {
+        "algorithm": "comprehensive", "threshold": threshold, "segment_ms": 100,
+        "align": True, "channel": "all", "samplerate": 22050, "offset_ms": 0.0,
+        "overall_pass": overall_pass, "segment_count": total, "passed_count": passed,
+        "pass_rate": round(passed / total, 4) if total else 0.0,
+        "overall_value": 0.95 if overall_pass else 0.5,
+        "overall_sims": {"mfcc_dtw": 0.95, "fft": 0.9, "fft_band": 0.9, "xcorr": 0.9,
+                        "rms": 0.9, "zcr": 0.9, "centroid": 0.9},
+        "segments": segments,
+    }
+    if per_channel is not None:
+        result["per_channel"] = per_channel
+    return result
+
+
+class FakeWavCompare:
+    """파형비교 엔진 fake -- 호출 기록 + 설정 가능한 결과."""
+
+    def __init__(self):
+        self.calls = []
+        self.params = {
+            "algorithm": "comprehensive", "threshold": 0.8,
+            "segment_ms": 100, "align": True,
+        }
+        self.next_result = None
+        self.next_error = None
+
+    def get_params(self):
+        return dict(self.params)
+
+    def compare_files(self, path_a, path_b, label_a, label_b, source="runner",
+                      algorithm="comprehensive", threshold=0.8, segment_ms=100,
+                      align=True, channel="all", publish=True):
+        self.calls.append({
+            "path_a": str(path_a), "path_b": str(path_b),
+            "label_a": label_a, "label_b": label_b, "source": source,
+            "algorithm": algorithm, "threshold": threshold,
+            "segment_ms": segment_ms, "align": align, "channel": channel,
+        })
+        if self.next_error is not None:
+            raise self.next_error
+        if self.next_result is not None:
+            return self.next_result
+        return _wavcmp_result(overall_pass=True, threshold=threshold)
 
 
 @pytest.fixture
@@ -358,20 +424,21 @@ def runner_with_fakes(tmp_path):
     replay = ReplayService(cm)
     power = FakePower()
     audio = FakeAudio()
+    wavcmp = FakeWavCompare()
     runner = TestRunnerService(
         cm, dbc, sched, replay, tmp_path / "logs", tmp_path / "results",
-        power_service=power, audio_service=audio,
+        power_service=power, audio_service=audio, wav_compare_service=wavcmp,
     )
     (tmp_path / "logs").mkdir()
     (tmp_path / "results").mkdir()
-    yield runner, power, audio
+    yield runner, power, audio, wavcmp
     runner.stop()
     sched.shutdown()
     cm.disconnect()
 
 
 def test_power_step_calls_fake_service(runner_with_fakes):
-    runner, power, audio = runner_with_fakes
+    runner, power, audio, wavcmp = runner_with_fakes
     script = [
         {"type": "ID", "num": "1", "Cycle": 1},
         {"type": "Power", "command": "ACC_IGN_On"},
@@ -398,7 +465,7 @@ def test_power_step_without_service_fails_gracefully(stack):
 
 
 def test_audio_record_and_compare_sequence(runner_with_fakes):
-    runner, power, audio = runner_with_fakes
+    runner, power, audio, wavcmp = runner_with_fakes
     script = [
         {"type": "ID", "num": "1", "Cycle": 1},
         {"type": "Audio", "command": "StartREC", "recName": "log1"},
@@ -411,12 +478,17 @@ def test_audio_record_and_compare_sequence(runner_with_fakes):
     time.sleep(0.3)
     assert len(audio.started) == 1 and audio.started[0].startswith("log1_1_")
     assert audio.stopped == 1
-    assert audio.compared == [(audio.started[0], "case1_golden.wav", 0.9)]
+    # 파형비교 엔진으로 golden 비교 -- 전채널 AND 고정
+    assert len(wavcmp.calls) == 1
+    call = wavcmp.calls[0]
+    assert call["label_a"] == audio.started[0] and call["label_b"] == "case1_golden.wav"
+    assert call["threshold"] == 0.9 and call["channel"] == "all"
+    assert call["algorithm"] == "comprehensive" and call["source"] == "runner"
     assert runner.status()["results"] == [{"case": "1", "cycle": 1, "status": "OK"}]
 
 
-def test_audio_compwav_without_golden_field_fails(runner_with_fakes):
-    runner, power, audio = runner_with_fakes
+def test_audio_bare_compwav_with_one_recording_fails_as_no_compare_file(runner_with_fakes):
+    runner, power, audio, wavcmp = runner_with_fakes
     script = [
         {"type": "ID", "num": "1", "Cycle": 1},
         {"type": "Audio", "command": "StartREC", "recName": "log1"},
@@ -426,14 +498,191 @@ def test_audio_compwav_without_golden_field_fails(runner_with_fakes):
     runner.load(json.dumps(script), "t.json")
     runner.start()
     time.sleep(0.3)
-    assert audio.compared == []
+    assert wavcmp.calls == []
     assert runner.status()["results"] == [
-        {"case": "1", "cycle": 1, "status": "Fail", "reason": "'golden' 필드 없음 -- 비교 생략"}
+        {"case": "1", "cycle": 1, "status": "Fail", "reason": "비교파일없음"}
+    ]
+
+
+def test_audio_bare_compwav_uses_uploaded_gold_with_single_recording(runner_with_fakes):
+    runner, power, audio, wavcmp = runner_with_fakes
+    audio.active_golden = "gold.wav"
+    script = [
+        {"type": "ID", "num": "1", "Cycle": 1},
+        {"type": "Audio", "command": "StartREC", "recName": "log1"},
+        {"type": "Audio", "command": "StopREC"},
+        {"type": "Audio", "command": "compWAV"},
+    ]
+    runner.load(json.dumps(script), "t.json")
+    runner.start()
+    time.sleep(0.3)
+    assert len(wavcmp.calls) == 1
+    call = wavcmp.calls[0]
+    assert call["label_a"] == audio.started[0] and call["label_b"] == "gold.wav"
+    assert runner.status()["results"] == [{"case": "1", "cycle": 1, "status": "OK"}]
+    log_line = next(
+        e.get("msg", "") for e in runner.status()["events"] if e.get("message") == "compWAV"
+    )
+    assert "gold.wav" in log_line and "Pass" in log_line
+
+
+def test_audio_bare_compwav_falls_back_to_recordings_when_gold_missing(runner_with_fakes):
+    runner, power, audio, wavcmp = runner_with_fakes
+    audio.active_golden = "deleted.wav"
+    audio.missing_goldens.add("deleted.wav")
+    script = [
+        {"type": "ID", "num": "1", "Cycle": 1},
+        {"type": "Audio", "command": "StartREC", "recName": "a"},
+        {"type": "Audio", "command": "StartREC", "recName": "b"},
+        {"type": "Audio", "command": "compWAV"},
+    ]
+    runner.load(json.dumps(script), "t.json")
+    runner.start()
+    time.sleep(0.3)
+    assert [(c["label_a"], c["label_b"]) for c in wavcmp.calls] == [
+        (audio.started[0], audio.started[1])
+    ]
+    assert runner.status()["results"] == [{"case": "1", "cycle": 1, "status": "OK"}]
+
+
+def test_audio_step_golden_field_beats_remembered_gold(runner_with_fakes):
+    runner, power, audio, wavcmp = runner_with_fakes
+    audio.active_golden = "remembered.wav"
+    script = [
+        {"type": "ID", "num": "1", "Cycle": 1},
+        {"type": "Audio", "command": "StartREC", "recName": "log1"},
+        {"type": "Audio", "command": "compWAV", "golden": "explicit.wav"},
+    ]
+    runner.load(json.dumps(script), "t.json")
+    runner.start()
+    time.sleep(0.3)
+    assert wavcmp.calls[0]["label_b"] == "explicit.wav"
+    assert runner.status()["results"] == [{"case": "1", "cycle": 1, "status": "OK"}]
+
+
+def test_audio_bare_compwav_compares_previous_and_current_recordings(runner_with_fakes):
+    runner, power, audio, wavcmp = runner_with_fakes
+    script = [
+        {"type": "ID", "num": "1", "Cycle": 1},
+        {"type": "Audio", "command": "StartREC", "recName": "prev"},
+        {"type": "Audio", "command": "StopREC"},
+        {"type": "Audio", "command": "StartREC", "recName": "curr"},
+        {"type": "Audio", "command": "StopREC"},
+        {"type": "Audio", "command": "compWAV", "threshold": 0.9},
+    ]
+    runner.load(json.dumps(script), "t.json")
+    runner.start()
+    time.sleep(0.3)
+    assert len(wavcmp.calls) == 1
+    call = wavcmp.calls[0]
+    assert call["label_a"] == audio.started[0] and call["label_b"] == audio.started[1]
+    assert call["threshold"] == 0.9 and call["channel"] == "all"
+    assert runner.status()["results"] == [{"case": "1", "cycle": 1, "status": "OK"}]
+    log_line = next(
+        e.get("msg", "") for e in runner.status()["events"] if e.get("message") == "compWAV"
+    )
+    assert audio.started[0] in log_line and audio.started[1] in log_line
+    assert "Pass" in log_line and "0.9" in log_line
+
+
+def test_audio_bare_compwav_sliding_window_uses_last_two(runner_with_fakes):
+    runner, power, audio, wavcmp = runner_with_fakes
+    script = [
+        {"type": "ID", "num": "1", "Cycle": 1},
+        {"type": "Audio", "command": "StartREC", "recName": "a"},
+        {"type": "Audio", "command": "StartREC", "recName": "b"},
+        {"type": "Audio", "command": "StartREC", "recName": "c"},
+        {"type": "Audio", "command": "compWAV"},
+        {"type": "Audio", "command": "compWAV"},
+    ]
+    runner.load(json.dumps(script), "t.json")
+    runner.start()
+    time.sleep(0.3)
+    assert [(c["label_a"], c["label_b"]) for c in wavcmp.calls] == [
+        (audio.started[1], audio.started[2]),
+        (audio.started[1], audio.started[2]),
+    ]
+    assert runner.status()["results"] == [{"case": "1", "cycle": 1, "status": "OK"}]
+
+
+def test_audio_bare_compwav_failure_reason_reaches_result(runner_with_fakes):
+    runner, power, audio, wavcmp = runner_with_fakes
+    wavcmp.next_result = _wavcmp_result(overall_pass=False, passed=3, threshold=0.8)
+    script = [
+        {"type": "ID", "num": "1", "Cycle": 1},
+        {"type": "Audio", "command": "StartREC", "recName": "a"},
+        {"type": "Audio", "command": "StartREC", "recName": "b"},
+        {"type": "Audio", "command": "compWAV"},
+    ]
+    runner.load(json.dumps(script), "t.json")
+    runner.start()
+    time.sleep(0.3)
+    assert runner.status()["results"] == [
+        {"case": "1", "cycle": 1, "status": "Fail", "reason": "통과율 3/10 (임계 0.8)"}
+    ]
+    log_line = next(
+        e.get("msg", "") for e in runner.status()["events"] if e.get("message") == "compWAV"
+    )
+    assert "Fail" in log_line and "실패구간 7개" in log_line
+
+
+def test_audio_compwav_block_overrides_shared_params(runner_with_fakes):
+    runner, power, audio, wavcmp = runner_with_fakes
+    script = [
+        {"type": "ID", "num": "1", "Cycle": 1},
+        {"type": "Audio", "command": "StartREC", "recName": "a"},
+        {"type": "Audio", "command": "StartREC", "recName": "b"},
+        {"type": "Audio", "command": "compWAV", "algorithm": "mfcc_dtw",
+         "segment_ms": 50, "align": False},
+    ]
+    runner.load(json.dumps(script), "t.json")
+    runner.start()
+    time.sleep(0.3)
+    call = wavcmp.calls[0]
+    assert call["algorithm"] == "mfcc_dtw"
+    assert call["segment_ms"] == 50 and call["align"] is False
+    # 스텝 재지정은 공유 설정에 영향을 주지 않는다
+    assert wavcmp.get_params() == {
+        "algorithm": "comprehensive", "threshold": 0.8,
+        "segment_ms": 100, "align": True,
+    }
+    assert runner.status()["results"] == [{"case": "1", "cycle": 1, "status": "OK"}]
+
+
+def test_audio_compwav_without_compare_service_fails(runner_with_fakes, monkeypatch):
+    runner, power, audio, wavcmp = runner_with_fakes
+    monkeypatch.setattr(runner, "_wavcmp", None)
+    script = [
+        {"type": "ID", "num": "1", "Cycle": 1},
+        {"type": "Audio", "command": "StartREC", "recName": "a"},
+        {"type": "Audio", "command": "compWAV", "golden": "g.wav"},
+    ]
+    runner.load(json.dumps(script), "t.json")
+    runner.start()
+    time.sleep(0.3)
+    assert runner.status()["results"] == [
+        {"case": "1", "cycle": 1, "status": "Fail", "reason": "파형비교 서비스 없음"}
+    ]
+
+
+def test_audio_compwav_missing_file_reports_reason(runner_with_fakes):
+    runner, power, audio, wavcmp = runner_with_fakes
+    wavcmp.next_error = FileNotFoundError("비교 파일 없음: no.wav")
+    script = [
+        {"type": "ID", "num": "1", "Cycle": 1},
+        {"type": "Audio", "command": "StartREC", "recName": "a"},
+        {"type": "Audio", "command": "compWAV", "golden": "no.wav"},
+    ]
+    runner.load(json.dumps(script), "t.json")
+    runner.start()
+    time.sleep(0.3)
+    assert runner.status()["results"] == [
+        {"case": "1", "cycle": 1, "status": "Fail", "reason": "비교 파일 없음: no.wav"}
     ]
 
 
 def test_audio_save_as_golden(runner_with_fakes):
-    runner, power, audio = runner_with_fakes
+    runner, power, audio, wavcmp = runner_with_fakes
     script = [
         {"type": "ID", "num": "1", "Cycle": 1},
         {"type": "Audio", "command": "StartREC", "recName": "ref"},
@@ -446,17 +695,11 @@ def test_audio_save_as_golden(runner_with_fakes):
     assert audio.saved_golden == [(audio.started[0], "case1_golden.wav")]
 
 
-def test_compwav_compare_failure_reason_reaches_result(runner_with_fakes, monkeypatch):
-    """CompWAV 유사도 미달 시 compare()의 reason 요약이 케이스 결과의
-    reason에 그대로 담겨야 한다 (테스트 결과 화면 표시용)."""
-    runner, power, audio = runner_with_fakes
-    monkeypatch.setattr(
-        audio, "compare",
-        lambda filename, golden, threshold: {
-            "ok": False, "threshold": threshold, "channels": {},
-            "reason": f"유사도 기준 미달(임계 {threshold}): ch0=0.500",
-        },
-    )
+def test_compwav_compare_failure_reason_reaches_result(runner_with_fakes):
+    """CompWAV 불일치 시 통과율이 케이스 결과의 reason에 그대로 담겨야 한다
+    (테스트 결과 화면 표시용)."""
+    runner, power, audio, wavcmp = runner_with_fakes
+    wavcmp.next_result = _wavcmp_result(overall_pass=False, passed=0, threshold=0.9)
     script = [
         {"type": "ID", "num": "1", "Cycle": 1},
         {"type": "Audio", "command": "StartREC", "recName": "log1"},
@@ -467,7 +710,7 @@ def test_compwav_compare_failure_reason_reaches_result(runner_with_fakes, monkey
     runner.start()
     time.sleep(0.3)
     assert runner.status()["results"] == [
-        {"case": "1", "cycle": 1, "status": "Fail", "reason": "유사도 기준 미달(임계 0.9): ch0=0.500"}
+        {"case": "1", "cycle": 1, "status": "Fail", "reason": "통과율 0/10 (임계 0.9)"}
     ]
 
 
@@ -661,3 +904,21 @@ def test_canstart_canstop_script_run(stack):
     assert any(k == "CANStart" and s.startswith("OK") for k, s in kinds)
     assert any(k == "CANStop" and s.startswith("OK") for k, s in kinds)
     assert runner._canstart_armed == set()
+
+
+# ---- CAN raw Value 숫자 해석 ("0x.."→16진수, 그 외→10진수) --------------------
+
+
+def test_parse_raw_value_hex_decimal_binary():
+    p = TestRunnerService._parse_raw_value
+    assert p("0x10") == 16
+    assert p("0X10") == 16
+    assert p(" 0x01 ") == 1
+    assert p("10") == 10  # 10진수 -- 과거에는 16으로 오인됨
+    assert p(10) == 10  # JSON 숫자 / 엑셀 숫자셀
+    assert p(10.0) == 10
+    assert p("0b101") == 5
+    with pytest.raises(ValueError):
+        p("zz")
+    with pytest.raises(ValueError):
+        p("")

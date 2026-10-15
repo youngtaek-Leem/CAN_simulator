@@ -24,7 +24,9 @@ start right after the row whose column B literally reads "Step 종류 선택":
     E: label 2 (unused)
     F: value 2 -- ID's cycle count / CAN Signal name
     G: label 3 (unused, "Value" on CAN rows)
-    H: value 3 -- CAN Value (hex string, e.g. "0x01")
+    H: value 3 -- CAN Value: "0x.." prefix is hex (e.g. "0x01"), "0b.."
+       is binary, anything else (including numeric Excel cells) is decimal
+       (e.g. 10 or "10" = 10) -- see test_runner_service._parse_raw_value.
     I, J: DBC reference text for the spreadsheet's own dropdown UI -- ignored.
 
 loop/"]" rows are a flat bracket-matched pair (like "(" ")"), not the nested
@@ -97,6 +99,16 @@ def _num_str(value) -> str:
     return str(value)
 
 
+def _value_str(value) -> str:
+    """CAN Value 정규화: 숫자 셀(10 / 10.0)은 10진수 "10"으로, "0x01" 같은
+    문자열은 앞뒤 공백만 제거해 그대로 전달한다."""
+    if isinstance(value, bool):
+        return str(int(value))
+    if isinstance(value, (int, float)):
+        return _num_str(value)
+    return str(value).strip()
+
+
 def _build_step(row: int, b: str, d, f, h) -> dict:
     if b == "ID":
         num = _require(d, row, "D열(num)")
@@ -119,7 +131,7 @@ def _build_step(row: int, b: str, d, f, h) -> dict:
         message = _require(d, row, "D열(Message)")
         signal = _require(f, row, "F열(Signal)")
         value = _require(h, row, "H열(Value)")
-        return {"type": b, "Message": str(message), "Signal": str(signal), "Value": str(value)}
+        return {"type": b, "Message": str(message), "Signal": str(signal), "Value": _value_str(value)}
     raise ScriptError(f"{row}행: 알 수 없는 스텝 종류 '{b}'")
 
 
@@ -184,7 +196,7 @@ def convert(ws) -> list[dict]:
                     f"{r}행: 그룹 내 Message가 일치하지 않습니다 "
                     f"('{msg_group['start_row']}행 그룹은 '{msg_group['message']}', 이 행은 '{message}')"
                 )
-            msg_group["signals"].append({"Signal": str(signal), "Value": str(value)})
+            msg_group["signals"].append({"Signal": str(signal), "Value": _value_str(value)})
             continue
 
         if b == LOOP_END:

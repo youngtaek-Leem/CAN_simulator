@@ -314,6 +314,11 @@ export function SysLogAnalysisWidget({ config }: { config: WidgetConfig }) {
       // 구간 체크 상태를 지워서 새 구간 전체가 기본(전부 체크)이 되게 한다.
       updateWidget({ ...config, options: { ...config.options, checkedSegments: undefined } });
       resetEverything();
+      // 새 로그는 구간 구성 자체가 바뀌므로 커서도 초기화한다 (ON 상태일 때만).
+      if (cursorMode) {
+        setCursorA(null);
+        setCursorB(null);
+      }
     } catch (e) {
       setError((e as Error).message);
     } finally {
@@ -376,61 +381,6 @@ export function SysLogAnalysisWidget({ config }: { config: WidgetConfig }) {
   const plotXMin = timeline?.plot_x_min ?? 0;
   const plotXMax = timeline && timeline.plot_x_max > timeline.plot_x_min ? timeline.plot_x_max : plotXMin + 1;
 
-  const resetEverything = () => {
-    sharedXRef.current = { xMin: null, xMax: null };
-    setResetToken((n) => n + 1);
-    notifyChange();
-  };
-
-  const zoomSharedX = (factor: number) => {
-    const v = sharedXRef.current;
-    const xMin = v.xMin ?? plotXMin;
-    const xMax = v.xMax ?? plotXMax;
-    const center = (xMin + xMax) / 2;
-    const halfWidth = ((xMax - xMin) / 2) * factor;
-    v.xMin = center - halfWidth;
-    v.xMax = center + halfWidth;
-    notifyChange();
-  };
-
-  // ---- 커서 on/off (CanAudioLatencyWidget.tsx + DiffCursor.ts와 동일한 방식) ----
-  const [cursorMode, setCursorMode] = useState(false);
-  const [cursorA, setCursorA] = useState<number | null>(null);
-  const [cursorB, setCursorB] = useState<number | null>(null);
-  const onCursorMove = (which: 'a' | 'b', x: number) => {
-    if (which === 'a') setCursorA(x);
-    else setCursorB(x);
-    notifyChange();
-  };
-  const toggleCursorMode = () => {
-    // 매 Off→On마다 현재 확대 뷰 중앙에 리시드 (CanAudioLatencyWidget과
-    // 동일 규격: 중앙 ± span/8). 이전 좌표를 유지하면 확대 후 뷰 밖에
-    // 남아 커서가 안 보인다(DiffCursor는 범위 밖을 그리지 않음).
-    if (!cursorMode) {
-      const v = sharedXRef.current;
-      const xMax = v.xMax ?? plotXMax;
-      const xMin = v.xMin ?? plotXMin;
-      const xc = (xMin + xMax) / 2;
-      const xs = xMax - xMin;
-      setCursorA(xc - xs / 8);
-      setCursorB(xc + xs / 8);
-    }
-    setCursorMode((m) => !m);
-  };
-  const cursor: DiffCursorState = { mode: cursorMode, a: cursorA, b: cursorB, onMove: onCursorMove };
-  const cursorDeltaMs = cursorA !== null && cursorB !== null ? Math.abs(cursorB - cursorA) : null;
-
-  // ---- 마우스 호버 크로스헤어를 모든 차트에 동시에 -- plot_x 하나를 여러
-  // 차트가 공유해서, 어느 차트든 마우스를 올리면 나머지 차트에도 같은 시각의
-  // 점선이 그려진다(각 차트는 자기 값을 자기 툴팁에 표시). notifyChange로
-  // xVersion을 올려서 전 차트를 다시 그리게 한다(커서 드래그와 같은 방식).
-  const hoverXRef = useRef<number | null>(null);
-  const setHoverX = (x: number | null) => {
-    hoverXRef.current = x;
-    notifyChange();
-  };
-  const hoveredGraphIdxRef = useRef<number | null>(null);
-
   const segments = timeline?.segments ?? [];
 
   // ---- 시간 구간(역주행 경계 기준) 체크박스 -- 체크된 구간의 데이터만 그래프에
@@ -448,16 +398,102 @@ export function SysLogAnalysisWidget({ config }: { config: WidgetConfig }) {
   const setCheckedSegments = (next: Set<number>) =>
     updateWidget({ ...config, options: { ...config.options, checkedSegments: Array.from(next) } });
 
+  // 체크된 구간만 반영한 x축 기본(전체 맞춤) 범위 -- 언체크된 구간이 있으면
+  // 굳이 그만큼 빈 공간을 넓게 잡을 필요가 없다. 줌/커서 폴백은 반드시 이
+  // effective 범위를 써야 한다: 전체 plotXMin/Max를 쓰면 체크 해제된 빈 구간
+  // 포함 도메인으로 점프해 커서가 화면 밖에 찍히고 X+/X- 배율이 깨진다.
+  const boundsOf = (indices: Set<number>) => {
+    const list = segments.filter((_, i) => indices.has(i));
+    if (list.length === 0) return { xMin: plotXMin, xMax: plotXMax };
+    return {
+      xMin: Math.min(...list.map((s) => s.plot_x_start)),
+      xMax: Math.max(...list.map((s) => s.plot_x_end)),
+    };
+  };
+  const { xMin: effectiveXMin, xMax: effectiveXMax } = boundsOf(checkedSegments);
+
+  const resetEverything = () => {
+    sharedXRef.current = { xMin: null, xMax: null };
+    setResetToken((n) => n + 1);
+    notifyChange();
+  };
+
+  const zoomSharedX = (factor: number) => {
+    const v = sharedXRef.current;
+    const xMin = v.xMin ?? effectiveXMin;
+    const xMax = v.xMax ?? effectiveXMax;
+    const center = (xMin + xMax) / 2;
+    const halfWidth = ((xMax - xMin) / 2) * factor;
+    v.xMin = center - halfWidth;
+    v.xMax = center + halfWidth;
+    notifyChange();
+  };
+
+  // ---- 커서 on/off (CanAudioLatencyWidget.tsx + DiffCursor.ts와 동일한 방식) ----
+  const [cursorMode, setCursorMode] = useState(false);
+  const [cursorA, setCursorA] = useState<number | null>(null);
+  const [cursorB, setCursorB] = useState<number | null>(null);
+  const onCursorMove = (which: 'a' | 'b', x: number) => {
+    if (which === 'a') setCursorA(x);
+    else setCursorB(x);
+    notifyChange();
+  };
+  // 커서를 [xMin, xMax] 중앙 ± span/8에 리시드한다.
+  const reseedCursors = (xMin: number, xMax: number) => {
+    const xc = (xMin + xMax) / 2;
+    const xs = xMax - xMin;
+    setCursorA(xc - xs / 8);
+    setCursorB(xc + xs / 8);
+  };
+  const toggleCursorMode = () => {
+    // 매 Off→On마다 현재 확대 뷰 중앙에 리시드 (CanAudioLatencyWidget과
+    // 동일 규격: 중앙 ± span/8). 이전 좌표를 유지하면 확대 후 뷰 밖에
+    // 남아 커서가 안 보인다(DiffCursor는 범위 밖을 그리지 않음).
+    // 폴백은 effective 범위(체크된 구간 기준) -- 전체 plot 범위를 쓰면
+    // 체크 해제 구간 한가운데에 커서가 찍혀 화면 밖에 보인다.
+    if (!cursorMode) {
+      const v = sharedXRef.current;
+      const xMax = v.xMax ?? effectiveXMax;
+      const xMin = v.xMin ?? effectiveXMin;
+      reseedCursors(xMin, xMax);
+    }
+    setCursorMode((m) => !m);
+  };
+  const cursor: DiffCursorState = { mode: cursorMode, a: cursorA, b: cursorB, onMove: onCursorMove };
+  const cursorDeltaMs = cursorA !== null && cursorB !== null ? Math.abs(cursorB - cursorA) : null;
+
+  // ---- 마우스 호버 크로스헤어를 모든 차트에 동시에 -- plot_x 하나를 여러
+  // 차트가 공유해서, 어느 차트든 마우스를 올리면 나머지 차트에도 같은 시각의
+  // 점선이 그려진다(각 차트는 자기 값을 자기 툴팁에 표시). notifyChange로
+  // xVersion을 올려서 전 차트를 다시 그리게 한다(커서 드래그와 같은 방식).
+  const hoverXRef = useRef<number | null>(null);
+  const setHoverX = (x: number | null) => {
+    hoverXRef.current = x;
+    notifyChange();
+  };
+  const hoveredGraphIdxRef = useRef<number | null>(null);
+
   const toggleSegment = (i: number) => {
     const next = new Set(checkedSegments);
     if (next.has(i)) next.delete(i);
     else next.add(i);
     setCheckedSegments(next);
     resetEverything(); // 체크 상태가 바뀌면 이전 줌/팬이 무의미해질 수 있어 리셋
+    // 구간이 바뀌면 이전 커서 좌표가 새 그리기 창 밖에 남을 수 있으므로
+    // 새 effective 범위 중앙으로 리시드한다 (커서 ON 상태일 때만).
+    if (cursorMode) {
+      const b = boundsOf(next);
+      reseedCursors(b.xMin, b.xMax);
+    }
   };
   const setAllSegments = (checked: boolean) => {
-    setCheckedSegments(checked ? new Set(segments.map((_, i) => i)) : new Set());
+    const next = checked ? new Set(segments.map((_, i) => i)) : new Set<number>();
+    setCheckedSegments(next);
     resetEverything();
+    if (cursorMode) {
+      const b = boundsOf(next);
+      reseedCursors(b.xMin, b.xMax);
+    }
   };
 
   const isPlotXInCheckedSegments = (x: number): boolean => {
@@ -470,19 +506,15 @@ export function SysLogAnalysisWidget({ config }: { config: WidgetConfig }) {
     return false;
   };
 
-  // 체크된 구간만 반영한 x축 기본(전체 맞춤) 범위 -- 언체크된 구간이 있으면
-  // 굳이 그만큼 빈 공간을 넓게 잡을 필요가 없다.
-  const checkedSegmentList = segments.filter((_, i) => checkedSegments.has(i));
-  const effectiveXMin = checkedSegmentList.length > 0 ? Math.min(...checkedSegmentList.map((s) => s.plot_x_start)) : plotXMin;
-  const effectiveXMax = checkedSegmentList.length > 0 ? Math.max(...checkedSegmentList.map((s) => s.plot_x_end)) : plotXMax;
-
   const filterSeriesToCheckedSegments = (series: SysLogSeries): SysLogSeries => {
     if (checkedSegments.size === segments.length) return series;
     return { ...series, points: series.points.filter((p) => isPlotXInCheckedSegments(p.x_ms)) };
   };
 
-  // ---- CAN 테스트 스크립트 생성 (체크된 시간 구간의 log ID 0~399를
-  // CAN-DB와 매칭해 CANReq/CANEv .json으로) ----------------------------------
+  // ---- CAN 테스트 스크립트 생성 (체크된 시간 구간 ∩ 커서 A-B 구간의
+  // log ID 0~399를 CAN-DB와 매칭해 CANReq/CANEv .json으로) --------------------
+  // 커서 OFF → 체크된 구간 전체, 커서 ON → 커서 A-B 구간과 체크된 구간의
+  // 교집합만 생성한다.
   const [scriptBusy, setScriptBusy] = useState(false);
   const [scriptError, setScriptError] = useState<string | null>(null);
   const [scriptResult, setScriptResult] = useState<SysLogScriptResult | null>(null);
@@ -491,7 +523,11 @@ export function SysLogAnalysisWidget({ config }: { config: WidgetConfig }) {
     setScriptError(null);
     setScriptBusy(true);
     try {
-      const result = await api.syslogGenerateScript(Array.from(checkedSegments));
+      const range =
+        cursorMode && cursorA !== null && cursorB !== null
+          ? { a_ms: Math.round(Math.min(cursorA, cursorB)), b_ms: Math.round(Math.max(cursorA, cursorB)) }
+          : null;
+      const result = await api.syslogGenerateScript(Array.from(checkedSegments), range);
       setScriptResult(result);
       if (result.steps.length > 0) {
         const base = (status?.log_filename ?? 'syslog').replace(/\.[^.]+$/, '');
@@ -651,7 +687,7 @@ export function SysLogAnalysisWidget({ config }: { config: WidgetConfig }) {
         <button
           className="small-btn"
           disabled={scriptBusy || segments.length === 0}
-          title="체크된 시간 구간의 log ID(0~399)를 현재 로드된 CAN-DB와 매칭해 CANReq/CANEv 테스트 스크립트(.json)를 생성/다운로드합니다"
+          title="체크된 시간 구간의 log ID(0~399)를 현재 로드된 CAN-DB와 매칭해 CANReq/CANEv 테스트 스크립트(.json)를 생성/다운로드합니다. 커서 ON이면 커서 A-B 구간과 체크된 구간의 겹치는 부분만 생성합니다."
           onClick={generateScript}
         >
           {scriptBusy ? '생성 중…' : '📝 테스트 스크립트 생성'}
@@ -664,6 +700,7 @@ export function SysLogAnalysisWidget({ config }: { config: WidgetConfig }) {
           <div className="syslog-script-summary">
             스크립트 생성 완료 — 매칭 {scriptResult.matched_count}개 / 경고{' '}
             {scriptResult.warnings.length}개 / 오류 {scriptResult.errors.length}개
+            {cursorMode && cursorA !== null && cursorB !== null && ' (커서 A-B ∩ 체크구간)'}
             {scriptResult.steps.length === 0 && ' (다운로드할 스텝 없음)'}
           </div>
           {scriptResult.warnings.length > 0 && (

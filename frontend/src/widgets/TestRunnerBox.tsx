@@ -10,7 +10,8 @@ import { useEffect, useRef, useState } from 'react';
 import { api } from '../api/client';
 import { canStore, formatTestRunnerEvent, useCanVersion } from '../store/canStore';
 import { useApp } from '../store/appContext';
-import type { AudioLevel, TestRunnerStatus, WidgetConfig } from '../types';
+import type { AudioLevel, TestRunnerStatus, WavcmpParams, WidgetConfig } from '../types';
+import { WAVCMP_ALGORITHMS } from './wavcmpAlgorithms';
 
 const POLL_MS = 400;
 
@@ -57,7 +58,7 @@ export function TestRunnerBox({ config }: { config: WidgetConfig }) {
   // TestRunnerBox와 PowerControlWidget은 별개 위젯 인스턴스라 config는 분리되지만,
   // 동일한 키/동일 UI/동일 API로 “공유” 동작을 보장. 필요 시 localStorage로 완전 공유 가능.
   const opts = config.options;
-  const setOpt = (patch: Record<string, string>) => updateWidget({ ...config, options: { ...opts, ...patch } });
+  const setOpt = (patch: Record<string, unknown>) => updateWidget({ ...config, options: { ...opts, ...patch } });
   const voltage = String(opts.voltage ?? '14.4');
   const current = String(opts.current ?? '10');
   const setVoltage = (v: string) => setOpt({ voltage: v });
@@ -111,6 +112,114 @@ export function TestRunnerBox({ config }: { config: WidgetConfig }) {
     } catch (e) {
       setError((e as Error).message);
     }
+  };
+
+  // 파형비교 설정 -- 오디오 파형비교 위젯과 백엔드 단일 진실(/api/wavcmp/params)
+  // 공유. 실행기 compWAV는 항상 전채널 AND로 비교하므로 channel은 제외.
+  // 2초 주기로 서버값을 다시 읽어 상대 위젯의 변경을 반영한다.
+  const [wavcmp, setWavcmp] = useState<WavcmpParams | null>(null);
+  const [thrText, setThrText] = useState('0.8');
+  const [segText, setSegText] = useState('100');
+  // 마지막으로 서버에서 반영한 값 -- 폴링값이 이것과 같으면 "내 편집 중"이므로
+  // 텍스트를 덮지 않는다. 상대 위젯이 바꾸면 서버값이 달라져 정상 반영된다.
+  const wavcmpSyncedRef = useRef<WavcmpParams | null>(null);
+  const wavcmpEditingRef = useRef(false);
+  const sameWavcmp = (a: WavcmpParams | null, b: WavcmpParams | null) =>
+    !!a &&
+    !!b &&
+    a.algorithm === b.algorithm &&
+    a.threshold === b.threshold &&
+    a.segment_ms === b.segment_ms &&
+    a.align === b.align;
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const p = await api.wavcmpGetParams();
+        if (cancelled || sameWavcmp(p, wavcmpSyncedRef.current)) return;
+        wavcmpSyncedRef.current = p;
+        setWavcmp(p);
+        if (!wavcmpEditingRef.current) {
+          setThrText(String(p.threshold));
+          setSegText(String(p.segment_ms));
+        }
+      } catch {}
+    };
+    load();
+    const id = setInterval(load, 2000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, []);
+  const saveWavcmp = async (patch: Partial<WavcmpParams>) => {
+    try {
+      const p = await api.wavcmpSetParams(patch);
+      wavcmpSyncedRef.current = p;
+      setWavcmp(p);
+      setThrText(String(p.threshold));
+      setSegText(String(p.segment_ms));
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
+  const commitThr = () => {
+    const v = Number(thrText);
+    if (thrText.trim() !== '' && Number.isFinite(v)) void saveWavcmp({ threshold: v });
+    else if (wavcmp) setThrText(String(wavcmp.threshold));
+  };
+  const commitSeg = () => {
+    const v = Math.round(Number(segText));
+    if (segText.trim() !== '' && Number.isFinite(v) && v > 0) void saveWavcmp({ segment_ms: v });
+    else if (wavcmp) setSegText(String(wavcmp.segment_ms));
+  };
+  // 파형비교옵션 팝오버 개폐 + 외부클릭/Escape 닫기
+  const [wavcmpOpen, setWavcmpOpen] = useState(false);
+  const wavcmpWrapRef = useRef<HTMLSpanElement>(null);
+  useEffect(() => {
+    if (!wavcmpOpen) return;
+    const onDown = (e: PointerEvent) => {
+      if (!wavcmpWrapRef.current?.contains(e.target as Node)) setWavcmpOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setWavcmpOpen(false);
+    };
+    document.addEventListener('pointerdown', onDown);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('pointerdown', onDown);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [wavcmpOpen]);
+  const wavcmpAlgoLabel =
+    WAVCMP_ALGORITHMS.find((a) => a.value === wavcmp?.algorithm)?.label ?? wavcmp?.algorithm ?? '…';
+
+  // 케이스 결과 / 실행 로그 좌우 폭 드래그 조절 (SerialMonitorWidget과 동일
+  // 패턴: 드래그 중 로컬 상태, pointerup 때 레이아웃에 영속, 0.2–0.8 클램프).
+  const bodyRef = useRef<HTMLDivElement>(null);
+  const splitRatio = Math.min(0.8, Math.max(0.2, Number(opts.splitRatio ?? 0.5) || 0.5));
+  const [dragRatio, setDragRatio] = useState<number | null>(null);
+  const ratio = dragRatio ?? splitRatio;
+  const onSplitDown = (e: React.PointerEvent) => {
+    e.preventDefault();
+    (e.target as HTMLElement).setPointerCapture?.(e.pointerId);
+    const move = (ev: PointerEvent) => {
+      const el = bodyRef.current;
+      if (!el) return;
+      const rect = el.getBoundingClientRect();
+      if (rect.width <= 0) return;
+      setDragRatio(Math.min(0.8, Math.max(0.2, (ev.clientX - rect.left) / rect.width)));
+    };
+    const up = () => {
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', up);
+      setDragRatio((r) => {
+        if (r !== null) setOpt({ splitRatio: Math.round(r * 100) / 100 });
+        return null;
+      });
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', up);
   };
 
   // Auto-scroll to the newest log line, same as the TextDisplay widget.
@@ -214,6 +323,15 @@ export function TestRunnerBox({ config }: { config: WidgetConfig }) {
     }
   };
 
+  const clearGolden = async () => {
+    try {
+      await api.clearTestGolden();
+      setError(null);
+    } catch (e) {
+      setError((e as Error).message);
+    }
+  };
+
   return (
     <div className="testrunner-box">
       <div className="testrunner-toolbar">
@@ -297,6 +415,78 @@ export function TestRunnerBox({ config }: { config: WidgetConfig }) {
         <button className="icon-btn" title="오디오 장치 목록 새로고침" onClick={() => api.audioDevices()}>
           ⟲
         </button>
+        <span className="testrunner-wavcmp-wrap" ref={wavcmpWrapRef}>
+          <button
+            className="small-btn"
+            title={`파형비교 설정 (오디오 파형비교 위젯과 공유, 실행기는 전채널 비교)\n알고리즘[${wavcmpAlgoLabel}] 임계값[${thrText}] 구간(ms)[${segText}] 시작점매칭[${(wavcmp?.align ?? true) ? 'ON' : 'OFF'}]`}
+            onClick={() => setWavcmpOpen((o) => !o)}
+          >
+            파형비교옵션
+          </button>
+          {wavcmpOpen && (
+            <span className="testrunner-wavcmp-panel">
+              <label title="비교 알고리즘">
+                알고리즘
+                <select
+                  value={wavcmp?.algorithm ?? 'comprehensive'}
+                  onChange={(e) => void saveWavcmp({ algorithm: e.target.value })}
+                >
+                  {WAVCMP_ALGORITHMS.map((a) => (
+                    <option key={a.value} value={a.value}>
+                      {a.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label title="임계값 (0~1, Enter/포커스아웃 시 적용)">
+                임계값
+                <input
+                  className="mono"
+                  style={{ width: 52 }}
+                  value={thrText}
+                  onChange={(e) => setThrText(e.target.value)}
+                  onFocus={() => {
+                    wavcmpEditingRef.current = true;
+                  }}
+                  onBlur={() => {
+                    wavcmpEditingRef.current = false;
+                    commitThr();
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+                  }}
+                />
+              </label>
+              <label title="구간 길이 ms (Enter/포커스아웃 시 적용)">
+                구간(ms)
+                <input
+                  className="mono"
+                  style={{ width: 64 }}
+                  value={segText}
+                  onChange={(e) => setSegText(e.target.value)}
+                  onFocus={() => {
+                    wavcmpEditingRef.current = true;
+                  }}
+                  onBlur={() => {
+                    wavcmpEditingRef.current = false;
+                    commitSeg();
+                  }}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
+                  }}
+                />
+              </label>
+              <label title="시작점 매칭 (B 지연 정렬)">
+                <input
+                  type="checkbox"
+                  checked={wavcmp?.align ?? true}
+                  onChange={(e) => void saveWavcmp({ align: e.target.checked })}
+                />
+                시작점매칭
+              </label>
+            </span>
+          )}
+        </span>
         <button className="small-btn" onClick={() => goldenInput.current?.click()}>
           기준(golden) WAV 업로드
         </button>
@@ -307,12 +497,27 @@ export function TestRunnerBox({ config }: { config: WidgetConfig }) {
           hidden
           onChange={(e) => e.target.files?.[0] && uploadGolden(e.target.files[0])}
         />
+        <span
+          className="testrunner-fileinfo"
+          title={
+            audio?.active_golden
+              ? `업로드된 gold (${audio.active_golden}) -- 파일명 없는 compWAV가 이 파일과 비교합니다`
+              : 'gold 없음 -- 파일명 없는 compWAV는 직전/현재 녹음을 비교합니다'
+          }
+        >
+          {audio?.active_golden ? `🥇 gold: ${audio.active_golden}` : 'gold 없음'}
+        </span>
+        {audio?.active_golden && (
+          <button className="icon-btn" title="기억된 gold 해제" onClick={() => void clearGolden()}>
+            ✕
+          </button>
+        )}
         {audio?.recording && <span className="testrunner-fileinfo">🔴 녹음 중</span>}
       </div>
       {error && <div className="error">{error}</div>}
       {paused && <div className="hint">⏸ 일시정지 — 재개 시 남은 시간부터 계속</div>}
-      <div className="testrunner-body">
-        <div className="testrunner-results">
+      <div className="testrunner-body" ref={bodyRef}>
+        <div className="testrunner-results" style={{ width: `${ratio * 100}%`, flex: 'none' }}>
           <div className="testrunner-section-title">케이스 결과</div>
           {!detail?.results.length && <div className="hint">아직 결과 없음</div>}
           {detail?.results.map((r, i) => (
@@ -326,6 +531,7 @@ export function TestRunnerBox({ config }: { config: WidgetConfig }) {
             </div>
           ))}
         </div>
+        <div className="testrunner-split-drag" onPointerDown={onSplitDown} title="드래그해서 좌우 폭 조절" />
         <div className="testrunner-log">
           <div className="testrunner-section-title">실행 로그</div>
           <div className="testrunner-log-list" ref={logListRef}>

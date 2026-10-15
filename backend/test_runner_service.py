@@ -43,12 +43,15 @@ Step types (see Requirement.md "Automation 시나리오 러너 통합 계획"):
   share self._running, so a scenario run and a function run are mutually
   exclusive -- they'd otherwise contend for the same CAN bus.
 
-Values in the JSON are raw hex bit patterns (e.g. "0x03"), not physical
+Values in the JSON are raw integer bit patterns, not physical
 values -- they are converted via each signal's scale/offset before being
 handed to dbc_service (which expects physical values), and CANResp compares
 against a raw decode (dbc_service.decode_raw) rather than the scaled/
 choice-label decode used for display, so the comparison is correct
 regardless of a signal's scale or VAL_ table.
+Number format: "0x.." prefix is hex (e.g. "0x10" = 16), "0b.." prefix is
+binary (e.g. "0b101" = 5), anything else (including bare numbers from JSON
+or numeric Excel cells) is decimal (e.g. "10" = 10, 10 = 10).
 """
 
 from __future__ import annotations
@@ -61,8 +64,6 @@ from pathlib import Path
 from typing import Any, Optional
 
 import can
-
-from audio_service import DEFAULT_THRESHOLD as DEFAULT_COMPARE_THRESHOLD
 
 MAX_EVENTS = 500  # cap kept in memory / returned via status()
 
@@ -162,6 +163,7 @@ class TestRunnerService:
         result_dir: Path,
         power_service=None,
         audio_service=None,
+        wav_compare_service=None,
     ):
         self._can = can_manager
         self._dbc = dbc_service
@@ -171,7 +173,13 @@ class TestRunnerService:
         self._result_dir = result_dir
         self._power = power_service
         self._audio = audio_service
+        # 파형비교 엔진 (오디오 파형비교 위젯과 동일한 알고리즘). None이면
+        # compWAV 스텝은 "파형비교 서비스 없음"으로 Fail한다.
+        self._wavcmp = wav_compare_service
         self._last_recording: Optional[str] = None
+        # run 동안 성공한 StartREC 파일명 누적 -- 파일명 없는 bare compWAV가
+        # 직전/현재 녹음(최근 2개)을 비교할 때 사용한다 (슬라이딩, 소진 없음)
+        self._recordings: list[str] = []
 
         # reentrant: status() calls summary() while already holding the lock
         self._lock = threading.RLock()
@@ -300,6 +308,7 @@ class TestRunnerService:
 
     def _launch_thread(self) -> dict:
         self._last_recording = None
+        self._recordings = []
         self._stop_event.clear()
         self._pause_event.clear()
         self._paused = False
@@ -508,9 +517,41 @@ class TestRunnerService:
     # ---- CAN send / response -------------------------------------------------
 
     @staticmethod
-    def _hex_to_scaled(message, signal_name: str, hex_str: str) -> float:
+    def _parse_raw_value(value: Any) -> int:
+        """CAN 신호 raw값 파싱: "0x.."→16진수, "0b.."→2진수, 그 외(문자열
+        "10"/JSON 숫자 10/엑셀 숫자셀 포함)→10진수."""
+        if isinstance(value, bool):
+            return int(value)
+        if isinstance(value, int):
+            return value
+        if isinstance(value, float):
+            if value.is_integer():
+                return int(value)
+            raise ValueError(f"invalid CAN raw value: {value!r}")
+        s = str(value).strip()
+        if not s:
+            raise ValueError("empty CAN raw value")
+        low = s.lower()
+        try:
+            if low.startswith("0x"):
+                return int(s, 16)
+            if low.startswith("0b"):
+                return int(s, 2)
+            if low.startswith("0o"):
+                return int(s, 8)
+            if "." in s or "e" in low:
+                f = float(s)
+                if f.is_integer():
+                    return int(f)
+                raise ValueError(f"invalid CAN raw value: {value!r}")
+            return int(s, 10)
+        except ValueError:
+            raise ValueError(f"invalid CAN raw value: {value!r}")
+
+    @staticmethod
+    def _hex_to_scaled(message, signal_name: str, hex_str: Any) -> float:
         signal = message.get_signal_by_name(signal_name)
-        raw = int(hex_str, 16)
+        raw = TestRunnerService._parse_raw_value(hex_str)
         return raw * float(signal.scale) + float(signal.offset)
 
     @staticmethod
@@ -535,7 +576,7 @@ class TestRunnerService:
     def _check_response(self, block: dict) -> bool:
         message_name = block["Message"]
         signal_name = block["Signal"]
-        expected_raw = int(block["Value"], 16)
+        expected_raw = self._parse_raw_value(block["Value"])
         timeout_s = float(block.get("timeout_s", 1.0))
         message = self._dbc.get_message(message_name)
         frame_id = message.frame_id
@@ -628,6 +669,86 @@ class TestRunnerService:
 
     # ---- audio --------------------------------------------------------------------
 
+    @staticmethod
+    def _compare_detail_msg(ref1: str, ref2: str, algorithm: str, threshold: float, result: dict) -> str:
+        """실행 로그용 한 줄 상세: 비교한 파일명 + 통과율 + offset + 임계값 +
+        지표 유사도 + Pass/Fail 이유 (향후 threshold 최적화용)."""
+        sims = ", ".join(
+            f"{name}={value:.3f}" for name, value in sorted((result.get("overall_sims") or {}).items())
+        )
+        verdict = "Pass" if result.get("overall_pass") else "Fail"
+        detail = (
+            f"비교 {ref1} ↔ {ref2} → {verdict}"
+            f" · 통과율 {result.get('passed_count', 0)}/{result.get('segment_count', 0)}"
+            f" · offset {result.get('offset_ms', 0)}ms"
+            f" · {algorithm} 임계 {threshold} (대표값 {result.get('overall_value', 0):.3f})"
+        )
+        if sims:
+            detail += f" · {sims}"
+        per_ch = result.get("per_channel") or []
+        if per_ch:
+            detail += " · " + ", ".join(
+                f"ch{p.get('channel')}={'Pass' if p.get('overall_pass') else 'Fail'}"
+                for p in per_ch
+            )
+        if not result.get("overall_pass"):
+            fails = [s for s in result.get("segments", []) if not s.get("pass")]
+            detail += f" · 실패구간 {len(fails)}개"
+            first = next((s for s in fails if "error" not in s), None)
+            if first is not None:
+                lows = ", ".join(
+                    f"{k}={v:.3f}" for k, v in sorted(first.get("sims", {}).items())
+                    if v < threshold
+                )
+                if lows:
+                    detail += f" (첫 실패 #{first.get('index')} {first.get('t_start_ms')}ms: {lows})"
+        return detail
+
+    def _wavcmp_params(self, block: dict) -> dict:
+        """공유 설정 + 스텝별 재지정(algorithm/threshold/segment_ms/align)."""
+        shared = self._wavcmp.get_params()
+        params = dict(shared)
+        if block.get("algorithm"):
+            params["algorithm"] = block["algorithm"]
+        if block.get("threshold") is not None:
+            params["threshold"] = float(block["threshold"])
+        if block.get("segment_ms") is not None:
+            params["segment_ms"] = int(block["segment_ms"])
+        if block.get("align") is not None:
+            params["align"] = bool(block["align"])
+        return params
+
+    def _run_compare(self, block: dict, case_num: str, ref1: str, ref2: str,
+                     path1, path2) -> bool:
+        cmd = block.get("command")
+        params = self._wavcmp_params(block)
+        try:
+            result = self._wavcmp.compare_files(
+                path1, path2, ref1, ref2, source="runner",
+                algorithm=params["algorithm"], threshold=params["threshold"],
+                segment_ms=params["segment_ms"], align=params["align"],
+                channel="all",
+            )
+        except (FileNotFoundError, ValueError, RuntimeError) as exc:
+            self._log(case=case_num, type="Audio", message=cmd, status=f"실패: {exc}")
+            return False
+        ok = bool(result.get("overall_pass"))
+        fail_reason = None if ok else self._compare_fail_reason(result, params["threshold"])
+        self._log(
+            case=case_num, type="Audio", message=cmd,
+            status="OK" if ok else f"실패: {fail_reason}",
+            msg=self._compare_detail_msg(ref1, ref2, params["algorithm"], params["threshold"], result),
+        )
+        return ok
+
+    @staticmethod
+    def _compare_fail_reason(result: dict, threshold: float) -> str:
+        per_ch = result.get("per_channel") or []
+        if per_ch:
+            bad = [f"ch{p.get('channel')}" for p in per_ch if not p.get("overall_pass")]
+            return f"채널 불일치({','.join(bad)}) · 통과율 {result.get('passed_count', 0)}/{result.get('segment_count', 0)}"
+        return f"통과율 {result.get('passed_count', 0)}/{result.get('segment_count', 0)} (임계 {threshold})"
+
     def _run_audio(self, block: dict, case_num: str) -> bool:
         if self._audio is None:
             self._log(case=case_num, type="Audio", status="실패: 오디오 서비스 없음")
@@ -640,6 +761,7 @@ class TestRunnerService:
             result = self._audio.start(filename)
             if result.get("ok"):
                 self._last_recording = filename
+                self._recordings.append(filename)
             ok = bool(result.get("ok"))
             self._log(case=case_num, type="Audio", message=cmd, status="OK" if ok else f"실패: {result.get('reason')}")
             return ok
@@ -651,18 +773,40 @@ class TestRunnerService:
             return ok
 
         if cmd == "compWAV":
+            if self._wavcmp is None:
+                self._log(case=case_num, type="Audio", message=cmd, status="실패: 파형비교 서비스 없음")
+                return False
             golden = block.get("golden")
-            if not golden:
-                self._log(case=case_num, type="Audio", message=cmd, status="실패: 'golden' 필드 없음 -- 비교 생략")
+            if golden:
+                if not self._last_recording:
+                    self._log(case=case_num, type="Audio", message=cmd, status="실패: 비교할 녹음 파일 없음")
+                    return False
+                return self._run_compare(
+                    block, case_num, self._last_recording, golden,
+                    self._audio.rec_path(self._last_recording),
+                    self._audio.golden_path(golden),
+                )
+            # bare compWAV: 스텝 지정 > 업로드 기억 gold > 직전/현재 녹음 순으로
+            # 비교 대상을 정한다. gold가 있으면 최근 녹음 1개면 충분하다.
+            golden = self._audio.get_active_golden()
+            if golden:
+                if not self._last_recording:
+                    self._log(case=case_num, type="Audio", message=cmd, status="실패: 비교할 녹음 파일 없음")
+                    return False
+                return self._run_compare(
+                    block, case_num, self._last_recording, golden,
+                    self._audio.rec_path(self._last_recording),
+                    self._audio.golden_path(golden),
+                )
+            # gold 없음: 직전/현재 녹음(최근 2개)을 직접 비교한다
+            if len(self._recordings) < 2:
+                self._log(case=case_num, type="Audio", message=cmd, status="실패: 비교파일없음")
                 return False
-            if not self._last_recording:
-                self._log(case=case_num, type="Audio", message=cmd, status="실패: 비교할 녹음 파일 없음")
-                return False
-            threshold = float(block.get("threshold", DEFAULT_COMPARE_THRESHOLD))
-            result = self._audio.compare(self._last_recording, golden, threshold)
-            ok = bool(result.get("ok"))
-            self._log(case=case_num, type="Audio", message=cmd, status="OK" if ok else f"실패: {result.get('reason') or '비교 실패'}")
-            return ok
+            prev, curr = self._recordings[-2], self._recordings[-1]
+            return self._run_compare(
+                block, case_num, prev, curr,
+                self._audio.rec_path(prev), self._audio.rec_path(curr),
+            )
 
         if cmd == "saveAsGolden":
             golden = block.get("golden")

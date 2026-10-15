@@ -11,9 +11,11 @@ Automation/compareWAV_MFCC.py (MFCC+DTW similarity, full-spectrum FFT
 correlation, voice-band FFT correlation, cross-correlation, RMS/ZCR/spectral
 centroid difference), and compares each recording against a fixed per-case
 "golden" reference WAV instead of AppTest.py's consecutive-cycle comparison
-(cycle N vs cycle N-1), which can't catch every cycle drifting the same way
-and has no stable baseline across separate test runs.
-"""
+   (cycle N vs cycle N-1), which can't catch every cycle drifting the same way
+   and has no stable baseline across separate test runs. In addition,
+   compare_recordings() supports a filename-less "bare compWAV" scenario step
+   that compares the two most recent recordings of the run directly.
+   """
 
 import logging
 import threading
@@ -355,6 +357,35 @@ def compare_channel(sig1: np.ndarray, sig2: np.ndarray, sr: int) -> dict:
     }
 
 
+def _compare_wav_files(path1: str, path2: str, threshold: float) -> dict:
+    """두 WAV 파일의 채널별 메트릭 비교 -- 호출자가 파일 존재를 미리 확인하고
+    _ensure_compare_deps()가 True임을 보장해야 한다."""
+    rate1, data1 = wav_read(path1)
+    _rate2, data2 = wav_read(path2)
+    n_channels = min(
+        data1.shape[1] if data1.ndim > 1 else 1,
+        data2.shape[1] if data2.ndim > 1 else 1,
+    )
+    channels = {}
+    passed = True
+    for ch in range(n_channels):
+        sig1 = data1[:, ch] if data1.ndim > 1 else data1
+        sig2 = data2[:, ch] if data2.ndim > 1 else data2
+        metrics = compare_channel(sig1, sig2, rate1)
+        channels[f"ch{ch}"] = metrics
+        if metrics["mfcc_dtw_similarity"] < threshold:
+            passed = False
+    if not passed:
+        lows = ", ".join(
+            f"{name}={channels[name]['mfcc_dtw_similarity']:.3f}"
+            for name in sorted(channels)
+            if channels[name]["mfcc_dtw_similarity"] < threshold
+        )
+        reason = f"유사도 기준 미달(임계 {threshold}): {lows}"
+        return {"ok": False, "threshold": threshold, "channels": channels, "reason": reason}
+    return {"ok": True, "threshold": threshold, "channels": channels}
+
+
 def choose_channel_count(max_input_channels: int) -> int:
     """How many channels to request from InputStream for a device that
     reports `max_input_channels` -- capped at DEFAULT_CHANNELS' length so a
@@ -402,6 +433,10 @@ class AudioService:
         # supports (see there for why).
         self._active_channels = len(DEFAULT_CHANNELS)
         self._active_samplerate: Optional[int] = None
+        self._active_golden: Optional[str] = None
+        # bare compWAV가 사용할 기준 gold -- "golden WAV 업로드" API가 마지막으로
+        # 저장한 파일명. 교체·해제 전까지 유지된다. 스텝의 "golden" 필드 명시가
+        # 있으면 그쪽이 우선한다.
         # Guards self._audio_data -- appended to on the sounddevice callback
         # thread, swapped out (for a 30-min segment rotation, or on stop())
         # from request-handler threads.
@@ -473,7 +508,19 @@ class AudioService:
             "device_index": self.device_index,
             "devices": list(self._devices),
             "recording": self._is_recording,
+            "active_golden": self._active_golden,
         }
+
+    def set_active_golden(self, name: Optional[str]) -> Optional[str]:
+        """기준 gold 지정/해제 (None이면 해제). 파일 존재는 사용 시점에 확인한다."""
+        self._active_golden = name
+        return self._active_golden
+
+    def get_active_golden(self) -> Optional[str]:
+        """기억된 gold 중 실제 파일이 존재하는 것만 반환, 없으면 None."""
+        if self._active_golden and (self._golden_dir / self._active_golden).exists():
+            return self._active_golden
+        return None
 
     # ---- recording (ported as-is from AppTest.py's start_recording/stop_recording) --
 
@@ -905,6 +952,14 @@ class AudioService:
 
     # ---- comparison -------------------------------------------------------------
 
+    def rec_path(self, filename: str) -> Path:
+        """녹음 파일 경로 (파형비교 엔진 등 외부에서 참조용)."""
+        return self._rec_dir / filename
+
+    def golden_path(self, golden_name: str) -> Path:
+        """기준(golden) 파일 경로 (파형비교 엔진 등 외부에서 참조용)."""
+        return self._golden_dir / golden_name
+
     def compare(self, filename: str, golden_name: str, threshold: float = DEFAULT_THRESHOLD) -> dict:
         if not _ensure_compare_deps():
             return {"ok": False, "reason": "librosa/scikit-learn이 설치되어 있지 않습니다"}
@@ -915,30 +970,23 @@ class AudioService:
         if not golden_path.exists():
             return {"ok": False, "reason": f"기준(golden) 파일 없음: {golden_name}"}
         try:
-            rate1, golden_data = wav_read(str(golden_path))
-            _rate2, rec_data = wav_read(str(rec_path))
-            n_channels = min(
-                golden_data.shape[1] if golden_data.ndim > 1 else 1,
-                rec_data.shape[1] if rec_data.ndim > 1 else 1,
-            )
-            channels = {}
-            passed = True
-            for ch in range(n_channels):
-                sig1 = golden_data[:, ch] if golden_data.ndim > 1 else golden_data
-                sig2 = rec_data[:, ch] if rec_data.ndim > 1 else rec_data
-                metrics = compare_channel(sig1, sig2, rate1)
-                channels[f"ch{ch}"] = metrics
-                if metrics["mfcc_dtw_similarity"] < threshold:
-                    passed = False
-            if not passed:
-                lows = ", ".join(
-                    f"{name}={channels[name]['mfcc_dtw_similarity']:.3f}"
-                    for name in sorted(channels)
-                    if channels[name]["mfcc_dtw_similarity"] < threshold
-                )
-                reason = f"유사도 기준 미달(임계 {threshold}): {lows}"
-                return {"ok": False, "threshold": threshold, "channels": channels, "reason": reason}
-            return {"ok": True, "threshold": threshold, "channels": channels}
+            return _compare_wav_files(str(golden_path), str(rec_path), threshold)
+        except Exception as exc:
+            return {"ok": False, "reason": str(exc)}
+
+    def compare_recordings(self, prev_name: str, curr_name: str, threshold: float = DEFAULT_THRESHOLD) -> dict:
+        """두 녹음 파일(rec_dir 내)을 직접 비교한다 -- 시나리오에서 파일명 없는
+        bare compWAV가 직전/현재 녹음을 비교할 때 사용한다."""
+        if not _ensure_compare_deps():
+            return {"ok": False, "reason": "librosa/scikit-learn이 설치되어 있지 않습니다"}
+        prev_path = self._rec_dir / prev_name
+        curr_path = self._rec_dir / curr_name
+        if not prev_path.exists():
+            return {"ok": False, "reason": f"녹음 파일 없음: {prev_name}"}
+        if not curr_path.exists():
+            return {"ok": False, "reason": f"녹음 파일 없음: {curr_name}"}
+        try:
+            return _compare_wav_files(str(prev_path), str(curr_path), threshold)
         except Exception as exc:
             return {"ok": False, "reason": str(exc)}
 

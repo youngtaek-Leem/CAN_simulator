@@ -414,13 +414,16 @@ class SysLogService:
         checked_segments: list[int],
         dbc_messages: list[dict],
         signal_send_type,
+        x_range: tuple[int, int] | list[int] | None = None,
     ) -> dict:
         """체크된 시간 구간 안, log ID 0~399 범위 레코드를 DBC 신호와
-        매칭해 CANReq/CANEv 시나리오 JSON(steps)을 만든다. 매칭 규칙과
+        매칭해 CANReq/CANEv 시나리오 JSON(steps)을 만든다. x_range가 주어지면
+        (커서 A/B) 그 plot_x 구간과 체크구간의 교집합만 생성한다. 매칭 규칙과
         delay 계산은 syslog_script_generator.generate_can_test_script 참고
         (Requirement.md "sysLog -> CAN 테스트 스크립트 생성" 절)."""
         self._ensure_series()
         plot_x_by_seq, _segments = build_global_timeline(self._records)
+        xr = (int(x_range[0]), int(x_range[1])) if x_range is not None else None
         result = generate_can_test_script(
             self._records,
             plot_x_by_seq,
@@ -429,6 +432,7 @@ class SysLogService:
             self._db,
             dbc_messages,
             signal_send_type,
+            x_range=xr,
         )
         steps = [{"type": "ID", "num": "1", "Cycle": 1}, *result.steps] if result.steps else []
         return {

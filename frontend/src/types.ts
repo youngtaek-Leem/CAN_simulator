@@ -160,6 +160,7 @@ export interface AudioStatus {
   device_index: number | null;
   devices: AudioDevice[];
   recording: boolean;
+  active_golden?: string | null;
 }
 
 export interface AudioChannelLevel {
@@ -469,6 +470,98 @@ export interface SysLogScriptResult {
   matched_count: number;
 }
 
+// 오디오 파형비교 (backend/wav_compare_service.py)
+export interface WavcmpParams {
+  algorithm: string;
+  threshold: number;
+  segment_ms: number;
+  align: boolean;
+}
+
+export interface WavCompareFileMeta {
+  filename: string;
+  samplerate: number;
+  channels: number;
+  samples: number;
+  duration_s: number;
+}
+
+export interface WavCompareLastSummary {
+  source: string;
+  ts: number;
+  a_label: string;
+  b_label: string;
+  overall_pass: boolean;
+  pass_rate: number;
+  offset_ms: number;
+  segment_count: number;
+}
+
+export interface WavCompareStatus {
+  a: WavCompareFileMeta | null;
+  b: WavCompareFileMeta | null;
+  params: WavcmpParams;
+  last: WavCompareLastSummary | null;
+}
+
+export interface WavCompareLastResult {
+  result: WavCompareResult;
+  a_label: string;
+  b_label: string;
+  source: string;
+  ts: number;
+}
+
+export interface WavCompareSegment {
+  index: number;
+  t_start_ms: number;
+  t_end_ms: number;
+  pass: boolean;
+  value: number;
+  sims: Record<string, number>;
+  error?: string;
+}
+
+export interface WavCompareChannelResult {
+  channel: number;
+  overall_pass: boolean;
+  segment_count: number;
+  passed_count: number;
+  pass_rate: number;
+  overall_value: number;
+  offset_ms: number;
+}
+
+export interface WavCompareResult {
+  algorithm: string;
+  threshold: number;
+  segment_ms: number;
+  align: boolean;
+  channel: string | number;
+  samplerate: number;
+  offset_ms: number;
+  overall_pass: boolean;
+  segment_count: number;
+  passed_count: number;
+  pass_rate: number;
+  overall_value: number;
+  overall_sims: Record<string, number>;
+  segments: WavCompareSegment[];
+  per_channel?: WavCompareChannelResult[];
+}
+
+export interface WavComparePoint {
+  t_ms: number;
+  min: number;
+  max: number;
+}
+
+export interface WavCompareSeries {
+  samplerate: number;
+  channel: string | number;
+  points: WavComparePoint[];
+}
+
 export const SERVICE_DISPLAY_NAMES: Record<string, string> = {
   startCommunication: 'CAN 통신 시작',
   stopCommunication: 'CAN 통신 종료',
@@ -517,7 +610,8 @@ export type WidgetType =
   | 'sysLogAnalysis'
   | 'canLogAnalysis'
   | 'sysLogUpload'
-  | 'serialMonitor';
+  | 'serialMonitor'
+  | 'wavCompare';
 
 export interface SignalBinding {
   message: string;

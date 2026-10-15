@@ -27,6 +27,7 @@ import { SysLogAnalysisWidget } from './SysLogAnalysisWidget';
 import { CanLogAnalysisWidget } from './CanLogAnalysisWidget';
 import SysLogUploadWidget from './SysLogUploadWidget';
 import { SerialMonitorWidget } from './SerialMonitorWidget';
+import { WavCompareWidget } from './WavCompareWidget';
 
 interface WidgetMeta {
   label: string;
@@ -179,6 +180,11 @@ export const WIDGET_REGISTRY: Record<WidgetType, WidgetMeta> = {
     label: '시리얼 모니터',
     component: SerialMonitorWidget,
     defaultSize: { w: 12, h: 14, minW: 4, minH: 3 },
+  },
+  wavCompare: {
+    label: '오디오 파형비교',
+    component: WavCompareWidget,
+    defaultSize: { w: 12, h: 16, minW: 4, minH: 3 },
   },
   powerControl: {
     label: '전원 컨트롤',
