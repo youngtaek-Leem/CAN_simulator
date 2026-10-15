@@ -220,7 +220,7 @@ export function PowerControlWidget({ config }: { config: WidgetConfig }) {
 
       <div className="power-section">
         <div className="power-section-title">실시간 전압 / 전류</div>
-        <div className="hint mono">
+        <div className="hint mono power-measured">
           {measured.voltage !== null && measured.current !== null
             ? `${measured.voltage.toFixed(3)}V / ${measured.current.toFixed(3)}A`
             : '—'}
